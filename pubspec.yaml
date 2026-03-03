@@ -1,0 +1,32 @@
+name: apprefer
+description: AppRefer SDK - First-party mobile attribution for iOS and Android.
+version: 0.1.0
+homepage: https://apprefer.com
+repository: https://github.com/Mambsy/apprefer-flutter-sdk
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.2.0
+  http: ^1.1.0
+  crypto: ^3.0.3
+  device_info_plus: ^10.0.0
+  package_info_plus: ^8.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.apprefer.sdk
+        pluginClass: AppReferPlugin
+      ios:
+        pluginClass: AppReferPlugin
