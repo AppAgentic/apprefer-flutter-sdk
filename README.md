@@ -33,6 +33,8 @@ iOS requires no additional setup — the SDK automatically uses Apple's AdServic
 
 ## Quick Start
 
+Get your **App ID** from the [AppRefer dashboard](https://apprefer.com) → Setup.
+
 ```dart
 import 'package:apprefer/apprefer.dart';
 
@@ -40,8 +42,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final attribution = await AppReferSDK.configure(AppReferConfig(
-    backendUrl: 'https://trk.yourdomain.com',
-    appId: 'your-app-id',
+    appId: 'YOUR_APP_ID',
   ));
 
   if (attribution != null) {
@@ -60,9 +61,8 @@ Call once at app launch. Resolves attribution on first install, returns cached r
 
 ```dart
 final attribution = await AppReferSDK.configure(AppReferConfig(
-  backendUrl: 'https://trk.yourdomain.com',
-  appId: 'your-app-id',
-  userId: null,       // optional — set RevenueCat user ID at init
+  appId: 'YOUR_APP_ID',
+  userId: null,       // optional — link RevenueCat user ID at init
   debug: false,       // optional — enable verbose logging
   logLevel: 1,        // optional — 0=none, 1=errors, 2=warnings, 3=verbose
 ));
@@ -115,6 +115,16 @@ attribution.fbclid        // Meta click ID (if present)
 attribution.gclid         // Google click ID (if present)
 attribution.ttclid        // TikTok click ID (if present)
 ```
+
+## Best Practices
+
+- **Call `configure()` once** — ideally in `main()` before `runApp()`. The SDK deduplicates automatically; subsequent calls return the cached result with no network overhead.
+- **Set the RevenueCat user ID early** — call `AppReferSDK.setUserId()` right after `Purchases.configure()` so purchase webhooks can be attributed to the correct device.
+- **Call `setAdvancedMatching()` after login/signup** — this sends hashed PII to improve Meta CAPI match rates. Only needs to be called once per user session.
+- **Don't track purchases with `trackEvent()`** — revenue events are handled automatically via RevenueCat webhooks. Use `trackEvent()` only for non-purchase milestones like `signup`, `tutorial_complete`, or `onboarding_finish`.
+- **Use the Debugger** — verify events are flowing correctly in the [AppRefer dashboard](https://apprefer.com) → Debugger before going to production.
+- **Android: add the Install Referrer dependency** — without it, Android attribution falls back to probabilistic matching instead of deterministic referrer-based matching.
+- **No IDFA required** — on iOS, the SDK uses Apple's AdServices framework and does not require ATT permission.
 
 ## Requirements
 

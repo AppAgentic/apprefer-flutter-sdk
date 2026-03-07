@@ -1,8 +1,5 @@
 class AppReferConfig {
-  /// Your tracking domain (e.g., https://trk.yourdomain.com)
-  final String backendUrl;
-
-  /// App identifier
+  /// App identifier from the AppRefer dashboard
   final String appId;
 
   /// Optional: set identity at init time
@@ -15,10 +12,12 @@ class AppReferConfig {
   final int logLevel;
 
   const AppReferConfig({
-    required this.backendUrl,
     required this.appId,
     this.userId,
     this.debug = false,
     this.logLevel = 1,
   });
+
+  /// The AppRefer backend URL.
+  static const String backendUrl = 'https://apprefer.com';
 }

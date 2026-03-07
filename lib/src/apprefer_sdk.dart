@@ -37,7 +37,7 @@ class AppReferSDK {
     sdk._storage = AppReferStorage();
     await sdk._storage.init();
     sdk._httpClient = AppReferHttpClient(
-      backendUrl: config.backendUrl,
+      backendUrl: AppReferConfig.backendUrl,
       appId: config.appId,
       logger: sdk._logger,
     );
