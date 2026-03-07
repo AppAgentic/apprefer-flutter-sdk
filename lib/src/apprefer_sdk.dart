@@ -38,7 +38,7 @@ class AppReferSDK {
     await sdk._storage.init();
     sdk._httpClient = AppReferHttpClient(
       backendUrl: AppReferConfig.backendUrl,
-      appId: config.appId,
+      apiKey: config.apiKey,
       logger: sdk._logger,
     );
     sdk._deviceInfo = AppReferDeviceInfo(logger: sdk._logger);
@@ -47,7 +47,7 @@ class AppReferSDK {
 
     _instance = sdk;
 
-    sdk._logger.info('AppReferSDK initialized with appId: ${config.appId}');
+    sdk._logger.info('AppReferSDK initialized');
 
     // Set user ID if provided at init time
     if (config.userId != null) {
@@ -101,7 +101,6 @@ class AppReferSDK {
     }
 
     final body = <String, dynamic>{
-      'app_id': _config.appId,
       'device_id': deviceId,
       'device_info': deviceInfoMap,
       'asa_token': asaToken,
@@ -167,7 +166,6 @@ class AppReferSDK {
 
     final deviceId = await sdk._storage.getDeviceId();
     final body = <String, dynamic>{
-      'app_id': sdk._config.appId,
       'device_id': deviceId,
       'event_name': eventName,
       if (properties != null) 'properties': properties,
@@ -213,7 +211,6 @@ class AppReferSDK {
 
     final deviceId = await sdk._storage.getDeviceId();
     final body = <String, dynamic>{
-      'app_id': sdk._config.appId,
       'device_id': deviceId,
       'event_name': '_advanced_matching',
       'advanced_matching': hashedData,

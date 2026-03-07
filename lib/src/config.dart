@@ -1,6 +1,6 @@
 class AppReferConfig {
-  /// App identifier from the AppRefer dashboard
-  final String appId;
+  /// SDK key from the AppRefer dashboard (starts with `pk_`)
+  final String apiKey;
 
   /// Optional: set identity at init time
   final String? userId;
@@ -12,7 +12,7 @@ class AppReferConfig {
   final int logLevel;
 
   const AppReferConfig({
-    required this.appId,
+    required this.apiKey,
     this.userId,
     this.debug = false,
     this.logLevel = 1,

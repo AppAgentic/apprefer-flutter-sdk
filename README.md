@@ -33,7 +33,7 @@ iOS requires no additional setup — the SDK automatically uses Apple's AdServic
 
 ## Quick Start
 
-Get your **App ID** from the [AppRefer dashboard](https://apprefer.com) → Setup.
+Get your **API Key** from the [AppRefer dashboard](https://apprefer.com) → Setup.
 
 ```dart
 import 'package:apprefer/apprefer.dart';
@@ -42,7 +42,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final attribution = await AppReferSDK.configure(AppReferConfig(
-    appId: 'YOUR_APP_ID',
+    apiKey: 'pk_...',
   ));
 
   if (attribution != null) {
@@ -61,7 +61,7 @@ Call once at app launch. Resolves attribution on first install, returns cached r
 
 ```dart
 final attribution = await AppReferSDK.configure(AppReferConfig(
-  appId: 'YOUR_APP_ID',
+  apiKey: 'pk_...',
   userId: null,       // optional — link RevenueCat user ID at init
   debug: false,       // optional — enable verbose logging
   logLevel: 1,        // optional — 0=none, 1=errors, 2=warnings, 3=verbose

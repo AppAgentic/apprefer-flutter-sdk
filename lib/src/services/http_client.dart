@@ -13,19 +13,19 @@ const Duration _requestTimeout = Duration(seconds: 10);
 
 class AppReferHttpClient {
   final String backendUrl;
-  final String appId;
+  final String apiKey;
   final AppReferLogger _logger;
 
   AppReferHttpClient({
     required this.backendUrl,
-    required this.appId,
+    required this.apiKey,
     required AppReferLogger logger,
   }) : _logger = logger;
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
         'X-SDK-Version': _sdkVersion,
-        'X-App-Id': appId,
+        'X-AppRefer-Key': apiKey,
       };
 
   Future<Map<String, dynamic>?> post(
