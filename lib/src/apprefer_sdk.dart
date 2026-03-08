@@ -124,7 +124,7 @@ class AppReferSDK {
     }
 
     // Update kill switch from server
-    final sdkEnabled = response['sdk_enabled'] as bool? ?? true;
+    final sdkEnabled = response['sdkEnabled'] as bool? ?? true;
     await _storage.setSdkEnabled(sdkEnabled);
     if (!sdkEnabled) {
       _logger.info('SDK disabled by server');

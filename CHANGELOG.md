@@ -1,3 +1,7 @@
+## 0.2.1
+
+- Fix kill switch response key (`sdk_enabled` → `sdkEnabled`)
+
 ## 0.2.0
 
 - Use SDK key as sole credential — `configure(apiKey:)` replaces `configure(appId:)`
