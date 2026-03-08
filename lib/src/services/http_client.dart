@@ -6,8 +6,9 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 
 import '../services/logger.dart';
+import '../version.dart';
 
-const String _sdkVersion = '0.1.0';
+const String _sdkVersion = appReferVersion;
 const int _maxRetries = 3;
 const Duration _requestTimeout = Duration(seconds: 10);
 

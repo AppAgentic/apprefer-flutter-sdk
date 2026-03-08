@@ -9,6 +9,7 @@ import 'services/hashing.dart';
 import 'services/http_client.dart';
 import 'services/logger.dart';
 import 'services/storage.dart';
+import 'version.dart';
 
 class AppReferSDK {
   static AppReferSDK? _instance;
@@ -108,7 +109,7 @@ class AppReferSDK {
       'ar_click_id': arClickId,
       'referrer_click_ts': referrerData?['referrerClickTimestampSeconds'],
       'referrer_install_ts': referrerData?['installBeginTimestampSeconds'],
-      'sdk_version': '0.1.0',
+      'sdk_version': appReferVersion,
       'is_debug': _config.debug,
       'customer_user_id': _storage.getUserId(),
     };
