@@ -51,7 +51,7 @@ class Attribution {
           ? Map<String, dynamic>.from(json['query_params'] as Map)
           : const {},
       createdAt: json['created_at'] != null
-          ? DateTime.parse(json['created_at'] as String)
+          ? (DateTime.tryParse(json['created_at'] as String) ?? DateTime.now())
           : DateTime.now(),
     );
   }

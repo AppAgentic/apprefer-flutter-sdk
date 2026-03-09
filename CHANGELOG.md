@@ -1,3 +1,9 @@
+## 0.3.0
+
+- Harden SDK to never crash host app
+- Remove throws from all public API methods — silently no-op if called before configure()
+- Fix DateTime.parse crash on malformed server timestamps
+
 ## 0.2.1
 
 - Fix kill switch response key (`sdk_enabled` → `sdkEnabled`)
