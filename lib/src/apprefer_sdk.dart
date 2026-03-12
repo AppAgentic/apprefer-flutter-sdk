@@ -83,15 +83,18 @@ class AppReferSDK {
     final deviceId = await _storage.getDeviceId();
     final deviceInfoMap = await _deviceInfo.getDeviceInfo();
 
-    // Get AdServices token (iOS only)
+    // Get AdServices token + IDFA (iOS only)
     String? asaToken;
+    String? idfa;
     if (Platform.isIOS) {
       asaToken = await _adServices.getAdServicesToken();
+      idfa = await _adServices.getIdfa();
     }
 
-    // Get Install Referrer (Android only)
+    // Get Install Referrer + GAID (Android only)
     Map<String, dynamic>? referrerData;
     String? arClickId;
+    String? gaid;
     if (Platform.isAndroid) {
       referrerData = await _installReferrer.getInstallReferrer();
       if (referrerData != null) {
@@ -99,12 +102,15 @@ class AppReferSDK {
           referrerData['installReferrer'] as String?,
         );
       }
+      gaid = await _adServices.getGaid();
     }
 
     final body = <String, dynamic>{
       'device_id': deviceId,
       'device_info': deviceInfoMap,
       'asa_token': asaToken,
+      'idfa': idfa,
+      'gaid': gaid,
       'install_referrer': referrerData?['installReferrer'],
       'ar_click_id': arClickId,
       'referrer_click_ts': referrerData?['referrerClickTimestampSeconds'],

@@ -29,4 +29,38 @@ class AppReferAdServices {
       return null;
     }
   }
+
+  /// Returns the IDFA on iOS if ATT is authorized.
+  /// Returns null on Android, if ATT is not authorized, or if tracking is disabled.
+  Future<String?> getIdfa() async {
+    if (!Platform.isIOS) return null;
+
+    try {
+      final idfa = await _channel.invokeMethod<String>('getIdfa');
+      if (idfa != null) {
+        _logger.info('IDFA retrieved');
+      }
+      return idfa;
+    } catch (e) {
+      _logger.debug('IDFA unavailable: $e');
+      return null;
+    }
+  }
+
+  /// Returns the Google Advertising ID on Android if tracking is not limited.
+  /// Returns null on iOS or if ad tracking is disabled.
+  Future<String?> getGaid() async {
+    if (!Platform.isAndroid) return null;
+
+    try {
+      final gaid = await _channel.invokeMethod<String>('getGaid');
+      if (gaid != null) {
+        _logger.info('GAID retrieved');
+      }
+      return gaid;
+    } catch (e) {
+      _logger.debug('GAID unavailable: $e');
+      return null;
+    }
+  }
 }
