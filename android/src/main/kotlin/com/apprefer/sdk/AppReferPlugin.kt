@@ -9,9 +9,9 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.Executors
 
 class AppReferPlugin : FlutterPlugin, MethodCallHandler {
     private lateinit var adServicesChannel: MethodChannel
@@ -44,6 +44,9 @@ class AppReferPlugin : FlutterPlugin, MethodCallHandler {
         }
     }
 
+    private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     private fun getGaid(result: Result) {
         val context = applicationContext
         if (context == null) {
@@ -52,16 +55,13 @@ class AppReferPlugin : FlutterPlugin, MethodCallHandler {
         }
 
         // Must be called off the main thread
-        CoroutineScope(Dispatchers.IO).launch {
+        executor.execute {
             try {
                 val adInfo = AdvertisingIdClient.getAdvertisingIdInfo(context)
-                if (adInfo.isLimitAdTrackingEnabled) {
-                    result.success(null)
-                } else {
-                    result.success(adInfo.id)
-                }
+                val gaid = if (adInfo.isLimitAdTrackingEnabled) null else adInfo.id
+                mainHandler.post { result.success(gaid) }
             } catch (e: Exception) {
-                result.success(null)
+                mainHandler.post { result.success(null) }
             }
         }
     }

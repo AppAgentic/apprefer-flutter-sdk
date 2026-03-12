@@ -11,7 +11,6 @@ Pod::Spec.new do |s|
   s.dependency 'Flutter'
   s.platform         = :ios, '15.0'
   s.swift_version    = '5.0'
-  s.frameworks       = 'AdServices'
-  s.weak_frameworks  = 'AdServices'
+  s.weak_frameworks  = 'AdServices', 'AdSupport', 'AppTrackingTransparency'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
 end
