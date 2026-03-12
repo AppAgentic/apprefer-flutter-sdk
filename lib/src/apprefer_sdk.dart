@@ -233,6 +233,19 @@ class AppReferSDK {
     }
     await sdk._storage.setUserId(userId);
     sdk._logger.info('User ID set: $userId');
+
+    // Sync userId to server so webhook userId fallback can find this attribution
+    if (!sdk._storage.isSdkEnabled()) return;
+    final deviceId = await sdk._storage.getDeviceId();
+    final body = <String, dynamic>{
+      'device_id': deviceId,
+      'event_name': '_set_user_id',
+      'properties': {'user_id': userId},
+    };
+    sdk._httpClient.post('/api/track/event', body).catchError((e) {
+      sdk._logger.error('Failed to sync userId to server: $e');
+      return null;
+    });
   }
 
   /// Get cached attribution result (instant, no network call).
