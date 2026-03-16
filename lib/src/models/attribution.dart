@@ -14,6 +14,7 @@ class Attribution {
   final String? gclid;
   final String? ttclid;
   final Map<String, dynamic> queryParams;
+  final Map<String, dynamic> customData;
   final DateTime createdAt;
 
   const Attribution({
@@ -30,6 +31,7 @@ class Attribution {
     this.gclid,
     this.ttclid,
     this.queryParams = const {},
+    this.customData = const {},
     required this.createdAt,
   });
 
@@ -47,8 +49,11 @@ class Attribution {
       fbclid: json['fbclid'] as String?,
       gclid: json['gclid'] as String?,
       ttclid: json['ttclid'] as String?,
-      queryParams: json['query_params'] is Map
-          ? Map<String, dynamic>.from(json['query_params'] as Map)
+      queryParams: (json['query_params'] ?? json['queryParams']) is Map
+          ? Map<String, dynamic>.from((json['query_params'] ?? json['queryParams']) as Map)
+          : const {},
+      customData: (json['custom_data'] ?? json['customData']) is Map
+          ? Map<String, dynamic>.from((json['custom_data'] ?? json['customData']) as Map)
           : const {},
       createdAt: json['created_at'] != null
           ? (DateTime.tryParse(json['created_at'] as String) ?? DateTime.now())
@@ -71,6 +76,7 @@ class Attribution {
       'gclid': gclid,
       'ttclid': ttclid,
       'query_params': queryParams,
+      'custom_data': customData,
       'created_at': createdAt.toIso8601String(),
     };
   }
