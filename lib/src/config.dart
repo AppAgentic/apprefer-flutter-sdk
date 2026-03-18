@@ -18,6 +18,9 @@ class AppReferConfig {
     this.logLevel = 1,
   });
 
-  /// The AppRefer backend URL.
-  static const String backendUrl = 'https://apprefer.com';
+  /// Primary tracking URL (low-latency edge).
+  static const String trackingUrl = 'https://trk.apprefer.com';
+
+  /// Fallback URL used when the tracking URL is unreachable.
+  static const String fallbackUrl = 'https://apprefer.com';
 }

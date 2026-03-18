@@ -1,3 +1,9 @@
+## 0.3.5
+
+- Use `trk.apprefer.com` as primary tracking endpoint for lower latency
+- Add automatic fallback to `apprefer.com` if tracking endpoint is unreachable
+- Tracking endpoints affected: `/api/track/configure`, `/api/track/event`
+
 ## 0.3.0
 
 - Harden SDK to never crash host app

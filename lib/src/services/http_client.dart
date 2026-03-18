@@ -13,12 +13,14 @@ const int _maxRetries = 3;
 const Duration _requestTimeout = Duration(seconds: 10);
 
 class AppReferHttpClient {
-  final String backendUrl;
+  final String baseUrl;
+  final String? fallbackUrl;
   final String apiKey;
   final AppReferLogger _logger;
 
   AppReferHttpClient({
-    required this.backendUrl,
+    required this.baseUrl,
+    this.fallbackUrl,
     required this.apiKey,
     required AppReferLogger logger,
   }) : _logger = logger;
@@ -33,7 +35,25 @@ class AppReferHttpClient {
     String path,
     Map<String, dynamic> body,
   ) async {
-    final url = Uri.parse('$backendUrl$path');
+    // Try primary URL with retries
+    final result = await _postWithRetries(baseUrl, path, body);
+    if (result != null) return result;
+
+    // Fallback: single attempt on fallback URL
+    if (fallbackUrl != null) {
+      _logger.debug('Falling back to $fallbackUrl for POST $path');
+      return _postOnce(fallbackUrl!, path, body);
+    }
+
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _postWithRetries(
+    String url,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    final target = Uri.parse('$url$path');
     for (int attempt = 0; attempt < _maxRetries; attempt++) {
       try {
         if (attempt > 0) {
@@ -41,9 +61,9 @@ class AppReferHttpClient {
           _logger.debug('POST $path retry $attempt after ${delay.inSeconds}s');
           await Future.delayed(delay);
         }
-        _logger.debug('POST $url');
+        _logger.debug('POST $target');
         final response = await http
-            .post(url, headers: _headers, body: jsonEncode(body))
+            .post(target, headers: _headers, body: jsonEncode(body))
             .timeout(_requestTimeout);
 
         if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -76,12 +96,59 @@ class AppReferHttpClient {
         return null; // Unknown error, don't retry
       }
     }
-    _logger.error('POST $path failed after $_maxRetries attempts');
+    _logger.error('POST $path failed after $_maxRetries attempts on $url');
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _postOnce(
+    String url,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    final target = Uri.parse('$url$path');
+    try {
+      _logger.debug('POST $target (fallback)');
+      final response = await http
+          .post(target, headers: _headers, body: jsonEncode(body))
+          .timeout(_requestTimeout);
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        if (response.body.isEmpty) return {};
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+
+      _logger.error(
+        'POST $path fallback failed: ${response.statusCode} ${response.body}',
+      );
+    } on SocketException catch (e) {
+      _logger.error('POST $path fallback network error: $e');
+    } on TimeoutException catch (_) {
+      _logger.error('POST $path fallback timeout');
+    } catch (e) {
+      _logger.error('POST $path fallback exception: $e');
+    }
     return null;
   }
 
   Future<Map<String, dynamic>?> get(String path) async {
-    final url = Uri.parse('$backendUrl$path');
+    // Try primary URL with retries
+    final result = await _getWithRetries(baseUrl, path);
+    if (result != null) return result;
+
+    // Fallback: single attempt on fallback URL
+    if (fallbackUrl != null) {
+      _logger.debug('Falling back to $fallbackUrl for GET $path');
+      return _getOnce(fallbackUrl!, path);
+    }
+
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _getWithRetries(
+    String url,
+    String path,
+  ) async {
+    final target = Uri.parse('$url$path');
     for (int attempt = 0; attempt < _maxRetries; attempt++) {
       try {
         if (attempt > 0) {
@@ -89,9 +156,9 @@ class AppReferHttpClient {
           _logger.debug('GET $path retry $attempt after ${delay.inSeconds}s');
           await Future.delayed(delay);
         }
-        _logger.debug('GET $url');
+        _logger.debug('GET $target');
         final response = await http
-            .get(url, headers: _headers)
+            .get(target, headers: _headers)
             .timeout(_requestTimeout);
 
         if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -122,7 +189,36 @@ class AppReferHttpClient {
         return null;
       }
     }
-    _logger.error('GET $path failed after $_maxRetries attempts');
+    _logger.error('GET $path failed after $_maxRetries attempts on $url');
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _getOnce(
+    String url,
+    String path,
+  ) async {
+    final target = Uri.parse('$url$path');
+    try {
+      _logger.debug('GET $target (fallback)');
+      final response = await http
+          .get(target, headers: _headers)
+          .timeout(_requestTimeout);
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        if (response.body.isEmpty) return {};
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+
+      _logger.error(
+        'GET $path fallback failed: ${response.statusCode} ${response.body}',
+      );
+    } on SocketException catch (e) {
+      _logger.error('GET $path fallback network error: $e');
+    } on TimeoutException catch (_) {
+      _logger.error('GET $path fallback timeout');
+    } catch (e) {
+      _logger.error('GET $path fallback exception: $e');
+    }
     return null;
   }
 }
