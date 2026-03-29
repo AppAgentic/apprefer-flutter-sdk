@@ -125,8 +125,8 @@ class AppReferSDK {
     final response = await _httpClient.post('/api/track/configure', body);
 
     if (response == null) {
-      _logger.error('Configure request failed');
-      await _storage.setMatchRequestAttempted(true);
+      _logger.error('Configure request failed — will retry on next launch');
+      // Do NOT set matchRequestAttempted so next launch retries attribution
       return null;
     }
 
