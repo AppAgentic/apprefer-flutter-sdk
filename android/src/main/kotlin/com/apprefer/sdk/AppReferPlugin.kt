@@ -81,62 +81,90 @@ class AppReferPlugin : FlutterPlugin, MethodCallHandler {
         val maxRetries = 3
         val timeoutMs = 5000L
         val retryDelayMs = 1000L
+        // Track current client for cleanup on timeout
+        var activeClient: InstallReferrerClient? = null
+        // Track retry runnable for cancellation on timeout/completion
+        var pendingRetryRunnable: Runnable? = null
 
         fun completeOnce(data: Map<String, Any?>?) {
             if (completed.compareAndSet(false, true)) {
+                // Cancel any pending retry
+                pendingRetryRunnable?.let { handler.removeCallbacks(it) }
+                // Close active client if still connected
+                try { activeClient?.endConnection() } catch (_: Exception) {}
+                activeClient = null
                 handler.post { result.success(data) }
             }
         }
 
         fun tryConnect() {
-            val referrerClient = InstallReferrerClient.newBuilder(context).build()
-            referrerClient.startConnection(object : InstallReferrerStateListener {
-                override fun onInstallReferrerSetupFinished(responseCode: Int) {
-                    Log.d(TAG, "Install referrer response code: $responseCode (attempt ${retryCount + 1}/$maxRetries)")
-                    when (responseCode) {
-                        InstallReferrerClient.InstallReferrerResponse.OK -> {
-                            try {
-                                val details = referrerClient.installReferrer
-                                completeOnce(mapOf(
-                                    "installReferrer" to details.installReferrer,
-                                    "referrerClickTimestampSeconds" to details.referrerClickTimestampSeconds,
-                                    "installBeginTimestampSeconds" to details.installBeginTimestampSeconds,
-                                    "referrerClickTimestampServerSeconds" to details.referrerClickTimestampServerSeconds,
-                                    "installBeginTimestampServerSeconds" to details.installBeginTimestampServerSeconds,
-                                    "installVersion" to details.installVersion,
-                                    "googlePlayInstantParam" to details.googlePlayInstantParam,
-                                ))
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Failed to read referrer details", e)
-                                completeOnce(null)
-                            } finally {
+            if (completed.get()) return // Already completed (timeout or prior success)
+            try {
+                val referrerClient = InstallReferrerClient.newBuilder(context).build()
+                activeClient = referrerClient
+                referrerClient.startConnection(object : InstallReferrerStateListener {
+                    override fun onInstallReferrerSetupFinished(responseCode: Int) {
+                        Log.d(TAG, "Install referrer response code: $responseCode (attempt ${retryCount + 1}/$maxRetries)")
+                        when (responseCode) {
+                            InstallReferrerClient.InstallReferrerResponse.OK -> {
+                                try {
+                                    val details = referrerClient.installReferrer
+                                    completeOnce(mapOf(
+                                        "installReferrer" to details.installReferrer,
+                                        "referrerClickTimestampSeconds" to details.referrerClickTimestampSeconds,
+                                        "installBeginTimestampSeconds" to details.installBeginTimestampSeconds,
+                                        "referrerClickTimestampServerSeconds" to details.referrerClickTimestampServerSeconds,
+                                        "installBeginTimestampServerSeconds" to details.installBeginTimestampServerSeconds,
+                                        "installVersion" to details.installVersion,
+                                        "googlePlayInstantParam" to details.googlePlayInstantParam,
+                                    ))
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed to read referrer details", e)
+                                    completeOnce(null)
+                                }
+                            }
+                            InstallReferrerClient.InstallReferrerResponse.SERVICE_UNAVAILABLE,
+                            InstallReferrerClient.InstallReferrerResponse.SERVICE_DISCONNECTED -> {
                                 try { referrerClient.endConnection() } catch (_: Exception) {}
+                                activeClient = null
+                                retryCount++
+                                if (retryCount < maxRetries && !completed.get()) {
+                                    Log.d(TAG, "Retrying install referrer in ${retryDelayMs}ms (attempt ${retryCount + 1}/$maxRetries)")
+                                    val retryRunnable = Runnable { tryConnect() }
+                                    pendingRetryRunnable = retryRunnable
+                                    handler.postDelayed(retryRunnable, retryDelayMs)
+                                } else {
+                                    Log.w(TAG, "Install referrer exhausted $maxRetries retries, returning null")
+                                    completeOnce(null)
+                                }
                             }
-                        }
-                        InstallReferrerClient.InstallReferrerResponse.SERVICE_UNAVAILABLE,
-                        InstallReferrerClient.InstallReferrerResponse.SERVICE_DISCONNECTED -> {
-                            try { referrerClient.endConnection() } catch (_: Exception) {}
-                            retryCount++
-                            if (retryCount < maxRetries && !completed.get()) {
-                                Log.d(TAG, "Retrying install referrer in ${retryDelayMs}ms (attempt ${retryCount + 1}/$maxRetries)")
-                                handler.postDelayed({ tryConnect() }, retryDelayMs)
-                            } else {
-                                Log.w(TAG, "Install referrer exhausted $maxRetries retries, returning null")
+                            else -> {
+                                Log.w(TAG, "Install referrer failed with response code: $responseCode")
                                 completeOnce(null)
                             }
-                        }
-                        else -> {
-                            Log.w(TAG, "Install referrer failed with response code: $responseCode")
-                            try { referrerClient.endConnection() } catch (_: Exception) {}
-                            completeOnce(null)
                         }
                     }
-                }
 
-                override fun onInstallReferrerServiceDisconnected() {
-                    // Retry is handled by response code handler above
-                }
-            })
+                    override fun onInstallReferrerServiceDisconnected() {
+                        // Service disconnected — retry if we have attempts left
+                        Log.d(TAG, "Install referrer service disconnected")
+                        try { referrerClient.endConnection() } catch (_: Exception) {}
+                        activeClient = null
+                        retryCount++
+                        if (retryCount < maxRetries && !completed.get()) {
+                            val retryRunnable = Runnable { tryConnect() }
+                            pendingRetryRunnable = retryRunnable
+                            handler.postDelayed(retryRunnable, retryDelayMs)
+                        }
+                        // If max retries exhausted, the timeout guard will complete
+                    }
+                })
+            } catch (e: Exception) {
+                // Client creation or startConnection threw synchronously
+                // (e.g., Play Services missing, SecurityException)
+                Log.e(TAG, "Install referrer client error", e)
+                completeOnce(null)
+            }
         }
 
         // Start first attempt
