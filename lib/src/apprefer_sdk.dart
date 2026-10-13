@@ -8,6 +8,7 @@ import 'services/device_info.dart';
 import 'services/hashing.dart';
 import 'services/http_client.dart';
 import 'services/logger.dart';
+import 'services/registry.dart';
 import 'services/storage.dart';
 import 'version.dart';
 
@@ -31,6 +32,7 @@ class AppReferSDK {
   static Future<Attribution?> configure(AppReferConfig config) async {
     final sdk = AppReferSDK._();
     sdk._config = config;
+    AppReferRegistry.apiKey = config.apiKey;
     sdk._logger = AppReferLogger(
       debug: config.debug,
       logLevel: config.logLevel,

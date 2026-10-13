@@ -2,8 +2,8 @@
 
 First-party mobile attribution for Flutter apps. Captures click IDs, resolves attribution, and forwards conversions to ad networks — without third-party SDKs.
 
-[![Flutter 3.0+](https://img.shields.io/badge/Flutter-3.0+-blue.svg)](https://flutter.dev)
-[![Dart 3.0+](https://img.shields.io/badge/Dart-3.0+-blue.svg)](https://dart.dev)
+[![Flutter 3.41+](https://img.shields.io/badge/Flutter-3.41+-blue.svg)](https://flutter.dev)
+[![Dart 3.11+](https://img.shields.io/badge/Dart-3.11+-blue.svg)](https://dart.dev)
 [![iOS & Android](https://img.shields.io/badge/Platforms-iOS%20%26%20Android-lightgrey.svg)]()
 
 ## Installation
@@ -127,6 +127,112 @@ attribution.gclid         // Google click ID (if present)
 attribution.ttclid        // TikTok click ID (if present)
 ```
 
+## Subscriptions (AppRefer Billing)
+
+AppRefer Billing replaces RevenueCat for App Store and Google Play subscriptions and one-time purchases. The official `in_app_purchase` plugins handle the purchase (StoreKit 2 on iOS, Play Billing on Android), AppRefer verifies it with Apple or Google, keeps the entitlements and sends the conversion to your ad networks from the same attribution data. Google purchases are acknowledged by AppRefer's server.
+
+Billing must be enabled for the app in AppRefer (`billing.mode` `shadow` or `primary`, with the bundle id / package name and products configured). On iOS it needs iOS 15+ (StoreKit 2).
+
+### Set up
+
+```dart
+import 'package:apprefer/apprefer.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  AppReferSDK.configure(AppReferConfig(apiKey: 'pk_live_...'));
+  // Uses the same SDK key. Starts the store purchase listener right away.
+  await AppReferBilling.configure(
+    appUserId: null, // null = anonymous "$ARAnon:<UUID>"
+    entitlementsByProduct: {
+      'pro_monthly': ['premium'],
+      'pro_yearly': ['premium'],
+    },
+    consumableProductIds: {'coins_100'}, // Google Play consumables (iOS reads the type from StoreKit)
+  );
+  runApp(MyApp());
+}
+```
+
+`entitlementsByProduct` is only used when AppRefer can't be reached (see Outage safety). Unlisted products fall back to the mapping the server last returned, then `defaultEntitlement` (default `premium`, the same as the server).
+
+Don't call `completePurchase` yourself, and don't call `InAppPurchase.instance.restorePurchases()` directly: AppRefer Billing completes each purchase once AppRefer has recorded it. Listening to `InAppPurchase.instance.purchaseStream` for UI is fine.
+
+### Products, purchase, restore
+
+```dart
+final products = await AppReferBilling.products(['pro_monthly', 'pro_yearly']); // ProductDetails, in this order
+
+final result = await AppReferBilling.purchase(products[1]);
+switch (result.outcome) {
+  case PurchaseOutcome.purchased:     unlock(result.customerInfo);
+  case PurchaseOutcome.userCancelled: break;
+  case PurchaseOutcome.pending:       showPendingNote(); // arrives later via customerInfoStream
+}
+
+final info = await AppReferBilling.restorePurchases(); // AppStore.sync() on iOS + sends every owned purchase
+```
+
+`purchase` sets the store account identifier to the customer's AppRefer account token (Apple `appAccountToken`, Google `obfuscatedAccountId`), sends the purchase to AppRefer (the StoreKit 2 signed transaction on iOS, the purchase token on Android) and only then completes it with the store; Google consumables are consumed at that point. On Google Play a subscription returns one `ProductDetails` per base plan / offer. Offers: `purchase(product, promotionalOffer: SK2PromotionalOffer(...))` or `winBackOfferId:` on iOS, `changeSubscriptionParam: ChangeSubscriptionParam(...)` for Google upgrades and downgrades.
+
+### Entitlements
+
+```dart
+final info = await AppReferBilling.customerInfo(); // cached for 5 minutes, then fetched
+final fresh = await AppReferBilling.customerInfo(fetchPolicy: FetchPolicy.fetchCurrent);
+if (info.entitlements['premium']?.isActive == true) { /* unlocked */ }
+
+AppReferBilling.customerInfoStream.listen(update);       // replays the latest value
+AppReferBilling.addCustomerInfoUpdateListener(update);   // or a RevenueCat-style listener
+```
+
+`customerInfo` never throws. `info.source` tells you where the answer came from: `CustomerInfoSource.server`, `.cache` or `.localFallback`.
+
+### Users
+
+```dart
+await AppReferBilling.logIn('user_123');  // moves purchases made while anonymous to this user
+await AppReferBilling.logOut();           // new anonymous id
+await AppReferBilling.setAttributes({r'$email': 'a@b.com', r'$displayName': 'Alex'}); // sent with the next call
+await AppReferBilling.setEmail('a@b.com'); // also setDisplayName / setPhoneNumber
+```
+
+The AppRefer attribution device id is sent automatically as `appreferId`, so purchases are matched to the ad click without `setUserId`. The anonymous id is kept in the app's preferences, so it is reset by a reinstall (the iOS SDK keeps it in the Keychain); store restores still find the purchases.
+
+### Outage safety
+
+A paying user is never locked out because AppRefer is down:
+
+- If AppRefer can't be reached or returns an error, entitlements come from the store's own purchases (iOS: StoreKit 2's verified transactions, not revoked, not expired, not upgraded away; Android: the purchases Play reports as owned), mapped through `entitlementsByProduct`, merged with the last server answer for the same user.
+- A purchase AppRefer can't accept right now is saved to a retry queue on disk and then completed, so the store doesn't redeliver it forever and Google doesn't refund it for being unacknowledged. The queue is resent on the next launch, on foreground and after the next successful call (up to 50 attempts or 90 days). App Store Server Notifications and Google RTDN also reach AppRefer on their own.
+- A purchase with nothing AppRefer can verify is completed without granting access.
+
+### Migrating from RevenueCat
+
+| RevenueCat (`purchases_flutter`) | AppRefer Billing |
+|---|---|
+| `Purchases.configure(PurchasesConfiguration(key)..appUserID = id)` | `AppReferBilling.configure(appUserId: id, entitlementsByProduct: {...})` (after `AppReferSDK.configure`) |
+| `Purchases.getOfferings()` / `StoreProduct` | `AppReferBilling.products(['id', ...])` → `ProductDetails` |
+| `Purchases.purchaseStoreProduct(product)` / `purchasePackage` → `CustomerInfo` | `AppReferBilling.purchase(product)` → `PurchaseResult` (`.customerInfo`, `.purchaseDetails`, `.userCancelled`, `.outcome`) |
+| `PurchasesErrorCode.purchaseCancelledError` (thrown) | `result.userCancelled` (not thrown) |
+| `purchaseDiscountedProduct(product, promotionalOffer)` | `purchase(product, promotionalOffer: SK2PromotionalOffer(...))` |
+| `GoogleProductChangeInfo` | `purchase(product, changeSubscriptionParam: ChangeSubscriptionParam(...))` |
+| `Purchases.restorePurchases()` | `AppReferBilling.restorePurchases()` |
+| `Purchases.getCustomerInfo()` | `AppReferBilling.customerInfo(fetchPolicy: FetchPolicy.cachedOrFetched / .fetchCurrent)` |
+| `customerInfo.entitlements.all['premium']?.isActive` | `customerInfo.entitlements['premium']?.isActive` (`.all` also works) |
+| `customerInfo.entitlements.active` / `.activeSubscriptions` | same |
+| `EntitlementInfo.expirationDate / willRenew / periodType / productIdentifier` | same names (`expirationDate` is a `DateTime?`) |
+| `Purchases.addCustomerInfoUpdateListener(fn)` | `AppReferBilling.addCustomerInfoUpdateListener(fn)` or `customerInfoStream` |
+| `Purchases.logIn(id)` / `logOut()` | `AppReferBilling.logIn(id)` / `logOut()` |
+| `Purchases.appUserID` / `isAnonymous` | `await AppReferBilling.appUserId` / `isAnonymous` |
+| `$RCAnonymousID:<hex>` | `$ARAnon:<UUID>` |
+| `Purchases.setEmail` / `setDisplayName` / `setPhoneNumber` / `setAttributes` | `AppReferBilling.setEmail` / `setDisplayName` / `setPhoneNumber` / `setAttributes` |
+| `AppReferSDK.setUserId(rcUserId)` | not needed: the device id is linked automatically |
+
+If a file imports both packages during the switch, hide the clashing names (`import 'package:purchases_flutter/purchases_flutter.dart' hide CustomerInfo, EntitlementInfo;`) or use `AppReferCustomerInfo` / `AppReferEntitlementInfo`.
+
+Testing: use a sandbox Apple ID or a Play license tester. Transactions from an Xcode StoreKit configuration file are signed with a local certificate that AppRefer's server rejects; the SDK still unlocks them through the local fallback.
+
 ## Best Practices
 
 - **Call `configure()` once** — ideally in `main()` before `runApp()`. The SDK deduplicates automatically; subsequent calls return the cached result with no network overhead.
@@ -140,9 +246,9 @@ attribution.ttclid        // TikTok click ID (if present)
 
 ## Requirements
 
-- Flutter 3.0+
-- Dart 3.0+
-- iOS 14.0+ / Android API 21+
+- Flutter 3.41+
+- Dart 3.11+
+- iOS 14.0+ / Android API 21+ (AppRefer Billing: iOS 15.0+)
 
 ## License
 
