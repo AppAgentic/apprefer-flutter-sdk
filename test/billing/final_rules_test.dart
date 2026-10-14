@@ -143,7 +143,7 @@ void main() {
       expect(storedIntents(h.prefs), isEmpty);
     });
 
-    test('a renewal on the stream does not take a waiting purchase', () async {
+    test('a renewal settles a waiting purchase without its intent', () async {
       final h = await Harness.create(
         server: FakeServer()..online(),
         appUserId: 'u1',
@@ -157,8 +157,10 @@ void main() {
         const StorePurchaseOptions(),
       );
       expect(result.outcome, PurchaseOutcome.purchased);
+      await pumpEventQueue();
       expect(h.store.completed, containsAll(['t2', 't3']));
-      // The waiter was resolved by t3, which used up the intent.
+      // t2 settled the waiter without the intent; t3, the new purchase,
+      // matched and used it up.
       expect(storedIntents(h.prefs), isEmpty);
     });
   });

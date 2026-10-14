@@ -444,10 +444,11 @@ class BillingEngine {
         );
       case StorePurchaseStatus.purchased:
       case StorePurchaseStatus.restored:
-        // A renewal is not the purchase a waiting `purchase()` call started.
-        final waiter = purchase.isRenewal
-            ? null
-            : _waiters.remove(purchase.productId);
+        // Settles a waiting `purchase()` call even for a renewal or chain
+        // transaction (an App Store upgrade or crossgrade keeps its original
+        // transaction id); [process] then ignores the intent for a renewal,
+        // which neither uses nor removes it.
+        final waiter = _waiters.remove(purchase.productId);
         final info = await process(
           purchase,
           appUserId: waiter?.appUserId,
@@ -487,7 +488,8 @@ class BillingEngine {
   /// user. While saved intents are lost (see [PurchaseIntentStore]) an
   /// untagged new purchase with no intent is left open with the store for up
   /// to 48 hours before it goes to the current user. Never sent as a restore.
-  /// [intent] is ignored for a renewal: it is neither used nor removed.
+  /// [intent] is ignored for a renewal: it is neither used nor removed, though
+  /// the renewal still settles the purchase sheet that handed it in.
   Future<AppReferCustomerInfo> process(
     StorePurchase purchase, {
     String? appUserId,

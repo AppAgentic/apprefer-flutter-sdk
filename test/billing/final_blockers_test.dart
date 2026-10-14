@@ -130,30 +130,45 @@ void main() {
       },
     );
 
-    test('a renewal on the stream leaves the waiter and its intent', () async {
-      final h = await Harness.create(
-        server: FakeServer()..online(),
-        appUserId: 'u1',
-      );
-      h.engine.listen();
-      var renewalSeen = false;
-      h.store.onBuy = (product, _) {
-        h.store.updates.add([
+    test(
+      'a renewal on the open sheet settles it but keeps the intent',
+      () async {
+        final h = await Harness.create(
+          server: FakeServer()..online(),
+          appUserId: 'u1',
+        );
+        // An App Store crossgrade: a new transaction on the same chain.
+        h.store.onBuy = (product, _) => h.store.updates.add([
           h.store.applePurchase('t2', product.id, originalTransactionId: 't1'),
         ]);
-      };
-      final pending = h.engine
-          .purchase(FakeProduct('pro_yearly'), const StorePurchaseOptions())
-          .whenComplete(() => renewalSeen = true);
-      await pumpEventQueue();
-      expect(h.store.completed, contains('t2'));
-      expect(renewalSeen, isFalse, reason: 'the waiter is still open');
-      expect(storedIntents(h.prefs), hasLength(1));
+        final result = await h.engine.purchase(
+          FakeProduct('pro_yearly'),
+          const StorePurchaseOptions(),
+        );
+        expect(result.outcome, PurchaseOutcome.purchased);
+        expect(h.store.completed, contains('t2'));
+        expect(sentUser(h), 'u1', reason: 'the initiator, not the intent');
+        final stored = storedIntents(h.prefs);
+        expect(stored, hasLength(1), reason: 'neither used nor dropped');
+        expect(stored.single['appUserId'], 'u1');
 
-      h.store.updates.add([h.store.applePurchase('t3', 'pro_yearly')]);
-      expect((await pending).outcome, PurchaseOutcome.purchased);
-      expect(storedIntents(h.prefs), isEmpty);
-    });
+        // Owner comes from the initiator even when the intent names another
+        // user: the intent is never consulted for a renewal.
+        await saveIntents(h, [intent('u7')]);
+        h.store.onBuy = (product, _) => h.store.updates.add([
+          h.store.applePurchase('t4', product.id, originalTransactionId: 't1'),
+        ]);
+        await h.engine.purchase(
+          FakeProduct('pro_yearly'),
+          const StorePurchaseOptions(),
+        );
+        expect(sentUser(h), 'u1');
+        expect(
+          storedIntents(h.prefs).map((e) => e['appUserId']),
+          contains('u7'),
+        );
+      },
+    );
   });
 
   group('2. intents removed only on definitive store outcomes', () {
