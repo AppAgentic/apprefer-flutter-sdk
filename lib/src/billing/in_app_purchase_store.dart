@@ -86,6 +86,7 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
             (status == StorePurchaseStatus.purchased ||
                 status == StorePurchaseStatus.restored),
         errorMessage: details.error?.message,
+        errorCode: details.error?.code,
         accountToken: _nonEmpty(
           details.billingClientPurchase.obfuscatedAccountId,
         ),
@@ -116,6 +117,7 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
       kind: json?.kind,
       needsCompletion: details.pendingCompletePurchase,
       errorMessage: details.error?.message,
+      errorCode: details.error?.code,
       accountToken: json?.appAccountToken,
       originalTransactionId: json?.originalTransactionId,
       purchasedAt: json?.purchaseDate,

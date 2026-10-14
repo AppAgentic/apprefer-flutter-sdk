@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:in_app_purchase/in_app_purchase.dart';
 
 import 'customer_info.dart';
@@ -32,6 +33,10 @@ class StorePurchase {
   /// unacknowledged for 3 days). Apple: same as [needsCompletion].
   final bool needsAcknowledgement;
   final String? errorMessage;
+
+  /// The store's error code for a failed purchase (`IAPError.code`), when
+  /// it gave one.
+  final String? errorCode;
 
   /// Apple `appAccountToken` / Google `obfuscatedAccountId` the purchase was
   /// made with, when the store reports one.
@@ -68,6 +73,7 @@ class StorePurchase {
     this.needsCompletion = true,
     bool? needsAcknowledgement,
     this.errorMessage,
+    this.errorCode,
     this.accountToken,
     this.originalTransactionId,
     this.orderId,
@@ -127,6 +133,64 @@ class StorePurchase {
         return null;
     }
   }
+}
+
+/// Store failures that mean no purchase can come of the attempt: the user
+/// cancelled, or the store will not sell this product to this user now.
+/// Apple StoreKit 2 errors arrive as the case name (`productUnavailable`),
+/// Google as the `BillingResponse` name (`BillingResponse.itemUnavailable`).
+const _definitiveStoreFailures = {
+  // Apple: Product.PurchaseError / StoreKitError (and StoreKit 1 equivalents).
+  'usercancelled',
+  'paymentcancelled',
+  'productunavailable',
+  'storeproductnotavailable',
+  'purchasenotallowed',
+  'paymentnotallowed',
+  'ineligibleforoffer',
+  'invalidofferidentifier',
+  'invalidofferprice',
+  'invalidoffersignature',
+  'missingofferparameters',
+  'invalidquantity',
+  'notavailableinstorefront',
+  'notentitled',
+  // Google Play BillingResponse.
+  'usercanceled',
+  'itemunavailable',
+  'developererror',
+  'featurenotsupported',
+  'billingunavailable',
+  'itemalreadyowned',
+};
+
+/// Whether a failed purchase attempt ended for good, so the saved purchase
+/// intent can go. [failure] is a [StorePurchase] update with an error, or
+/// what starting the purchase threw. Network and service errors, generic or
+/// unknown errors and anything unrecognised are not definitive: the purchase
+/// may still complete, so its intent is kept.
+bool isDefinitiveStoreFailure(Object? failure) {
+  final codes = switch (failure) {
+    StorePurchase p => [p.errorCode, p.errorMessage],
+    PlatformException e => [e.code, e.message],
+    IAPError e => [e.code, e.message],
+    String s => [s],
+    _ => const <String?>[],
+  };
+  for (final code in codes) {
+    if (code == null) continue;
+    // `BillingResponse.itemUnavailable` -> `itemunavailable`,
+    // `ITEM_UNAVAILABLE` -> `itemunavailable`.
+    var name = code
+        .substring(code.lastIndexOf('.') + 1)
+        .toLowerCase()
+        .replaceAll(RegExp('[^a-z0-9]'), '');
+    for (final prefix in const ['skerror', 'storekit']) {
+      if (name.startsWith(prefix)) name = name.substring(prefix.length);
+    }
+    if (_definitiveStoreFailures.contains(name)) return true;
+  }
+  return false;
 }
 
 /// A store-verified purchase that currently grants access, used for the

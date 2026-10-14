@@ -431,7 +431,11 @@ class BillingEngine {
       case StorePurchaseStatus.error:
         if (purchase.needsCompletion) await _complete(purchase);
         final waiter = _waiters.remove(purchase.productId);
-        await _dropIntent(waiter?.intent);
+        // Only a definitive failure ends the purchase; after a network or
+        // service error it may still complete, and the intent is needed.
+        if (isDefinitiveStoreFailure(purchase)) {
+          await _dropIntent(waiter?.intent);
+        }
         waiter?.completer.completeError(
           AppReferBillingException(
             AppReferBillingErrorCode.store,
@@ -483,6 +487,7 @@ class BillingEngine {
   /// user. While saved intents are lost (see [PurchaseIntentStore]) an
   /// untagged new purchase with no intent is left open with the store for up
   /// to 48 hours before it goes to the current user. Never sent as a restore.
+  /// [intent] is ignored for a renewal: it is neither used nor removed.
   Future<AppReferCustomerInfo> process(
     StorePurchase purchase, {
     String? appUserId,
@@ -503,8 +508,11 @@ class BillingEngine {
   Future<AppReferCustomerInfo> _process(
     StorePurchase purchase,
     String? initiator,
-    PurchaseIntent? waiterIntent,
+    PurchaseIntent? suppliedIntent,
   ) async {
+    // A renewal never matches or uses up a saved intent, even one handed in
+    // by the purchase sheet that is waiting.
+    final waiterIntent = purchase.isRenewal ? null : suppliedIntent;
     final fields = purchase.storeFields;
     if (fields == null || purchase.id.isEmpty) {
       _logger.error(
@@ -631,23 +639,30 @@ class BillingEngine {
 
   /// The saved intent for a new purchase delivered without its `purchase()`
   /// call (Ask to Buy approved later, the app restarted, or a user switch
-  /// meanwhile): the one with the purchase's account token; for an untagged
-  /// purchase, the oldest for the same product, with or without a token.
+  /// meanwhile): the oldest with the purchase's account token; for an
+  /// untagged purchase, the oldest for the same product, with or without a
+  /// token. Oldest is the earliest `startedAt`, never the stored order.
   /// Never called for a renewal. Throws [AppReferBillingErrorCode.storage]
   /// when the intents can't be read.
   Future<PurchaseIntent?> _intentFor(StorePurchase purchase) async {
     final intents = await _intents.read();
     final token = purchase.accountToken?.toLowerCase();
     if (token != null) {
-      for (final i in intents) {
-        if (i.accountToken?.toLowerCase() == token) return i;
-      }
-      return null;
+      return _oldest(
+        intents.where((i) => i.accountToken?.toLowerCase() == token),
+      );
     }
-    final sameProduct =
-        intents.where((i) => i.productId == purchase.productId).toList()
-          ..sort((a, b) => a.startedAt.compareTo(b.startedAt));
-    return sameProduct.isEmpty ? null : sameProduct.first;
+    return _oldest(intents.where((i) => i.productId == purchase.productId));
+  }
+
+  /// The intent with the earliest `startedAt`, whatever order they are
+  /// stored in; on a tie, the first stored.
+  static PurchaseIntent? _oldest(Iterable<PurchaseIntent> intents) {
+    PurchaseIntent? oldest;
+    for (final i in intents) {
+      if (oldest == null || i.startedAt.isBefore(oldest.startedAt)) oldest = i;
+    }
+    return oldest;
   }
 
   Future<void> _releaseHold(StorePurchase purchase) async {
@@ -969,7 +984,9 @@ class BillingEngine {
       if (identical(_waiters[product.id]?.completer, waiter)) {
         _waiters.remove(product.id);
       }
-      await _dropIntent(intent);
+      // Kept unless the store said no purchase can come of it: after an
+      // ambiguous failure the purchase may still be delivered.
+      if (isDefinitiveStoreFailure(e)) await _dropIntent(intent);
       if (e is AppReferBillingException) rethrow;
       throw AppReferBillingException(
         AppReferBillingErrorCode.store,
