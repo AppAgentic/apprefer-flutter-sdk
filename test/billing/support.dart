@@ -160,6 +160,9 @@ class FakeStore implements BillingStoreAdapter {
   @override
   Future<List<StorePurchase>> restore() async => restoreList;
 
+  @override
+  Future<List<StorePurchase>> migrationPurchases() async => restoreList;
+
   StorePurchase applePurchase(
     String id,
     String productId, {

@@ -172,11 +172,13 @@ class AppReferBilling {
       engine.listen();
       _engine = engine;
       if (observeLifecycle) _observeLifecycle(engine);
-      unawaited(
-        engine.start().catchError((Object e) {
-          logger.error('AppReferBilling start failed: $e');
-        }),
-      );
+      Timer.run(() {
+        unawaited(
+          engine.start().catchError((Object e) {
+            logger.error('AppReferBilling start failed: $e');
+          }),
+        );
+      });
     }();
     _configuring = done.catchError((Object e) {
       logger.error('AppReferBilling.configure failed: $e');

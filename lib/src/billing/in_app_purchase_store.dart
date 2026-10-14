@@ -253,6 +253,45 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
   }
 
   @override
+  Future<List<StorePurchase>> migrationPurchases() async {
+    if (!_isApple) return _googleOwned();
+    final transactions = await SK2Transaction.transactions();
+    final now = DateTime.now();
+    final out = <StorePurchase>[];
+    for (final t in transactions) {
+      final json = AppleTransactionJson.parse(t.jsonRepresentation);
+      if (json == null) {
+        throw const AppReferBillingException(
+          AppReferBillingErrorCode.store,
+          message: 'Could not read a StoreKit transaction',
+        );
+      }
+      final entitlement = json.toEntitlement(
+        fallbackProductId: t.productId,
+        fallbackOriginalId: t.originalId,
+        transactionId: t.id,
+        fallbackAccountToken: _nonEmpty(t.appAccountToken),
+      );
+      if (!entitlement.grantsAccessAt(now)) continue;
+      out.add(
+        StorePurchase(
+          id: t.id,
+          productId: t.productId,
+          store: BillingStore.appStore,
+          status: StorePurchaseStatus.restored,
+          signedTransaction: t.receiptData,
+          kind: json.kind,
+          accountToken: _nonEmpty(t.appAccountToken),
+          originalTransactionId: _nonEmpty(t.originalId),
+          purchasedAt: json.purchaseDate,
+          needsCompletion: false,
+        ),
+      );
+    }
+    return out;
+  }
+
+  @override
   Future<List<StorePurchase>> restore() async {
     if (!_isApple) return _googleOwned();
 

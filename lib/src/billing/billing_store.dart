@@ -280,6 +280,9 @@ abstract class BillingStoreAdapter {
   /// AppRefer needs to verify it. Throws rather than returning an incomplete
   /// list (e.g. when the App Store's answer did not arrive in time).
   Future<List<StorePurchase>> restore();
+
+  /// Read-only enumeration; no sync UI or purchase-stream redelivery.
+  Future<List<StorePurchase>> migrationPurchases();
 }
 
 /// Device-side entitlement logic: the outage fallback.

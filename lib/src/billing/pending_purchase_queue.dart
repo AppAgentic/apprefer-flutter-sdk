@@ -17,6 +17,7 @@ class PendingPurchase {
 
   /// Queued by Restore Purchases, so the retry is still sent as a restore.
   final bool restore;
+  final bool migrationOnly;
 
   const PendingPurchase({
     required this.transactionId,
@@ -27,6 +28,7 @@ class PendingPurchase {
     required this.enqueuedAt,
     this.attempts = 1,
     this.restore = false,
+    this.migrationOnly = false,
   });
 
   /// A Google Play consumable: consumed only once AppRefer recorded it.
@@ -45,6 +47,7 @@ class PendingPurchase {
     enqueuedAt: enqueuedAt ?? this.enqueuedAt,
     attempts: attempts ?? this.attempts,
     restore: restore ?? this.restore,
+    migrationOnly: migrationOnly,
   );
 
   PendingPurchase withAttempts(int attempts) => copyWith(attempts: attempts);
@@ -58,6 +61,7 @@ class PendingPurchase {
     'enqueuedAtMs': enqueuedAt.millisecondsSinceEpoch,
     'attempts': attempts,
     if (restore) 'restore': true,
+    if (migrationOnly) 'migrationOnly': true,
   };
 
   static PendingPurchase? fromJson(Object? json) {
@@ -82,6 +86,7 @@ class PendingPurchase {
       enqueuedAt: DateTime.fromMillisecondsSinceEpoch(ms.round()),
       attempts: json['attempts'] is int ? json['attempts'] as int : 1,
       restore: json['restore'] == true,
+      migrationOnly: json['migrationOnly'] == true,
     );
   }
 }
@@ -225,6 +230,7 @@ class PendingPurchaseQueue {
         enqueuedAt: old.enqueuedAt,
         attempts: old.attempts + entry.attempts,
         restore: old.restore || entry.restore,
+        migrationOnly: old.migrationOnly && entry.migrationOnly,
       );
     } else {
       _entries.add(entry);

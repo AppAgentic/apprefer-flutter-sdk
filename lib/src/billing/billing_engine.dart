@@ -94,6 +94,7 @@ class BillingEngine {
   /// consumed (they are consumed only once AppRefer recorded them).
   final _recorded = <String>{};
   Future<void>? _retryingUnfinished;
+  final _migratingUsers = <String>{};
 
   /// Set when the queue recorded a consumable while a [retryUnfinished] pass
   /// was running; that pass runs once more instead of being awaited from
@@ -216,6 +217,7 @@ class BillingEngine {
   /// queue and refreshes entitlements.
   Future<void> start() async {
     listen();
+    await migrationSync();
     await retryUnfinished();
     await customerInfo(FetchPolicy.fetchCurrent);
   }
@@ -223,9 +225,69 @@ class BillingEngine {
   /// App came to the foreground: retries failed store completions (Google
   /// acknowledge/consume), refreshes entitlements and drains the queue.
   Future<void> resume() async {
+    await migrationSync();
     await retryUnfinished();
     await customerInfo(FetchPolicy.cachedOrFetched);
     await drainQueue();
+  }
+
+  /// Read-only import into the existing durable retry queue.
+  Future<void> migrationSync([String? forUser]) async {
+    final active = await _activeUser();
+    if (active == null) return;
+    final user = forUser ?? active;
+    if (!_migratingUsers.add(user)) return;
+    try {
+      if (_storage.migrationSynced(user)) return;
+      final intents = await _intents.read();
+      if (_intents.lostMarker() != null) return;
+      final purchases = await _store.migrationPurchases();
+      final deviceId = await _safeAppreferId();
+      var durable = true;
+      var imported = false;
+      for (final purchase in purchases) {
+        if (_queue.entries.any(
+              (e) => e.transactionId == purchase.id && e.appUserId == user,
+            ) &&
+            _queue.isDurable(purchase.id))
+          continue;
+        if (intents.any((intent) => intent.productId == purchase.productId)) {
+          durable = false;
+          continue;
+        }
+        if (!await _storage.markMigrationPurchase(
+          '${purchase.store.name}:${purchase.id}',
+        ))
+          durable = false;
+        final fields = purchase.storeFields;
+        if (fields == null) {
+          durable = false;
+          continue;
+        }
+        final key = 'migration:${Uri.encodeComponent(user)}:${purchase.id}';
+        if (_queue.isDurable(key)) continue;
+        imported = true;
+        if (!await _queue.add(
+          PendingPurchase(
+            transactionId: key,
+            productId: purchase.productId,
+            appUserId: user,
+            appreferId: deviceId,
+            storeFields: fields,
+            enqueuedAt: _now(),
+            attempts: 0,
+            migrationOnly: true,
+          ),
+        ))
+          durable = false;
+      }
+      if (durable) await _storage.markMigrationSynced(user);
+      if (imported) await drainQueue();
+    } catch (e) {
+      _logger.warn('Billing: migration sync will retry: $e');
+    } finally {
+      _migratingUsers.remove(user);
+    }
   }
 
   Future<void> dispose() async {
@@ -515,6 +577,11 @@ class BillingEngine {
     // A renewal never matches or uses up a saved intent, even one handed in
     // by the purchase sheet that is waiting.
     final waiterIntent = purchase.isRenewal ? null : suppliedIntent;
+    if (initiator == null &&
+        waiterIntent == null &&
+        _storage.isMigrationPurchase('${purchase.store.name}:${purchase.id}')) {
+      return localFallback();
+    }
     final fields = purchase.storeFields;
     if (fields == null || purchase.id.isEmpty) {
       _logger.error(
@@ -886,6 +953,11 @@ class BillingEngine {
       return;
     }
     for (final purchase in open) {
+      if (_storage.isMigrationPurchase(
+            '${purchase.store.name}:${purchase.id}',
+          ) &&
+          !_queue.contains(purchase.id))
+        continue;
       if (_recorded.contains(purchase.id)) {
         if (await _complete(purchase)) _recorded.remove(purchase.id);
       } else if (_queue.contains(purchase.id)) {
@@ -1159,7 +1231,7 @@ class BillingEngine {
         );
         await _queue.remove(entry.transactionId);
         _drainBackoff = null;
-        if (entry.isConsumable) {
+        if (!entry.migrationOnly && entry.isConsumable) {
           _recorded.add(entry.transactionId);
           consumables = true;
         }
@@ -1280,7 +1352,9 @@ class BillingEngine {
       _storage.loggedInAppUserId = appUserId;
       _lastServerFetch = null;
     }
-    return customerInfo(FetchPolicy.fetchCurrent);
+    final info = await customerInfo(FetchPolicy.fetchCurrent);
+    Timer.run(() => unawaited(migrationSync(appUserId)));
+    return info;
   }
 
   /// Pending identifies stay: they still have to reach the server.

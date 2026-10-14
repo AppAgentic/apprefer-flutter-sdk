@@ -48,6 +48,42 @@ class BillingStorage {
 
   static bool isUuid(String value) => _uuid.hasMatch(value);
 
+  final _importedIds = <String>{};
+  bool isMigrationPurchase(String id) =>
+      _importedIds.contains(id) ||
+      prefs.getString('apprefer_billing_import:${Uri.encodeComponent(id)}') ==
+          'readonly';
+  Future<bool> markMigrationPurchase(String id) async {
+    _importedIds.add(id);
+    try {
+      return await prefs.setString(
+        'apprefer_billing_import:${Uri.encodeComponent(id)}',
+        'readonly',
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  final _failedMigrationFlags = <String>{};
+
+  bool migrationSynced(String user) =>
+      !_failedMigrationFlags.contains(user) &&
+      prefs.getString(
+            'apprefer_billing_migration:${Uri.encodeComponent(user)}',
+          ) ==
+          'done';
+
+  Future<bool> markMigrationSynced(String user) async {
+    _failedMigrationFlags.add(user);
+    final ok = await prefs.setString(
+      'apprefer_billing_migration:${Uri.encodeComponent(user)}',
+      'done',
+    );
+    if (ok) _failedMigrationFlags.remove(user);
+    return ok;
+  }
+
   // --- Identity ---
 
   /// Reads an identity value. Missing returns null; a value that can't be
