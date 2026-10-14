@@ -25,6 +25,10 @@ enum AppReferBillingErrorCode {
   /// The store refused or failed the request (purchase sheet could not open,
   /// billing unavailable, purchase error).
   store,
+
+  /// Billing state on the device could not be read or written; nothing was
+  /// sent and no new identity was created.
+  storage,
 }
 
 /// Thrown by AppReferBilling.
@@ -35,7 +39,15 @@ class AppReferBillingException implements Exception {
   /// HTTP status for [AppReferBillingErrorCode.server].
   final int? status;
 
-  const AppReferBillingException(this.code, {this.message, this.status});
+  /// The server's `Retry-After`, when it sent one.
+  final Duration? retryAfter;
+
+  const AppReferBillingException(
+    this.code, {
+    this.message,
+    this.status,
+    this.retryAfter,
+  });
 
   /// Whether the same request may succeed later. Only malformed requests
   /// (400/413/422) and local verification failures are final.
@@ -45,6 +57,7 @@ class AppReferBillingException implements Exception {
       case AppReferBillingErrorCode.missingApiKey:
       case AppReferBillingErrorCode.network:
       case AppReferBillingErrorCode.invalidResponse:
+      case AppReferBillingErrorCode.storage:
         return true;
       case AppReferBillingErrorCode.server:
         return !const {400, 413, 422}.contains(status);
@@ -54,6 +67,13 @@ class AppReferBillingException implements Exception {
         return false;
     }
   }
+
+  /// Statuses that mean "not now" rather than "never" (auth/config not set up
+  /// yet, rate limited): the retry queue backs off and keeps the purchase
+  /// without counting an attempt.
+  bool get isBackoff =>
+      code == AppReferBillingErrorCode.server &&
+      const {401, 403, 404, 409, 429}.contains(status);
 
   /// AppRefer is unreachable (stop sending more requests for now).
   bool get isConnectivity {

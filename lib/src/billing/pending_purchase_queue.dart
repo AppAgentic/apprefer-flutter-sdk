@@ -15,6 +15,9 @@ class PendingPurchase {
   final DateTime enqueuedAt;
   final int attempts;
 
+  /// Queued by Restore Purchases, so the retry is still sent as a restore.
+  final bool restore;
+
   const PendingPurchase({
     required this.transactionId,
     required this.productId,
@@ -23,17 +26,28 @@ class PendingPurchase {
     required this.storeFields,
     required this.enqueuedAt,
     this.attempts = 1,
+    this.restore = false,
   });
 
-  PendingPurchase withAttempts(int attempts) => PendingPurchase(
+  /// A Google Play consumable: consumed only once AppRefer recorded it.
+  bool get isConsumable => storeFields['productType'] == 'consumable';
+
+  PendingPurchase copyWith({
+    int? attempts,
+    DateTime? enqueuedAt,
+    bool? restore,
+  }) => PendingPurchase(
     transactionId: transactionId,
     productId: productId,
     appUserId: appUserId,
     appreferId: appreferId,
     storeFields: storeFields,
-    enqueuedAt: enqueuedAt,
-    attempts: attempts,
+    enqueuedAt: enqueuedAt ?? this.enqueuedAt,
+    attempts: attempts ?? this.attempts,
+    restore: restore ?? this.restore,
   );
+
+  PendingPurchase withAttempts(int attempts) => copyWith(attempts: attempts);
 
   Map<String, dynamic> toJson() => {
     'transactionId': transactionId,
@@ -43,6 +57,7 @@ class PendingPurchase {
     'storeFields': storeFields,
     'enqueuedAtMs': enqueuedAt.millisecondsSinceEpoch,
     'attempts': attempts,
+    if (restore) 'restore': true,
   };
 
   static PendingPurchase? fromJson(Object? json) {
@@ -66,6 +81,7 @@ class PendingPurchase {
       },
       enqueuedAt: DateTime.fromMillisecondsSinceEpoch(ms.round()),
       attempts: json['attempts'] is int ? json['attempts'] as int : 1,
+      restore: json['restore'] == true,
     );
   }
 }
@@ -82,10 +98,25 @@ class PendingPurchaseQueue {
   final String _key;
   List<PendingPurchase> _entries;
 
-  PendingPurchaseQueue(this._prefs, this._key) : _entries = _load(_prefs, _key);
+  /// The stored queue could not be read. Nothing is written then, so the
+  /// purchases it holds are never overwritten with an empty list.
+  bool _unreadable = false;
 
-  static List<PendingPurchase> _load(SharedPreferences prefs, String key) {
-    final raw = prefs.getString(key);
+  PendingPurchaseQueue(this._prefs, this._key) : _entries = [] {
+    final String? raw;
+    try {
+      raw = _prefs.getString(_key);
+    } catch (_) {
+      _unreadable = true;
+      return;
+    }
+    _entries = _decode(raw);
+  }
+
+  /// Whether the stored queue could not be read (writes are refused).
+  bool get isUnreadable => _unreadable;
+
+  static List<PendingPurchase> _decode(String? raw) {
     if (raw == null) return [];
     try {
       final decoded = jsonDecode(raw);
@@ -106,32 +137,42 @@ class PendingPurchaseQueue {
   bool containsUser(String appUserId) =>
       _entries.any((e) => e.appUserId == appUserId);
 
-  /// Adds or refreshes an entry; one entry per transaction id. Completes once
-  /// the entry is written, so the purchase can then be completed with the store.
-  Future<void> add(PendingPurchase entry) async {
+  bool contains(String transactionId) =>
+      _entries.any((e) => e.transactionId == transactionId);
+
+  /// Adds or refreshes an entry; one entry per transaction id. A refreshed
+  /// entry keeps its first queue time and adds to its attempts, and a restore
+  /// stays a restore. Returns whether the queue was written to disk: only then
+  /// may the purchase be finished with the store.
+  Future<bool> add(PendingPurchase entry) async {
     final index = _entries.indexWhere(
       (e) => e.transactionId == entry.transactionId,
     );
     if (index >= 0) {
-      _entries[index] = entry;
+      final old = _entries[index];
+      _entries[index] = entry.copyWith(
+        enqueuedAt: old.enqueuedAt,
+        attempts: old.attempts + entry.attempts,
+        restore: old.restore || entry.restore,
+      );
     } else {
       _entries.add(entry);
     }
-    await _save();
+    return _save();
   }
 
-  void remove(String transactionId) {
+  Future<bool> remove(String transactionId) {
     _entries.removeWhere((e) => e.transactionId == transactionId);
-    _save();
+    return _save();
   }
 
-  void recordAttempt(String transactionId) {
+  Future<bool> recordAttempt(String transactionId) {
     final index = _entries.indexWhere((e) => e.transactionId == transactionId);
-    if (index < 0) return;
+    if (index < 0) return Future.value(true);
     _entries[index] = _entries[index].withAttempts(
       _entries[index].attempts + 1,
     );
-    _save();
+    return _save();
   }
 
   /// Drops entries that have failed too often or are too old. The server still
@@ -151,10 +192,15 @@ class PendingPurchaseQueue {
     return dropped;
   }
 
-  Future<bool> _save() {
-    return _prefs.setString(
-      _key,
-      jsonEncode(_entries.map((e) => e.toJson()).toList()),
-    );
+  Future<bool> _save() async {
+    if (_unreadable) return false;
+    try {
+      return await _prefs.setString(
+        _key,
+        jsonEncode(_entries.map((e) => e.toJson()).toList()),
+      );
+    } catch (_) {
+      return false;
+    }
   }
 }

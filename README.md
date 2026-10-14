@@ -173,6 +173,8 @@ switch (result.outcome) {
 final info = await AppReferBilling.restorePurchases(); // AppStore.sync() on iOS + sends every owned purchase
 ```
 
+Only `restorePurchases()` sends a purchase as a restore, which lets AppRefer move a purchase owned by another app user to the one signed in. Purchases, renewals and other store updates never move ownership: each is recorded for the user who started it (or whose account token it carries). On iOS, if the App Store's restored transactions don't arrive in time while the device has active ones, `restorePurchases()` throws instead of reporting an empty restore.
+
 `purchase` sets the store account identifier to the customer's AppRefer account token (Apple `appAccountToken`, Google `obfuscatedAccountId`), sends the purchase to AppRefer (the StoreKit 2 signed transaction on iOS, the purchase token on Android) and only then completes it with the store; Google consumables are consumed at that point. On Google Play a subscription returns one `ProductDetails` per base plan / offer. Offers: `purchase(product, promotionalOffer: SK2PromotionalOffer(...))` or `winBackOfferId:` on iOS, `changeSubscriptionParam: ChangeSubscriptionParam(...)` for Google upgrades and downgrades.
 
 ### Entitlements
@@ -192,7 +194,7 @@ AppReferBilling.addCustomerInfoUpdateListener(update);   // or a RevenueCat-styl
 
 ```dart
 await AppReferBilling.logIn('user_123');  // moves purchases made while anonymous to this user
-await AppReferBilling.logOut();           // new anonymous id
+await AppReferBilling.logOut();           // new anonymous id; a login not yet sent to AppRefer is kept and sent later
 await AppReferBilling.setAttributes({r'$email': 'a@b.com', r'$displayName': 'Alex'}); // sent with the next call
 await AppReferBilling.setEmail('a@b.com'); // also setDisplayName / setPhoneNumber
 ```
@@ -203,8 +205,11 @@ The AppRefer attribution device id is sent automatically as `appreferId`, so pur
 
 A paying user is never locked out because AppRefer is down:
 
-- If AppRefer can't be reached or returns an error, entitlements come from the store's own purchases (iOS: StoreKit 2's verified transactions, not revoked, not expired, not upgraded away; Android: the purchases Play reports as owned), mapped through `entitlementsByProduct`, merged with the last server answer for the same user.
-- A purchase AppRefer can't accept right now is saved to a retry queue on disk and then completed, so the store doesn't redeliver it forever and Google doesn't refund it for being unacknowledged. The queue is resent on the next launch, on foreground and after the next successful call (up to 50 attempts or 90 days). App Store Server Notifications and Google RTDN also reach AppRefer on their own.
+- If AppRefer can't be reached or returns an error, entitlements come from every verified store purchase on the device (iOS: StoreKit 2's verified transactions, not revoked, not expired, not upgraded away; Android: the purchases Play reports as owned), mapped through `entitlementsByProduct`, merged with the last server answer for the same user.
+- When AppRefer answers, the device's verified purchases that belong to the customer are still merged in: those with no account token, with the customer's token, or still queued for them. One tagged with another user's token is left out.
+- A purchase AppRefer can't accept right now is saved to a retry queue on disk. Google purchases are then acknowledged on the device straight away (never consumed until AppRefer has recorded them), so Google can't refund them even if the app isn't opened again. App Store purchases are finished once the queue entry is saved. The queue is resent on the next launch, on foreground and after the next successful call (up to 50 attempts or 90 days). A 401, 403, 404, 409 or 429 pauses it (30 s doubling to 1 h, or the server's `Retry-After`) without using up attempts; 400, 413 and 422 are final. App Store Server Notifications and Google RTDN also reach AppRefer on their own.
+- A store acknowledge or consume that fails is retried on the next foreground.
+- If billing state on the device can't be read, nothing is sent and no new anonymous id is created; entitlements come from the store until it can be read.
 - A purchase with nothing AppRefer can verify is completed without granting access.
 
 ### Migrating from RevenueCat

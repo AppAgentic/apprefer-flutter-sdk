@@ -204,10 +204,10 @@ void main() {
     });
 
     test('pending identify and cached customer info persist', () {
-      storage.pendingIdentify = (anonymousId: r'$ARAnon:A', appUserId: 'u1');
-      expect(storage.pendingIdentify?.appUserId, 'u1');
-      storage.pendingIdentify = null;
-      expect(storage.pendingIdentify, isNull);
+      storage.addPendingIdentify((anonymousId: r'$ARAnon:A', appUserId: 'u1'));
+      expect(storage.pendingIdentifies.single.appUserId, 'u1');
+      storage.pendingIdentifies = [];
+      expect(storage.pendingIdentifies, isEmpty);
       storage.setCachedCustomerInfo(
         AppReferCustomerInfo.fromJson(
           customerJson('u1', active: {'premium': 'p'}),
@@ -249,10 +249,12 @@ void main() {
         'q',
       );
       await q.add(entry('t1'));
-      await q.add(entry('t1'));
-      q.recordAttempt('t1');
-      expect(q.entries.single.attempts, 2);
-      q.remove('t1');
+      await q.add(entry('t1', at: now.add(const Duration(hours: 1))));
+      await q.recordAttempt('t1');
+      // A re-queued purchase keeps its first queue time and adds attempts.
+      expect(q.entries.single.attempts, 3);
+      expect(q.entries.single.enqueuedAt, now);
+      await q.remove('t1');
       expect(q.isEmpty, isTrue);
     });
 

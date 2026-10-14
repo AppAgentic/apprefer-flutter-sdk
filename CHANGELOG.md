@@ -6,7 +6,10 @@
   - Sends the StoreKit 2 signed transaction (iOS) or the purchase token (Android) to AppRefer and only then completes the purchase; Google consumables are consumed after AppRefer accepts them
   - `customerInfo(fetchPolicy:)`, `customerInfoStream`, `addCustomerInfoUpdateListener`; `entitlements['premium']?.isActive`; `CustomerInfo.source` (server / cache / localFallback)
   - `logIn()` (merges anonymous purchases via `/identify`), `logOut()`, `setAttributes()`, `setEmail` / `setDisplayName` / `setPhoneNumber`
-  - Outage safety: falls back to the store's own active purchases merged with the same user's cached server answer; purchases AppRefer can't accept are queued on disk, completed, and resent later (50 attempts / 90 days)
+  - Outage safety: falls back to every verified store purchase on the device merged with the same user's cached server answer; server answers also include the customer's own verified store purchases (no account token, their token, or still queued); purchases AppRefer can't accept are queued on disk and resent later (50 attempts / 90 days; 401/403/404/409/429 back off without using attempts and honour `Retry-After`); Google purchases are acknowledged on device at once and consumables consumed only after AppRefer records them; failed acknowledge/consume retried on foreground
+  - Only `restorePurchases()` sends `restore: true` (kept on queued retries); purchases are recorded for the user who started them
+  - Pending logins survive `logOut()` and are sent in order; unreadable billing storage never mints a new anonymous id
+  - iOS restore fails instead of reporting an empty restore when the App Store's restored transactions don't arrive in time
   - Sends the AppRefer attribution device id as `appreferId` automatically
   - Uses the attribution SDK key and the `trk.apprefer.com` → `apprefer.com` fallback
 - Requires Flutter 3.41 / Dart 3.11 (minimum of `in_app_purchase_storekit` 0.4.13+1)

@@ -185,11 +185,12 @@ class AppReferBilling {
   }
 
   /// The attribution device id, sent as `appreferId` so purchases are matched
-  /// to the ad click without `setUserId`.
+  /// to the ad click without `setUserId`. Only read: attribution owns minting
+  /// it, so billing can never race it into a second id.
   static Future<String?> _appreferDeviceId() async {
     final storage = AppReferStorage();
     await storage.init();
-    return storage.getDeviceId();
+    return storage.existingDeviceId();
   }
 
   static void _observeLifecycle(BillingEngine engine) {
@@ -248,7 +249,8 @@ class AppReferBilling {
   static Future<AppReferCustomerInfo> logIn(String appUserId) async =>
       (await _requireEngine()).logIn(appUserId);
 
-  /// Signs out and starts a fresh anonymous id.
+  /// Signs out and starts a fresh anonymous id. A login still waiting to
+  /// reach AppRefer is kept and sent later.
   static Future<AppReferCustomerInfo> logOut() async =>
       (await _requireEngine()).logOut();
 
@@ -373,10 +375,7 @@ class _LifecycleObserver with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
-    unawaited(() async {
-      await engine.customerInfo(FetchPolicy.cachedOrFetched);
-      await engine.drainQueue();
-    }());
+    unawaited(engine.resume());
   }
 }
 

@@ -27,14 +27,26 @@ class StorePurchase {
 
   /// Whether the store still waits for `completePurchase` / consume.
   final bool needsCompletion;
+
+  /// Google: not acknowledged yet (Google refunds a purchase left
+  /// unacknowledged for 3 days). Apple: same as [needsCompletion].
+  final bool needsAcknowledgement;
   final String? errorMessage;
+
+  /// Apple `appAccountToken` / Google `obfuscatedAccountId` the purchase was
+  /// made with, when the store reports one.
+  final String? accountToken;
 
   /// The plugin object, handed back to the app in `PurchaseResult`.
   final PurchaseDetails? details;
 
   /// `completePurchase` (Apple finish / Google acknowledge), or consume for
-  /// Google consumables.
+  /// Google consumables. Throws when the store refused.
   final Future<void> Function() complete;
+
+  /// Google acknowledge without consuming, so a consumable AppRefer has not
+  /// recorded yet stays recoverable. Same as [complete] everywhere else.
+  final Future<void> Function() acknowledge;
 
   StorePurchase({
     required this.id,
@@ -45,12 +57,21 @@ class StorePurchase {
     this.purchaseToken,
     this.kind,
     this.needsCompletion = true,
+    bool? needsAcknowledgement,
     this.errorMessage,
+    this.accountToken,
     this.details,
     Future<void> Function()? complete,
-  }) : complete = complete ?? _noop;
+    Future<void> Function()? acknowledge,
+  }) : needsAcknowledgement = needsAcknowledgement ?? needsCompletion,
+       complete = complete ?? _noop,
+       acknowledge = acknowledge ?? complete ?? _noop;
 
   static Future<void> _noop() async {}
+
+  /// A Google Play consumable (consumed only after AppRefer recorded it).
+  bool get isGoogleConsumable =>
+      store == BillingStore.playStore && kind == StoreProductKind.consumable;
 
   /// The store fields of the `/purchases` body, or null when the store gave
   /// nothing AppRefer can verify.
@@ -91,6 +112,12 @@ class StoreEntitlement {
   final bool isUpgraded;
   final BillingPeriodType periodType;
 
+  /// Apple transaction id / Google purchase token: the retry-queue key.
+  final String? transactionId;
+
+  /// Apple `appAccountToken` / Google `obfuscatedAccountId`, when set.
+  final String? accountToken;
+
   const StoreEntitlement({
     required this.productId,
     required this.originalId,
@@ -100,7 +127,20 @@ class StoreEntitlement {
     this.revocationDate,
     this.isUpgraded = false,
     this.periodType = BillingPeriodType.normal,
+    this.transactionId,
+    this.accountToken,
   });
+
+  /// Not revoked, not upgraded away, not expired, not consumable.
+  bool grantsAccessAt(DateTime now) {
+    if (kind == StoreProductKind.consumable ||
+        revocationDate != null ||
+        isUpgraded) {
+      return false;
+    }
+    final expires = expirationDate;
+    return expires == null || expires.isAfter(now);
+  }
 }
 
 /// Options for one purchase, passed through to the platform plugin.
@@ -144,7 +184,8 @@ abstract class BillingStoreAdapter {
   Future<void> sync();
 
   /// Every purchase the store currently owns for this account, with the data
-  /// AppRefer needs to verify it.
+  /// AppRefer needs to verify it. Throws rather than returning an incomplete
+  /// list (e.g. when the App Store's answer did not arrive in time).
   Future<List<StorePurchase>> restore();
 }
 
@@ -182,13 +223,7 @@ class LocalEntitlements {
     final activeSubscriptions = <String>{};
 
     for (final p in purchases) {
-      if (p.kind == StoreProductKind.consumable ||
-          p.revocationDate != null ||
-          p.isUpgraded) {
-        continue;
-      }
-      final expires = p.expirationDate;
-      if (expires != null && !expires.isAfter(now)) continue;
+      if (!p.grantsAccessAt(now)) continue;
       if (p.kind == StoreProductKind.autoRenewable) {
         activeSubscriptions.add(p.productId);
       }

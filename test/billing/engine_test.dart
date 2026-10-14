@@ -389,7 +389,7 @@ void main() {
         'anonymousId': anon,
         'appUserId': 'user_1',
       });
-      expect(h.storage.pendingIdentify, isNull);
+      expect(h.storage.pendingIdentifies, isEmpty);
     });
 
     test('logIn while offline retries identify later', () async {
@@ -397,12 +397,12 @@ void main() {
       final h = await Harness.create(server: server);
       final anon = h.engine.currentAppUserId;
       await h.engine.logIn('user_1');
-      expect(h.storage.pendingIdentify?.anonymousId, anon);
+      expect(h.storage.pendingIdentifies.single.anonymousId, anon);
       server.requests.clear();
       server.online();
       await h.engine.customerInfo(FetchPolicy.fetchCurrent);
       expect(server.bodiesFor(identify), hasLength(1));
-      expect(h.storage.pendingIdentify, isNull);
+      expect(h.storage.pendingIdentifies, isEmpty);
     });
 
     test('logIn rejects invalid ids', () async {
@@ -443,7 +443,7 @@ void main() {
           appUserId: 'user_1',
         );
         expect(h.engine.currentAppUserId, 'user_1');
-        expect(h.storage.pendingIdentify?.anonymousId, anon);
+        expect(h.storage.pendingIdentifies.single.anonymousId, anon);
       },
     );
 
@@ -452,7 +452,7 @@ void main() {
       () async {
         final h = await Harness.create(appUserId: 'user_1');
         expect(h.engine.currentAppUserId, 'user_1');
-        expect(h.storage.pendingIdentify, isNull);
+        expect(h.storage.pendingIdentifies, isEmpty);
       },
     );
   });

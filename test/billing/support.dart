@@ -50,6 +50,9 @@ class FakeServer {
   final requests = <http.Request>[];
   FutureOr<(int, Object?)> Function(http.Request request)? handler;
 
+  /// Headers added to every response (e.g. Retry-After).
+  Map<String, String> responseHeaders = {};
+
   FakeServer([this.handler]);
 
   late final client = MockClient((request) async {
@@ -57,7 +60,11 @@ class FakeServer {
     final h = handler;
     if (h == null) throw http.ClientException('offline');
     final (status, body) = await h(request);
-    return http.Response(body == null ? '' : jsonEncode(body), status);
+    return http.Response(
+      body == null ? '' : jsonEncode(body),
+      status,
+      headers: responseHeaders,
+    );
   });
 
   /// Answers every call with CustomerInfo for the request's appUserId.
@@ -108,6 +115,16 @@ class FakeStore implements BillingStoreAdapter {
   List<StorePurchase> restoreList = [];
   final bought = <(String, StorePurchaseOptions)>[];
   final completed = <String>[];
+  final acknowledged = <String>[];
+
+  /// Ids whose next complete/acknowledge throws (store refused).
+  final failNextCompletion = <String>{};
+
+  Future<void> _finish(String id, List<String> into) async {
+    if (failNextCompletion.remove(id)) throw Exception('billing unavailable');
+    into.add(id);
+  }
+
   int syncCalls = 0;
   Object? syncError;
 
@@ -149,6 +166,7 @@ class FakeStore implements BillingStoreAdapter {
     StorePurchaseStatus status = StorePurchaseStatus.purchased,
     String? jws = 'jws.payload.sig',
     StoreProductKind kind = StoreProductKind.autoRenewable,
+    String? accountToken,
   }) => StorePurchase(
     id: id,
     productId: productId,
@@ -156,15 +174,20 @@ class FakeStore implements BillingStoreAdapter {
     status: status,
     signedTransaction: jws,
     kind: kind,
+    accountToken: accountToken,
     needsCompletion: status == StorePurchaseStatus.purchased,
-    complete: () async => completed.add(id),
+    complete: () => _finish(id, completed),
   );
 
+  /// `complete` consumes a consumable / acknowledges otherwise (recorded in
+  /// [completed]); `acknowledge` never consumes (recorded in [acknowledged]).
   StorePurchase googlePurchase(
     String purchaseToken,
     String productId, {
     StoreProductKind kind = StoreProductKind.autoRenewable,
     StorePurchaseStatus status = StorePurchaseStatus.purchased,
+    String? accountToken,
+    bool isAcknowledged = false,
   }) => StorePurchase(
     id: purchaseToken,
     productId: productId,
@@ -172,20 +195,59 @@ class FakeStore implements BillingStoreAdapter {
     status: status,
     purchaseToken: purchaseToken,
     kind: kind,
-    complete: () async => completed.add(purchaseToken),
+    accountToken: accountToken,
+    needsCompletion: kind == StoreProductKind.consumable || !isAcknowledged,
+    needsAcknowledgement: !isAcknowledged,
+    complete: () => _finish(purchaseToken, completed),
+    acknowledge: () => _finish(purchaseToken, acknowledged),
   );
 }
 
 StoreEntitlement activeSub(
   String productId, {
   Duration left = const Duration(days: 3),
+  String? accountToken,
+  String? transactionId,
 }) => StoreEntitlement(
   productId: productId,
   originalId: 'orig_$productId',
   kind: StoreProductKind.autoRenewable,
   store: BillingStore.appStore,
   expirationDate: now.add(left),
+  accountToken: accountToken,
+  transactionId: transactionId,
 );
+
+/// SharedPreferences whose disk writes can fail (the in-memory copy still
+/// updates, as the real plugin does) and whose reads can throw.
+class FlakyPrefs implements SharedPreferences {
+  final SharedPreferences inner;
+  bool failWrites = false;
+  final unreadable = <String>{};
+
+  FlakyPrefs(this.inner);
+
+  @override
+  String? getString(String key) {
+    if (unreadable.contains(key)) throw StateError('storage locked');
+    return inner.getString(key);
+  }
+
+  @override
+  Future<bool> setString(String key, String value) async {
+    final ok = await inner.setString(key, value);
+    return failWrites ? false : ok;
+  }
+
+  @override
+  Future<bool> remove(String key) async {
+    final ok = await inner.remove(key);
+    return failWrites ? false : ok;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 class Harness {
   final FakeServer server;
@@ -195,6 +257,9 @@ class Harness {
   final PendingPurchaseQueue queue;
   final BillingEngine engine;
   final published = <AppReferCustomerInfo>[];
+
+  /// The engine's clock.
+  DateTime time = now;
 
   Harness._(
     this.server,
@@ -214,9 +279,11 @@ class Harness {
       'pro_yearly': ['premium'],
     },
     String? apiKey = 'pk_test_1',
+    SharedPreferences Function(SharedPreferences prefs)? wrapPrefs,
   }) async {
     SharedPreferences.setMockInitialValues(prefs);
-    final p = await SharedPreferences.getInstance();
+    final real = await SharedPreferences.getInstance();
+    final p = wrapPrefs == null ? real : wrapPrefs(real);
     final s = server ?? FakeServer();
     final st = store ?? FakeStore();
     final storage = BillingStorage(p);
@@ -235,7 +302,7 @@ class Harness {
       options: BillingEngineOptions(productEntitlements: entitlementsByProduct),
       appUserId: appUserId,
       appreferId: () async => 'device-1',
-      now: () => now,
+      now: () => h.time,
       onChange: (info) => h.published.add(info),
     );
     h = Harness._(s, st, p, storage, queue, engine);

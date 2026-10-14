@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:in_app_purchase_android/billing_client_wrappers.dart';
 import 'package:in_app_purchase_android/in_app_purchase_android.dart';
@@ -69,6 +70,7 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
       final token = details.verificationData.serverVerificationData;
       final kind = await _googleKind(details.productID);
       final consumable = kind == StoreProductKind.consumable;
+      final acknowledged = details.billingClientPurchase.isAcknowledged;
       return StorePurchase(
         id: token.isNotEmpty
             ? token
@@ -79,25 +81,36 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
         purchaseToken: token,
         kind: kind,
         needsCompletion: consumable || details.pendingCompletePurchase,
+        needsAcknowledgement:
+            !acknowledged &&
+            (status == StorePurchaseStatus.purchased ||
+                status == StorePurchaseStatus.restored),
         errorMessage: details.error?.message,
+        accountToken: _nonEmpty(
+          details.billingClientPurchase.obfuscatedAccountId,
+        ),
         details: details,
-        complete: () => _completeGoogle(details, consumable),
+        complete: () =>
+            consumable ? _consumeGoogle(details) : _acknowledgeGoogle(details),
+        acknowledge: () => _acknowledgeGoogle(details),
       );
     }
     // App Store purchases, and the plain PurchaseDetails either plugin sends
     // for a cancelled or failed purchase.
     final jws = details.verificationData.serverVerificationData;
+    final json = AppleTransactionJson.parse(
+      details.verificationData.localVerificationData,
+    );
     return StorePurchase(
       id: details.purchaseID ?? '',
       productId: details.productID,
       store: store,
       status: status,
       signedTransaction: jws,
-      kind: AppleTransactionJson.parse(
-        details.verificationData.localVerificationData,
-      )?.kind,
+      kind: json?.kind,
       needsCompletion: details.pendingCompletePurchase,
       errorMessage: details.error?.message,
+      accountToken: json?.appAccountToken,
       details: details,
       complete: () async {
         if (details.pendingCompletePurchase)
@@ -106,21 +119,40 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
     );
   }
 
-  Future<void> _completeGoogle(
-    GooglePlayPurchaseDetails details,
-    bool consumable,
-  ) async {
+  /// Acknowledges without consuming. Throws when Play refused, so the engine
+  /// retries on the next foreground.
+  Future<void> _acknowledgeGoogle(GooglePlayPurchaseDetails details) async {
+    if (details.billingClientPurchase.isAcknowledged) return;
+    // The Android platform answers completePurchase with a BillingResultWrapper.
+    final Future<Object?> pending = _iap.completePurchase(details);
+    _checkGoogleResult(await pending, 'acknowledge', details.productID);
+  }
+
+  Future<void> _consumeGoogle(GooglePlayPurchaseDetails details) async {
     final addition = _iap
         .getPlatformAddition<InAppPurchaseAndroidPlatformAddition>();
-    final result = consumable
-        ? await addition.consumePurchase(details)
-        : await _iap.completePurchase(details).then((_) => null);
-    if (result != null && result.responseCode != BillingResponse.ok) {
-      _logger.warn(
-        'Billing: consume ${details.productID} returned ${result.responseCode}',
-      );
-    }
+    _checkGoogleResult(
+      await addition.consumePurchase(details),
+      'consume',
+      details.productID,
+    );
   }
+
+  void _checkGoogleResult(Object? result, String action, String productId) {
+    if (result is! BillingResultWrapper) return;
+    // Already consumed / not owned any more: nothing left to do.
+    if (result.responseCode == BillingResponse.ok ||
+        result.responseCode == BillingResponse.itemNotOwned) {
+      return;
+    }
+    throw AppReferBillingException(
+      AppReferBillingErrorCode.store,
+      message: '$action $productId returned ${result.responseCode}',
+    );
+  }
+
+  static String? _nonEmpty(String? value) =>
+      value == null || value.isEmpty ? null : value;
 
   // --- Products and purchases ---
 
@@ -197,6 +229,7 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
             status: StorePurchaseStatus.purchased,
             signedTransaction: t.receiptData,
             kind: AppleTransactionJson.parse(t.jsonRepresentation)?.kind,
+            accountToken: _nonEmpty(t.appAccountToken),
             complete: () => SK2Transaction.finish(int.parse(t.id)),
           ),
       ];
@@ -209,32 +242,51 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
   Future<List<StorePurchase>> restore() async {
     if (!_isApple) return _googleOwned();
 
-    // StoreKit 2: the plugin emits Transaction.currentEntitlements (with their
-    // JWS) as one `restored` batch on the purchase stream.
-    final restored = <StorePurchase>[];
-    final gotBatch = Completer<void>();
-    final sub = _iap.purchaseStream.listen((list) async {
+    final batch = await collectAppleRestore(
+      stream: _iap.purchaseStream,
+      restore: _iap.restorePurchases,
+      hasCurrentEntitlements: () async {
+        final now = DateTime.now();
+        return (await activeEntitlements()).any((e) => e.grantsAccessAt(now));
+      },
+    );
+    return [for (final d in batch) await _map(d)];
+  }
+
+  /// StoreKit 2: the plugin emits Transaction.currentEntitlements (with their
+  /// JWS) as one `restored` batch on the purchase stream, sent separately from
+  /// the restorePurchases reply. If the batch does not arrive in [timeout],
+  /// the device's verified transactions decide: none active means there is
+  /// truly nothing to restore; otherwise the restore fails rather than
+  /// reporting an empty success.
+  @visibleForTesting
+  static Future<List<PurchaseDetails>> collectAppleRestore({
+    required Stream<List<PurchaseDetails>> stream,
+    required Future<void> Function() restore,
+    required Future<bool> Function() hasCurrentEntitlements,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final gotBatch = Completer<List<PurchaseDetails>>();
+    final sub = stream.listen((list) {
       final batch = list
           .where((d) => d.status == PurchaseStatus.restored)
           .toList();
       if (batch.isEmpty && list.isNotEmpty) return;
-      for (final d in batch) {
-        restored.add(await _map(d));
-      }
-      if (!gotBatch.isCompleted) gotBatch.complete();
+      if (!gotBatch.isCompleted) gotBatch.complete(batch);
     });
     try {
-      await _iap.restorePurchases();
-      await gotBatch.future.timeout(
-        const Duration(seconds: 2),
-        onTimeout: () {},
+      await restore();
+      return await gotBatch.future.timeout(timeout);
+    } on TimeoutException {
+      if (!await hasCurrentEntitlements()) return const [];
+      throw const AppReferBillingException(
+        AppReferBillingErrorCode.store,
+        message:
+            'The App Store did not return the restored purchases in time; try again',
       );
-      // Let a mapping in progress finish.
-      await Future<void>.delayed(Duration.zero);
     } finally {
       await sub.cancel();
     }
-    return restored;
   }
 
   @override
@@ -248,6 +300,8 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
             json.toEntitlement(
               fallbackProductId: t.productId,
               fallbackOriginalId: t.originalId,
+              transactionId: t.id,
+              fallbackAccountToken: _nonEmpty(t.appAccountToken),
             ),
       ];
     }
@@ -259,6 +313,8 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
           originalId: p.purchaseToken ?? p.id,
           kind: p.kind ?? StoreProductKind.autoRenewable,
           store: BillingStore.playStore,
+          transactionId: p.id,
+          accountToken: p.accountToken,
         ),
     ];
   }
@@ -298,8 +354,11 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
           purchaseToken: mapped.purchaseToken,
           kind: mapped.kind,
           needsCompletion: mapped.needsCompletion,
+          needsAcknowledgement: mapped.needsAcknowledgement,
+          accountToken: mapped.accountToken,
           details: details,
           complete: mapped.complete,
+          acknowledge: mapped.acknowledge,
         ),
       );
     }
@@ -367,6 +426,7 @@ class AppleTransactionJson {
   final DateTime? revocationDate;
   final bool isUpgraded;
   final BillingPeriodType periodType;
+  final String? appAccountToken;
 
   const AppleTransactionJson({
     this.productId,
@@ -376,6 +436,7 @@ class AppleTransactionJson {
     this.revocationDate,
     this.isUpgraded = false,
     this.periodType = BillingPeriodType.normal,
+    this.appAccountToken,
   });
 
   static AppleTransactionJson? parse(String? raw) {
@@ -408,6 +469,11 @@ class AppleTransactionJson {
         revocationDate: _date(json['revocationDate']),
         isUpgraded: json['isUpgraded'] == true,
         periodType: periodType,
+        appAccountToken:
+            json['appAccountToken'] is String &&
+                (json['appAccountToken'] as String).isNotEmpty
+            ? json['appAccountToken'] as String
+            : null,
       );
     } catch (_) {
       return null;
@@ -417,6 +483,8 @@ class AppleTransactionJson {
   StoreEntitlement toEntitlement({
     required String fallbackProductId,
     required String fallbackOriginalId,
+    String? transactionId,
+    String? fallbackAccountToken,
   }) => StoreEntitlement(
     productId: productId ?? fallbackProductId,
     originalId: originalTransactionId ?? fallbackOriginalId,
@@ -426,6 +494,8 @@ class AppleTransactionJson {
     revocationDate: revocationDate,
     isUpgraded: isUpgraded,
     periodType: periodType,
+    transactionId: transactionId,
+    accountToken: appAccountToken ?? fallbackAccountToken,
   );
 
   static DateTime? _date(Object? ms) =>

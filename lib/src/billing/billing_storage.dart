@@ -3,7 +3,11 @@ import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'billing_error.dart';
 import 'customer_info.dart';
+
+/// A login that still has to be sent to `/identify`.
+typedef PendingIdentify = ({String anonymousId, String appUserId});
 
 /// Persistent billing state in SharedPreferences (NSUserDefaults / Android
 /// SharedPreferences on disk). Owned by `BillingEngine`.
@@ -16,11 +20,15 @@ class BillingStorage {
   static const _pendingAttributes = 'apprefer_billing_pending_attributes';
   static const _learnedEntitlements = 'apprefer_billing_learned_entitlements';
   static const _pendingIdentify = 'apprefer_billing_pending_identify';
+  static const _pendingIdentifies = 'apprefer_billing_pending_identifies';
   static const _customerInfo = 'apprefer_billing_customer_info';
   static const _productKinds = 'apprefer_billing_product_kinds';
   static const pendingPurchasesKey = 'apprefer_billing_pending_purchases';
 
   final SharedPreferences prefs;
+
+  /// Identity writes not yet confirmed on disk, with how to redo each one.
+  final _pendingWrites = <(Future<bool>, Future<bool> Function())>[];
 
   BillingStorage(this.prefs);
 
@@ -35,39 +43,96 @@ class BillingStorage {
 
   // --- Identity ---
 
-  bool get hasAnonymousId => prefs.getString(_anonymousId) != null;
+  /// Reads an identity value. Missing returns null; a value that can't be
+  /// read throws [AppReferBillingErrorCode.storage], so a caller never mints a
+  /// new identity in place of one it merely failed to read.
+  String? _readIdentity(String key) {
+    try {
+      return prefs.getString(key);
+    } catch (e) {
+      throw AppReferBillingException(
+        AppReferBillingErrorCode.storage,
+        message: 'could not read $key: $e',
+      );
+    }
+  }
 
-  /// `$ARAnon:<UUID>`, minted once and kept for the install.
+  bool get hasAnonymousId => _readIdentity(_anonymousId) != null;
+
+  /// `$ARAnon:<UUID>`, minted once and kept for the install. Throws
+  /// [AppReferBillingErrorCode.storage] when the stored id can't be read.
   String anonymousId() {
-    final existing = prefs.getString(_anonymousId);
+    final existing = _readIdentity(_anonymousId);
     if (existing != null && isAnonymous(existing)) return existing;
     return resetAnonymousId();
   }
 
   String resetAnonymousId() {
     final id = '$anonymousPrefix${generateUuidV4().toUpperCase()}';
-    prefs.setString(_anonymousId, id);
+    _write(() => prefs.setString(_anonymousId, id));
     return id;
   }
 
-  /// The logged-in app user id, or null while anonymous.
-  String? get loggedInAppUserId => prefs.getString(_appUserId);
+  /// The logged-in app user id, or null while anonymous. Throws
+  /// [AppReferBillingErrorCode.storage] when it can't be read.
+  String? get loggedInAppUserId => _readIdentity(_appUserId);
 
   set loggedInAppUserId(String? value) {
     if (value == null) {
-      prefs.remove(_appUserId);
+      _write(() => prefs.remove(_appUserId));
     } else {
-      prefs.setString(_appUserId, value);
+      _write(() => prefs.setString(_appUserId, value));
     }
   }
 
   String get currentAppUserId => loggedInAppUserId ?? anonymousId();
+
+  /// SharedPreferences updates its in-memory copy at once and writes to disk
+  /// later; the write's result is kept so [flush] can check it.
+  void _write(Future<bool> Function() write) {
+    _pendingWrites.add((_attempt(write), write));
+  }
+
+  static Future<bool> _attempt(Future<bool> Function() write) async {
+    try {
+      return await write();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Waits for identity writes and redoes any that failed once. False when
+  /// one still did not reach disk: callers then must not send that identity
+  /// or finish a purchase made under it.
+  Future<bool> flush() async {
+    if (_pendingWrites.isEmpty) return true;
+    final writes = List.of(_pendingWrites);
+    _pendingWrites.clear();
+    var ok = true;
+    for (final (result, redo) in writes) {
+      if (await result) continue;
+      final retried = _attempt(redo);
+      if (!await retried) {
+        ok = false;
+        _pendingWrites.add((retried, redo));
+      }
+    }
+    return ok;
+  }
 
   // --- Account tokens (Apple appAccountToken / Google obfuscatedAccountId) ---
 
   String? accountToken(String appUserId) {
     final token = _stringMap(_accountTokens)[appUserId];
     return token != null && isUuid(token) ? token : null;
+  }
+
+  /// The app user a store account token was issued to on this device.
+  String? appUserIdForAccountToken(String token) {
+    for (final e in _stringMap(_accountTokens).entries) {
+      if (e.value.toLowerCase() == token.toLowerCase()) return e.key;
+    }
+    return null;
   }
 
   void setAccountToken(String token, String appUserId) {
@@ -121,28 +186,58 @@ class BillingStorage {
     if (changed) prefs.setString(_learnedEntitlements, jsonEncode(map));
   }
 
-  // --- logIn that still needs to reach the server ---
+  // --- logIns that still need to reach the server, oldest first ---
 
-  ({String anonymousId, String appUserId})? get pendingIdentify {
-    final d = _stringMap(_pendingIdentify);
+  /// Survives logOut: an anonymous purchase still has to move to the user who
+  /// logged in. Also reads the single entry earlier builds saved.
+  List<PendingIdentify> get pendingIdentifies {
+    final raw = _decodeJson(_readIdentity(_pendingIdentifies));
+    if (raw is List) {
+      return [
+        for (final e in raw)
+          if (e is Map &&
+              e['anonymousId'] is String &&
+              e['appUserId'] is String)
+            (
+              anonymousId: e['anonymousId'] as String,
+              appUserId: e['appUserId'] as String,
+            ),
+      ];
+    }
+    final d = _stringMap(_pendingIdentify, identity: true);
     final anon = d['anonymousId'];
     final user = d['appUserId'];
-    if (anon == null || user == null) return null;
-    return (anonymousId: anon, appUserId: user);
+    if (anon == null || user == null) return [];
+    return [(anonymousId: anon, appUserId: user)];
   }
 
-  set pendingIdentify(({String anonymousId, String appUserId})? value) {
-    if (value == null) {
-      prefs.remove(_pendingIdentify);
+  set pendingIdentifies(List<PendingIdentify> value) {
+    _write(() => prefs.remove(_pendingIdentify));
+    if (value.isEmpty) {
+      _write(() => prefs.remove(_pendingIdentifies));
     } else {
-      prefs.setString(
-        _pendingIdentify,
-        jsonEncode({
-          'anonymousId': value.anonymousId,
-          'appUserId': value.appUserId,
-        }),
-      );
+      final encoded = jsonEncode([
+        for (final e in value)
+          {'anonymousId': e.anonymousId, 'appUserId': e.appUserId},
+      ]);
+      _write(() => prefs.setString(_pendingIdentifies, encoded));
     }
+  }
+
+  void addPendingIdentify(PendingIdentify entry) {
+    final list = pendingIdentifies;
+    if (list.contains(entry)) return;
+    pendingIdentifies = [...list, entry];
+  }
+
+  /// Removes [entry] only; a newer login queued meanwhile stays.
+  void removePendingIdentify(PendingIdentify entry) {
+    final list = pendingIdentifies;
+    if (!list.contains(entry)) return;
+    pendingIdentifies = [
+      for (final e in list)
+        if (e != entry) e,
+    ];
   }
 
   // --- Cached CustomerInfo (last server answer) ---
@@ -165,8 +260,16 @@ class BillingStorage {
 
   // --- helpers ---
 
+  /// Non-identity values: unreadable counts as absent.
   Object? _json(String key) {
-    final raw = prefs.getString(key);
+    try {
+      return _decodeJson(prefs.getString(key));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Object? _decodeJson(String? raw) {
     if (raw == null) return null;
     try {
       return jsonDecode(raw);
@@ -175,8 +278,8 @@ class BillingStorage {
     }
   }
 
-  Map<String, String> _stringMap(String key) {
-    final raw = _json(key);
+  Map<String, String> _stringMap(String key, {bool identity = false}) {
+    final raw = identity ? _decodeJson(_readIdentity(key)) : _json(key);
     if (raw is! Map) return {};
     return {
       for (final e in raw.entries)

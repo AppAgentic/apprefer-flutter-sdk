@@ -20,14 +20,23 @@ class AppReferStorage {
 
   // --- Device ID ---
 
+  /// The device id, minted on first use. A read that fails throws instead of
+  /// minting a replacement for an id that exists but couldn't be read.
   Future<String> getDeviceId() async {
     String? deviceId = _prefs.getString(_keyDeviceId);
     if (deviceId == null) {
       deviceId = _generateUuidV4();
-      await _prefs.setString(_keyDeviceId, deviceId);
+      // shared_preferences keeps the value in memory at once; retry a failed
+      // disk write once so the next launch reads the same id.
+      if (!await _prefs.setString(_keyDeviceId, deviceId)) {
+        await _prefs.setString(_keyDeviceId, deviceId);
+      }
     }
     return deviceId;
   }
+
+  /// The device id if attribution has created one; never mints.
+  String? existingDeviceId() => _prefs.getString(_keyDeviceId);
 
   Future<void> setDeviceId(String id) async {
     await _prefs.setString(_keyDeviceId, id);

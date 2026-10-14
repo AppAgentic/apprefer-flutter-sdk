@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show HttpDate;
 
 import 'package:http/http.dart' as http;
 
@@ -32,12 +33,18 @@ class RecordPurchase extends BillingEndpoint {
   final String? appreferId;
   final Map<String, String> storeFields;
   final Map<String, String> attributes;
+
+  /// True only for Restore Purchases: it lets the server move a purchase that
+  /// already belongs to another app user to this one. Purchases and store
+  /// updates (renewals included) never set it.
+  final bool restore;
   const RecordPurchase(
     this.appUserId,
     this.appreferId,
     this.storeFields,
-    this.attributes,
-  );
+    this.attributes, {
+    this.restore = false,
+  });
 }
 
 class Identify extends BillingEndpoint {
@@ -97,6 +104,7 @@ class BillingApiClient {
         :final appreferId,
         :final storeFields,
         :final attributes,
+        :final restore,
       ):
         path = '/api/billing/v1/purchases';
         body = {
@@ -104,6 +112,7 @@ class BillingApiClient {
           ...storeFields,
           if (appreferId != null) 'appreferId': appreferId,
           if (attributes.isNotEmpty) 'attributes': attributes,
+          if (restore) 'restore': true,
         };
       case Identify(:final anonymousId, :final appUserId):
         path = '/api/billing/v1/identify';
@@ -198,6 +207,7 @@ class BillingApiClient {
         AppReferBillingErrorCode.server,
         status: status,
         message: message,
+        retryAfter: parseRetryAfter(response.headers['retry-after']),
       );
       if (status >= 500) {
         lastError = error;
@@ -206,5 +216,19 @@ class BillingApiClient {
       throw error;
     }
     throw lastError;
+  }
+
+  /// `Retry-After` as delta-seconds or an HTTP date; null when absent or unreadable.
+  static Duration? parseRetryAfter(String? value, {DateTime? now}) {
+    if (value == null || value.trim().isEmpty) return null;
+    final seconds = int.tryParse(value.trim());
+    if (seconds != null) return seconds < 0 ? null : Duration(seconds: seconds);
+    try {
+      final at = HttpDate.parse(value.trim());
+      final delta = at.difference(now ?? DateTime.now());
+      return delta.isNegative ? Duration.zero : delta;
+    } catch (_) {
+      return null;
+    }
   }
 }
