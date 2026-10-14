@@ -541,9 +541,13 @@ class BillingEngine {
             purchase.accountToken == null) {
           final lost = _intents.lostMarker();
           if (lost != null) {
-            final since = await _intents.hold(lost, _key(purchase));
+            await _intents.hold(lost, _key(purchase));
+            // From the earlier of the purchase and the loss, so it stays inside
+            // Google's 3-day acknowledgement window.
             final at = purchase.purchasedAt;
-            final from = at != null && at.isBefore(since) ? at : since;
+            final from = at != null && at.isBefore(lost.lostAt)
+                ? at
+                : lost.lostAt;
             if (_now().isBefore(from.add(PurchaseIntentStore.lostHold))) {
               _logger.warn(
                 'Billing: purchase ${purchase.id} left open: saved purchase intents were lost and it carries no account token',

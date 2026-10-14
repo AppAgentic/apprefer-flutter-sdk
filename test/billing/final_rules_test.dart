@@ -235,6 +235,28 @@ void main() {
       expect(sentUser(h), 'u2');
     });
 
+    test('the hold counts from the loss when the purchase is later', () async {
+      final h = await Harness.create(server: FakeServer()..online());
+      await h.prefs.setString(intentsKey, '[{"bad":1}]');
+      final engine = restarted(h, appUserId: 'u2');
+      await engine.process(h.store.applePurchase('t0', 'pro_yearly'));
+      expect(h.prefs.getString(lostKey), isNotNull);
+
+      // Bought a day after the loss: held until 48 h after the loss.
+      h.time = now.add(const Duration(hours: 24));
+      final later = h.store.googlePurchase(
+        'tok',
+        'pro_yearly',
+        orderId: 'GPA.1',
+        purchasedAt: h.time,
+      );
+      await engine.process(later);
+      expect(h.server.bodiesFor(purchases), isEmpty);
+      h.time = now.add(const Duration(hours: 48));
+      await engine.process(later);
+      expect(sentUser(h), 'u2');
+    });
+
     test('a guessed owner is noted on the rejected archive entry', () async {
       final h = await Harness.create(server: FakeServer()..status(400));
       await h.prefs.setString(intentsKey, '7');
