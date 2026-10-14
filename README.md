@@ -256,7 +256,7 @@ Testing: use a sandbox Apple ID or a Play license tester. Transactions from an X
 
 - Flutter 3.41+
 - Dart 3.11+
-- iOS 14.0+ / Android API 21+ (AppRefer Billing: iOS 15.0+)
+- iOS 15.0+ / Android API 21+ (the CocoaPods spec has required iOS 15 since before AppRefer Billing)
 
 ## License
 
