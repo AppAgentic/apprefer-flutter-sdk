@@ -98,9 +98,11 @@ class PendingPurchaseQueue {
   final String _key;
   List<PendingPurchase> _entries = [];
 
-  /// Transaction ids the stored queue is known to hold. An entry outside this
-  /// set is provisional: in memory only, not yet safe to complete.
-  Set<String> _onDisk = {};
+  /// What the stored queue is known to hold: each transaction id with its
+  /// encoded entry. An entry missing here, or whose in-memory contents differ
+  /// (e.g. replaced by a redelivery whose save failed), is provisional: not
+  /// yet safe to complete.
+  Map<String, String> _onDisk = {};
 
   /// The stored queue could not be read. Nothing is written then, so the
   /// purchases it holds are never overwritten; it is read again on the next
@@ -138,7 +140,7 @@ class PendingPurchaseQueue {
     } else {
       _entries = stored;
     }
-    _onDisk = {for (final e in stored) e.transactionId};
+    _onDisk = _encodeAll(stored);
     _unreadable = false;
   }
 
@@ -182,11 +184,23 @@ class PendingPurchaseQueue {
   bool contains(String transactionId) =>
       entries.any((e) => e.transactionId == transactionId);
 
-  /// Queued and on disk: the purchase may be completed with the store.
+  /// Queued and on disk as it is now: the purchase may be completed with the
+  /// store.
   bool isDurable(String transactionId) {
     _reloadIfUnreadable();
-    return _onDisk.contains(transactionId) && contains(transactionId);
+    final stored = _onDisk[transactionId];
+    if (stored == null) return false;
+    for (final e in _entries) {
+      if (e.transactionId == transactionId) return _encode(e) == stored;
+    }
+    return false;
   }
+
+  static String _encode(PendingPurchase e) => jsonEncode(e.toJson());
+
+  static Map<String, String> _encodeAll(List<PendingPurchase> entries) => {
+    for (final e in entries) e.transactionId: _encode(e),
+  };
 
   /// Adds or refreshes an entry; one entry per transaction id. A refreshed
   /// entry keeps its first queue time and adds to its attempts. An explicit
@@ -268,7 +282,7 @@ class PendingPurchaseQueue {
         _key,
         jsonEncode(snapshot.map((e) => e.toJson()).toList()),
       );
-      if (ok) _onDisk = {for (final e in snapshot) e.transactionId};
+      if (ok) _onDisk = _encodeAll(snapshot);
       return ok;
     } catch (_) {
       return false;

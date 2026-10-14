@@ -124,8 +124,10 @@ class BillingStorage {
       var ok = true;
       for (final MapEntry(key: key, value: (result, redo)) in writes.entries) {
         var done = await result;
+        // Replaced by a newer write meanwhile: that one is checked next round,
+        // and this one is never redone over it.
+        if (!identical(_pendingWrites[key]?.$2, redo)) continue;
         if (!done) done = await _attempt(redo);
-        // Replaced by a newer write meanwhile: that one is checked next round.
         if (!identical(_pendingWrites[key]?.$2, redo)) continue;
         if (done) {
           _pendingWrites.remove(key);

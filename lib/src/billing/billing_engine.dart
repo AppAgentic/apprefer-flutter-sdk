@@ -317,13 +317,16 @@ class BillingEngine {
   /// What callers see after a purchase upload failed or was rejected: the
   /// server answer with this customer's own store purchases merged in when
   /// the customer endpoint works; every purchase on the device only when
-  /// AppRefer can't be reached at all ([error] is a network failure, or the
-  /// customer fetch fails too).
+  /// AppRefer can't be reached at all. After a network failure one customer
+  /// fetch is still tried, and only if that fails too is the answer the
+  /// unrestricted store fallback.
   Future<AppReferCustomerInfo> _answerAfterUploadFailure([
     AppReferBillingException? error,
-  ]) => error?.code == AppReferBillingErrorCode.network
-      ? localFallback()
-      : customerInfo(FetchPolicy.cachedOrFetched);
+  ]) => customerInfo(
+    error?.code == AppReferBillingErrorCode.network
+        ? FetchPolicy.fetchCurrent
+        : FetchPolicy.cachedOrFetched,
+  );
 
   /// Outage path: every store-verified active purchase on the device merged
   /// with the cached server answer for the same user. A paying user is never

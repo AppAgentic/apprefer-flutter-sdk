@@ -363,8 +363,14 @@ void main() {
       expect(info.source, CustomerInfoSource.localFallback);
       expect(info.entitlements['premium']?.isActive, isTrue);
       expect(h.queue.entries.map((e) => e.transactionId), ['a', 'b']);
-      // Stopped after the first connectivity failure (2 hosts tried once).
-      expect(h.server.requests, hasLength(2));
+      // Stopped after the first connectivity failure (2 hosts tried once),
+      // then one customer fetch before the outage fallback.
+      expect(h.server.paths, [
+        'POST /api/billing/v1/purchases',
+        'POST /api/billing/v1/purchases',
+        'POST /api/billing/v1/customers',
+        'POST /api/billing/v1/customers',
+      ]);
     });
 
     test('a cancelled App Store sign-in throws', () async {
