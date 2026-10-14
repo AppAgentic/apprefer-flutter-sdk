@@ -11,6 +11,7 @@ import 'customer_info.dart';
 class RejectedPurchase {
   /// Apple transaction id / Google purchase token (empty when the store gave none).
   final String transactionId;
+  final bool migrationOnly;
   final String productId;
   final BillingStore store;
 
@@ -41,6 +42,7 @@ class RejectedPurchase {
 
   const RejectedPurchase({
     required this.transactionId,
+    this.migrationOnly = false,
     required this.productId,
     required this.store,
     required this.appUserId,
@@ -62,6 +64,7 @@ class RejectedPurchase {
 
   Map<String, dynamic> toJson() => {
     'transactionId': transactionId,
+    'migrationOnly': migrationOnly,
     'productId': productId,
     'store': store.value,
     'appUserId': appUserId,
@@ -90,6 +93,7 @@ class RejectedPurchase {
     final ms = json['rejectedAtMs'];
     return RejectedPurchase(
       transactionId: id,
+      migrationOnly: json['migrationOnly'] == true,
       productId: productId,
       store: store,
       appUserId: str(json['appUserId']),
@@ -191,7 +195,10 @@ class RejectedPurchaseLog {
 
   RejectedPurchase? entry(BillingStore store, String transactionId) {
     for (final e in entries) {
-      if (e.store == store && e.transactionId == transactionId) return e;
+      if (!e.migrationOnly &&
+          e.store == store &&
+          e.transactionId == transactionId)
+        return e;
     }
     return null;
   }

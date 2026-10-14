@@ -13,7 +13,13 @@ void main() {
     () async {
       final h = await Harness.create(appUserId: 'alice');
       h.server.online();
-      h.store.restoreList = [h.store.applePurchase('legacy', 'pro_yearly')];
+      h.store.restoreList = [
+        h.store.applePurchase(
+          'legacy',
+          'pro_yearly',
+          status: StorePurchaseStatus.restored,
+        ),
+      ];
       await h.engine.migrationSync();
       expect(h.storage.migrationSynced('alice'), isTrue);
       await h.engine.migrationSync();
@@ -44,7 +50,7 @@ void main() {
         h.store.googlePurchase(
           'legacy',
           'coins',
-          kind: StoreProductKind.consumable,
+          kind: StoreProductKind.nonConsumable,
           isAcknowledged: true,
         ),
       ];
@@ -73,12 +79,17 @@ void main() {
   test('missing signed proof does not set flag', () async {
     final h = await Harness.create(appUserId: 'alice');
     h.store.restoreList = [
-      h.store.applePurchase('legacy', 'pro_yearly', jws: null),
+      h.store.applePurchase(
+        'legacy',
+        'pro_yearly',
+        jws: null,
+        status: StorePurchaseStatus.restored,
+      ),
     ];
     await h.engine.migrationSync();
     expect(h.storage.migrationSynced('alice'), isFalse);
   });
-  test('startup leaves an imported unfinished purchase untouched', () async {
+  test('startup handles open purchases normally', () async {
     final h = await Harness.create(appUserId: 'alice');
     h.server.online();
     final legacy = h.store.googlePurchase(
@@ -90,12 +101,11 @@ void main() {
     h.store.unfinishedList = [legacy];
     await h.engine.start();
     await h.engine.resume();
-    expect(h.store.completed, isEmpty);
-    expect(h.store.acknowledged, isEmpty);
-    expect(h.server.bodiesFor('/api/billing/v1/purchases'), hasLength(1));
+    expect(h.store.completed, contains('legacy'));
+    expect(h.server.bodiesFor('/api/billing/v1/purchases'), hasLength(2));
     expect(
       BillingStorage(h.prefs).isMigrationPurchase('playStore:legacy'),
-      isTrue,
+      isFalse,
     );
     await h.engine.dispose();
   });
@@ -105,8 +115,16 @@ void main() {
       () async {
         final h = await Harness.create(appUserId: 'alice');
         h.store.restoreList = [
-          h.store.applePurchase('one', 'pro_yearly'),
-          h.store.applePurchase('two', 'pro_yearly'),
+          h.store.applePurchase(
+            'one',
+            'pro_yearly',
+            status: StorePurchaseStatus.restored,
+          ),
+          h.store.applePurchase(
+            'two',
+            'pro_yearly',
+            status: StorePurchaseStatus.restored,
+          ),
         ];
         h.server.status(status);
         await h.engine.migrationSync();

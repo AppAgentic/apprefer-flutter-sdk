@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/services.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:in_app_purchase_android/billing_client_wrappers.dart';
 import 'package:in_app_purchase_android/in_app_purchase_android.dart';
@@ -255,34 +256,70 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
   @override
   Future<List<StorePurchase>> migrationPurchases() async {
     if (!_isApple) return _googleOwned();
-    final transactions = await SK2Transaction.transactions();
+    // The plugin's transactions() enumerates Transaction.all and omits the JWS.
+    // Our read-only bridge enumerates verified currentEntitlements with signed proofs.
+    final transactions =
+        await const MethodChannel(
+          'com.apprefer.sdk/adservices',
+        ).invokeListMethod<Object?>('billingCurrentEntitlements') ??
+        [];
+    return migrationEntitlements(transactions);
+  }
+
+  @visibleForTesting
+  static List<StorePurchase> migrationEntitlements(List<Object?> transactions) {
     final now = DateTime.now();
     final out = <StorePurchase>[];
-    for (final t in transactions) {
-      final json = AppleTransactionJson.parse(t.jsonRepresentation);
+    for (final raw in transactions) {
+      if (raw is! Map) continue;
+      final id = raw['id'] is String ? raw['id'] as String : '';
+      final productId = raw['productId'] is String
+          ? raw['productId'] as String
+          : '';
+      final json = AppleTransactionJson.parse(
+        raw['json'] is String ? raw['json'] as String : '',
+      );
       if (json == null) {
-        throw const AppReferBillingException(
-          AppReferBillingErrorCode.store,
-          message: 'Could not read a StoreKit transaction',
+        // Keep an unverifiable leftover so the engine retries it without discarding
+        // the valid siblings or setting the per-user completion flag.
+        out.add(
+          StorePurchase(
+            id: id,
+            productId: productId,
+            store: BillingStore.appStore,
+            status: StorePurchaseStatus.restored,
+            needsCompletion: false,
+          ),
         );
+        continue;
       }
       final entitlement = json.toEntitlement(
-        fallbackProductId: t.productId,
-        fallbackOriginalId: t.originalId,
-        transactionId: t.id,
-        fallbackAccountToken: _nonEmpty(t.appAccountToken),
+        fallbackProductId: productId,
+        fallbackOriginalId: raw['originalId'] is String
+            ? raw['originalId'] as String
+            : '',
+        transactionId: id,
+        fallbackAccountToken: raw['accountToken'] is String
+            ? _nonEmpty(raw['accountToken'] as String)
+            : null,
       );
       if (!entitlement.grantsAccessAt(now)) continue;
       out.add(
         StorePurchase(
-          id: t.id,
-          productId: t.productId,
+          id: id,
+          productId: productId,
           store: BillingStore.appStore,
           status: StorePurchaseStatus.restored,
-          signedTransaction: t.receiptData,
+          signedTransaction: raw['signedTransaction'] is String
+              ? raw['signedTransaction'] as String
+              : null,
           kind: json.kind,
-          accountToken: _nonEmpty(t.appAccountToken),
-          originalTransactionId: _nonEmpty(t.originalId),
+          accountToken: raw['accountToken'] is String
+              ? _nonEmpty(raw['accountToken'] as String)
+              : null,
+          originalTransactionId: raw['originalId'] is String
+              ? _nonEmpty(raw['originalId'] as String)
+              : null,
           purchasedAt: json.purchaseDate,
           needsCompletion: false,
         ),

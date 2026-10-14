@@ -160,8 +160,12 @@ class FakeStore implements BillingStoreAdapter {
   @override
   Future<List<StorePurchase>> restore() async => restoreList;
 
+  Future<void> Function()? onMigrationQuery;
   @override
-  Future<List<StorePurchase>> migrationPurchases() async => restoreList;
+  Future<List<StorePurchase>> migrationPurchases() async {
+    await onMigrationQuery?.call();
+    return restoreList;
+  }
 
   StorePurchase applePurchase(
     String id,
@@ -279,6 +283,21 @@ class Harness {
     this.storage,
     this.queue,
     this.engine,
+  );
+
+  BillingEngine rebuild() => BillingEngine(
+    api: BillingApiClient(
+      baseUrls: const ['https://example.com'],
+      apiKey: () => 'pk_test_1',
+      client: server.client,
+      keyWaitAttempts: 0,
+    ),
+    storage: BillingStorage(prefs),
+    queue: PendingPurchaseQueue(prefs, BillingStorage.pendingPurchasesKey),
+    store: store,
+    appUserId: 'alice',
+    appreferId: () async => 'device-1',
+    now: () => time,
   );
 
   static Future<Harness> create({

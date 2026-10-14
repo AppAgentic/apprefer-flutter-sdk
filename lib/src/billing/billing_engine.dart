@@ -217,68 +217,89 @@ class BillingEngine {
   /// queue and refreshes entitlements.
   Future<void> start() async {
     listen();
-    await migrationSync();
     await retryUnfinished();
     await customerInfo(FetchPolicy.fetchCurrent);
+    unawaited(migrationSync());
   }
 
   /// App came to the foreground: retries failed store completions (Google
   /// acknowledge/consume), refreshes entitlements and drains the queue.
   Future<void> resume() async {
-    await migrationSync();
     await retryUnfinished();
     await customerInfo(FetchPolicy.cachedOrFetched);
+    await migrationSync();
     await drainQueue();
   }
 
   /// Read-only import into the existing durable retry queue.
   Future<void> migrationSync([String? forUser]) async {
     final active = await _activeUser();
-    if (active == null) return;
+    if (active == null || (forUser != null && forUser != active)) return;
     final user = forUser ?? active;
     if (!_migratingUsers.add(user)) return;
     try {
       if (_storage.migrationSynced(user)) return;
       final intents = await _intents.read();
       if (_intents.lostMarker() != null) return;
+      final open = {
+        for (final p in await _store.unfinished()) '${p.store.name}:${p.id}',
+      };
       final purchases = await _store.migrationPurchases();
+      if (await _activeUser() != user) return;
       final deviceId = await _safeAppreferId();
       var durable = true;
       var imported = false;
       for (final purchase in purchases) {
+        if (await _activeUser() != user) return;
+        if (open.contains('${purchase.store.name}:${purchase.id}') ||
+            purchase.needsCompletion ||
+            purchase.needsAcknowledgement ||
+            (purchase.store == BillingStore.playStore &&
+                purchase.kind == StoreProductKind.consumable)) {
+          durable = false;
+          continue;
+        }
+        if (purchase.accountToken != null &&
+            _storage.appUserIdForAccountToken(purchase.accountToken!) != user)
+          continue;
+        final progress =
+            '${Uri.encodeComponent(user)}:${purchase.store.name}:${purchase.id}';
+        if (_storage.isMigrationPurchase(progress)) continue;
         if (_queue.entries.any(
               (e) => e.transactionId == purchase.id && e.appUserId == user,
             ) &&
-            _queue.isDurable(purchase.id))
+            _queue.isDurable(purchase.id)) {
+          if (!await _storage.markMigrationPurchase(progress)) durable = false;
           continue;
+        }
         if (intents.any((intent) => intent.productId == purchase.productId)) {
           durable = false;
           continue;
         }
-        if (!await _storage.markMigrationPurchase(
-          '${purchase.store.name}:${purchase.id}',
-        ))
-          durable = false;
         final fields = purchase.storeFields;
-        if (fields == null) {
+        if (purchase.id.isEmpty || fields == null) {
           durable = false;
           continue;
         }
         final key = 'migration:${Uri.encodeComponent(user)}:${purchase.id}';
-        if (_queue.isDurable(key)) continue;
+        if (_queue.isDurable(key)) {
+          if (!await _storage.markMigrationPurchase(progress)) durable = false;
+          continue;
+        }
         imported = true;
         if (!await _queue.add(
-          PendingPurchase(
-            transactionId: key,
-            productId: purchase.productId,
-            appUserId: user,
-            appreferId: deviceId,
-            storeFields: fields,
-            enqueuedAt: _now(),
-            attempts: 0,
-            migrationOnly: true,
-          ),
-        ))
+              PendingPurchase(
+                transactionId: key,
+                productId: purchase.productId,
+                appUserId: user,
+                appreferId: deviceId,
+                storeFields: fields,
+                enqueuedAt: _now(),
+                attempts: 0,
+                migrationOnly: true,
+              ),
+            ) ||
+            !await _storage.markMigrationPurchase(progress))
           durable = false;
       }
       if (durable) await _storage.markMigrationSynced(user);
@@ -577,11 +598,6 @@ class BillingEngine {
     // A renewal never matches or uses up a saved intent, even one handed in
     // by the purchase sheet that is waiting.
     final waiterIntent = purchase.isRenewal ? null : suppliedIntent;
-    if (initiator == null &&
-        waiterIntent == null &&
-        _storage.isMigrationPurchase('${purchase.store.name}:${purchase.id}')) {
-      return localFallback();
-    }
     final fields = purchase.storeFields;
     if (fields == null || purchase.id.isEmpty) {
       _logger.error(
@@ -953,11 +969,6 @@ class BillingEngine {
       return;
     }
     for (final purchase in open) {
-      if (_storage.isMigrationPurchase(
-            '${purchase.store.name}:${purchase.id}',
-          ) &&
-          !_queue.contains(purchase.id))
-        continue;
       if (_recorded.contains(purchase.id)) {
         if (await _complete(purchase)) _recorded.remove(purchase.id);
       } else if (_queue.contains(purchase.id)) {
@@ -1266,7 +1277,12 @@ class BillingEngine {
   Future<void> _moveToRejected(PendingPurchase entry, String reason) async {
     final saved = await _rejected.add(
       RejectedPurchase(
-        transactionId: entry.transactionId,
+        transactionId: entry.migrationOnly
+            ? entry.transactionId.substring(
+                'migration:${Uri.encodeComponent(entry.appUserId)}:'.length,
+              )
+            : entry.transactionId,
+        migrationOnly: entry.migrationOnly,
         productId: entry.productId,
         store: entry.storeFields['store'] == 'play_store'
             ? BillingStore.playStore

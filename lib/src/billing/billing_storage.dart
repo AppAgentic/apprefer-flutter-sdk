@@ -54,12 +54,13 @@ class BillingStorage {
       prefs.getString('apprefer_billing_import:${Uri.encodeComponent(id)}') ==
           'readonly';
   Future<bool> markMigrationPurchase(String id) async {
-    _importedIds.add(id);
     try {
-      return await prefs.setString(
+      final saved = await prefs.setString(
         'apprefer_billing_import:${Uri.encodeComponent(id)}',
         'readonly',
       );
+      if (saved) _importedIds.add(id);
+      return saved;
     } catch (_) {
       return false;
     }
