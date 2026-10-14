@@ -167,6 +167,9 @@ class BillingApiClient {
       AppReferBillingErrorCode.network,
       message: 'no endpoint',
     );
+    // A host that answered with Retry-After asked for a pause; a later host
+    // that merely could not be reached must not lose that.
+    AppReferBillingException? pause;
 
     for (final baseUrl in baseUrls) {
       final request = makeRequest(endpoint, baseUrl, key);
@@ -185,11 +188,26 @@ class BillingApiClient {
 
       final status = response.statusCode;
       if (status >= 200 && status < 300) {
+        final Map<String, dynamic> json;
         try {
-          final decoded = jsonDecode(response.body);
-          return BillingCustomerResponse.fromJson(
-            Map<String, dynamic>.from(decoded as Map),
+          json = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+        } catch (_) {
+          throw const AppReferBillingException(
+            AppReferBillingErrorCode.invalidResponse,
           );
+        }
+        if (endpoint is RecordPurchase && !isRecorded(json)) {
+          // Older servers answered 200 when the purchase was verified but not
+          // recorded; treat it like today's 503 so the retry copy is kept.
+          throw const AppReferBillingException(
+            AppReferBillingErrorCode.server,
+            status: 503,
+            message: 'purchase verified but not recorded yet',
+            retryAfter: legacyRetryAfter,
+          );
+        }
+        try {
+          return BillingCustomerResponse.fromJson(json);
         } catch (_) {
           throw const AppReferBillingException(
             AppReferBillingErrorCode.invalidResponse,
@@ -211,11 +229,21 @@ class BillingApiClient {
       );
       if (status >= 500) {
         lastError = error;
+        if (error.retryAfter != null) pause = error;
         continue;
       }
       throw error;
     }
-    throw lastError;
+    throw lastError.retryAfter == null && pause != null ? pause : lastError;
+  }
+
+  /// The pause for a legacy "verified but not recorded" 200.
+  static const legacyRetryAfter = Duration(seconds: 30);
+
+  /// False only when a 2xx purchase answer says the ledger write failed.
+  static bool isRecorded(Map<String, dynamic> json) {
+    final purchase = json['purchase'];
+    return purchase is! Map || purchase['conversion'] != 'failed';
   }
 
   /// `Retry-After` as delta-seconds or an HTTP date; null when absent or unreadable.

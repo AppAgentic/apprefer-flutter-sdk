@@ -75,6 +75,11 @@ class AppReferBillingException implements Exception {
       code == AppReferBillingErrorCode.server &&
       const {401, 403, 404, 409, 429}.contains(status);
 
+  /// The retry queue waits (backing off, or for the server's Retry-After, e.g.
+  /// 503 when it verified a purchase but couldn't record it yet) and keeps the
+  /// purchase without counting an attempt.
+  bool get pausesQueue => isBackoff || (isRetryable && retryAfter != null);
+
   /// AppRefer is unreachable (stop sending more requests for now).
   bool get isConnectivity {
     switch (code) {

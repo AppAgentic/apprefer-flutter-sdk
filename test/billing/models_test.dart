@@ -267,7 +267,7 @@ void main() {
       await q.add(entry('ok'));
       await q.add(entry('tired', attempts: PendingPurchaseQueue.maxAttempts));
       await q.add(entry('old', at: now.subtract(const Duration(days: 91))));
-      final dropped = q.prune(now);
+      final dropped = await q.prune(now);
       expect(
         dropped.map((e) => e.transactionId),
         unorderedEquals(['tired', 'old']),

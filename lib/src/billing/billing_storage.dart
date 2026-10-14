@@ -27,8 +27,13 @@ class BillingStorage {
 
   final SharedPreferences prefs;
 
-  /// Identity writes not yet confirmed on disk, with how to redo each one.
-  final _pendingWrites = <(Future<bool>, Future<bool> Function())>[];
+  /// Identity writes not yet confirmed on disk, by key, with how to redo
+  /// each one. A newer write to a key replaces the older one, so a failed
+  /// stale write is never redone over a newer value.
+  final _pendingWrites = <String, (Future<bool>, Future<bool> Function())>{};
+
+  /// The one flush running now; every caller waits on it.
+  Future<bool>? _flushing;
 
   BillingStorage(this.prefs);
 
@@ -59,8 +64,11 @@ class BillingStorage {
 
   bool get hasAnonymousId => _readIdentity(_anonymousId) != null;
 
-  /// `$ARAnon:<UUID>`, minted once and kept for the install. Throws
-  /// [AppReferBillingErrorCode.storage] when the stored id can't be read.
+  /// `$ARAnon:<UUID>`, minted once and kept for the install. Minted only
+  /// when the read confirms there is none (or what is stored is not an
+  /// anonymous id); throws [AppReferBillingErrorCode.storage] when the stored
+  /// id can't be read. A minted id is in memory until [flush] confirms it on
+  /// disk, and `BillingEngine` sends or binds nothing under it before then.
   String anonymousId() {
     final existing = _readIdentity(_anonymousId);
     if (existing != null && isAnonymous(existing)) return existing;
@@ -69,7 +77,7 @@ class BillingStorage {
 
   String resetAnonymousId() {
     final id = '$anonymousPrefix${generateUuidV4().toUpperCase()}';
-    _write(() => prefs.setString(_anonymousId, id));
+    _write(_anonymousId, () => prefs.setString(_anonymousId, id));
     return id;
   }
 
@@ -79,9 +87,9 @@ class BillingStorage {
 
   set loggedInAppUserId(String? value) {
     if (value == null) {
-      _write(() => prefs.remove(_appUserId));
+      _write(_appUserId, () => prefs.remove(_appUserId));
     } else {
-      _write(() => prefs.setString(_appUserId, value));
+      _write(_appUserId, () => prefs.setString(_appUserId, value));
     }
   }
 
@@ -89,8 +97,8 @@ class BillingStorage {
 
   /// SharedPreferences updates its in-memory copy at once and writes to disk
   /// later; the write's result is kept so [flush] can check it.
-  void _write(Future<bool> Function() write) {
-    _pendingWrites.add((_attempt(write), write));
+  void _write(String key, Future<bool> Function() write) {
+    _pendingWrites[key] = (_attempt(write), write);
   }
 
   static Future<bool> _attempt(Future<bool> Function() write) async {
@@ -101,23 +109,34 @@ class BillingStorage {
     }
   }
 
-  /// Waits for identity writes and redoes any that failed once. False when
-  /// one still did not reach disk: callers then must not send that identity
-  /// or finish a purchase made under it.
-  Future<bool> flush() async {
-    if (_pendingWrites.isEmpty) return true;
-    final writes = List.of(_pendingWrites);
-    _pendingWrites.clear();
-    var ok = true;
-    for (final (result, redo) in writes) {
-      if (await result) continue;
-      final retried = _attempt(redo);
-      if (!await retried) {
-        ok = false;
-        _pendingWrites.add((retried, redo));
+  /// Waits for identity writes, including ones made while it waits, and
+  /// redoes any that failed once. False when one still did not reach disk:
+  /// callers then must not send that identity or finish a purchase made
+  /// under it. Concurrent callers share one flush, so none sees an empty list
+  /// while another's writes are still unconfirmed.
+  Future<bool> flush() {
+    return _flushing ??= _flush().whenComplete(() => _flushing = null);
+  }
+
+  Future<bool> _flush() async {
+    while (_pendingWrites.isNotEmpty) {
+      final writes = Map.of(_pendingWrites);
+      var ok = true;
+      for (final MapEntry(key: key, value: (result, redo)) in writes.entries) {
+        var done = await result;
+        if (!done) done = await _attempt(redo);
+        // Replaced by a newer write meanwhile: that one is checked next round.
+        if (!identical(_pendingWrites[key]?.$2, redo)) continue;
+        if (done) {
+          _pendingWrites.remove(key);
+        } else {
+          ok = false;
+          _pendingWrites[key] = (Future.value(false), redo);
+        }
       }
+      if (!ok) return false;
     }
-    return ok;
+    return true;
   }
 
   // --- Account tokens (Apple appAccountToken / Google obfuscatedAccountId) ---
@@ -212,15 +231,18 @@ class BillingStorage {
   }
 
   set pendingIdentifies(List<PendingIdentify> value) {
-    _write(() => prefs.remove(_pendingIdentify));
+    _write(_pendingIdentify, () => prefs.remove(_pendingIdentify));
     if (value.isEmpty) {
-      _write(() => prefs.remove(_pendingIdentifies));
+      _write(_pendingIdentifies, () => prefs.remove(_pendingIdentifies));
     } else {
       final encoded = jsonEncode([
         for (final e in value)
           {'anonymousId': e.anonymousId, 'appUserId': e.appUserId},
       ]);
-      _write(() => prefs.setString(_pendingIdentifies, encoded));
+      _write(
+        _pendingIdentifies,
+        () => prefs.setString(_pendingIdentifies, encoded),
+      );
     }
   }
 

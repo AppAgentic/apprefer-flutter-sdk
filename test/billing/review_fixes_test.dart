@@ -243,7 +243,7 @@ void main() {
       expect(h.store.acknowledged, ['tok_1']);
     });
 
-    test('acknowledged even when the queue could not be saved', () async {
+    test('not acknowledged until the queue entry is saved', () async {
       late FlakyPrefs flaky;
       final h = await Harness.create(wrapPrefs: (p) => flaky = FlakyPrefs(p));
       h.store.store = BillingStore.playStore;
@@ -251,7 +251,13 @@ void main() {
       expect(await h.storage.flush(), isTrue);
       flaky.failWrites = true;
       await h.engine.process(h.store.googlePurchase('tok_1', 'pro_yearly'));
+      expect(h.store.acknowledged, isEmpty);
+
+      flaky.failWrites = false;
+      h.store.unfinishedList = [h.store.googlePurchase('tok_1', 'pro_yearly')];
+      await h.engine.retryUnfinished();
       expect(h.store.acknowledged, ['tok_1']);
+      expect(h.queue.isDurable('tok_1'), isTrue);
     });
 
     test('a failed acknowledge is retried on foreground', () async {

@@ -86,23 +86,36 @@ class PendingPurchase {
   }
 }
 
-/// Disk-backed retry queue. Purchases are completed with the store as soon as
-/// they are queued (so the store never redelivers forever and Google never
-/// auto-refunds an unacknowledged purchase); the signed data stays here until
-/// AppRefer accepts it. Owned by `BillingEngine`.
+/// Disk-backed retry queue. A purchase is completed with the store only once
+/// its entry is on disk ([isDurable]), so the store never redelivers forever
+/// and Google never auto-refunds; the signed data stays here until AppRefer
+/// accepts it. Owned by `BillingEngine`.
 class PendingPurchaseQueue {
   static const maxAttempts = 50;
   static const maxAge = Duration(days: 90);
 
   final SharedPreferences _prefs;
   final String _key;
-  List<PendingPurchase> _entries;
+  List<PendingPurchase> _entries = [];
+
+  /// Transaction ids the stored queue is known to hold. An entry outside this
+  /// set is provisional: in memory only, not yet safe to complete.
+  Set<String> _onDisk = {};
 
   /// The stored queue could not be read. Nothing is written then, so the
-  /// purchases it holds are never overwritten with an empty list.
+  /// purchases it holds are never overwritten; it is read again on the next
+  /// use and merged with what was queued meanwhile.
   bool _unreadable = false;
 
-  PendingPurchaseQueue(this._prefs, this._key) : _entries = [] {
+  /// Removed while the stored queue was unreadable, so the merge does not
+  /// bring them back.
+  final _removedWhileUnreadable = <String>{};
+
+  PendingPurchaseQueue(this._prefs, this._key) {
+    _load();
+  }
+
+  void _load() {
     final String? raw;
     try {
       raw = _prefs.getString(_key);
@@ -110,11 +123,34 @@ class PendingPurchaseQueue {
       _unreadable = true;
       return;
     }
-    _entries = _decode(raw);
+    final stored = _decode(raw);
+    if (_unreadable) {
+      // Recovered: keep what was queued meanwhile, add what disk held.
+      final known = {for (final e in _entries) e.transactionId};
+      _entries = [
+        ..._entries,
+        for (final e in stored)
+          if (!known.contains(e.transactionId) &&
+              !_removedWhileUnreadable.contains(e.transactionId))
+            e,
+      ];
+      _removedWhileUnreadable.clear();
+    } else {
+      _entries = stored;
+    }
+    _onDisk = {for (final e in stored) e.transactionId};
+    _unreadable = false;
+  }
+
+  void _reloadIfUnreadable() {
+    if (_unreadable) _load();
   }
 
   /// Whether the stored queue could not be read (writes are refused).
-  bool get isUnreadable => _unreadable;
+  bool get isUnreadable {
+    _reloadIfUnreadable();
+    return _unreadable;
+  }
 
   static List<PendingPurchase> _decode(String? raw) {
     if (raw == null) return [];
@@ -130,27 +166,48 @@ class PendingPurchaseQueue {
     }
   }
 
-  List<PendingPurchase> get entries => List.unmodifiable(_entries);
+  List<PendingPurchase> get entries {
+    _reloadIfUnreadable();
+    return List.unmodifiable(_entries);
+  }
 
-  bool get isEmpty => _entries.isEmpty;
+  bool get isEmpty {
+    _reloadIfUnreadable();
+    return _entries.isEmpty;
+  }
 
   bool containsUser(String appUserId) =>
-      _entries.any((e) => e.appUserId == appUserId);
+      entries.any((e) => e.appUserId == appUserId);
 
   bool contains(String transactionId) =>
-      _entries.any((e) => e.transactionId == transactionId);
+      entries.any((e) => e.transactionId == transactionId);
+
+  /// Queued and on disk: the purchase may be completed with the store.
+  bool isDurable(String transactionId) {
+    _reloadIfUnreadable();
+    return _onDisk.contains(transactionId) && contains(transactionId);
+  }
 
   /// Adds or refreshes an entry; one entry per transaction id. A refreshed
-  /// entry keeps its first queue time and adds to its attempts, and a restore
-  /// stays a restore. Returns whether the queue was written to disk: only then
-  /// may the purchase be finished with the store.
-  Future<bool> add(PendingPurchase entry) async {
+  /// entry keeps its first queue time and adds to its attempts. An explicit
+  /// restore ([PendingPurchase.restore]) takes the entry over for the
+  /// restoring customer; any other redelivery keeps the queued owner and a
+  /// queued restore stays a restore. Returns whether the queue was written to
+  /// disk: only then may the purchase be completed with the store.
+  Future<bool> add(PendingPurchase entry) {
+    _reloadIfUnreadable();
     final index = _entries.indexWhere(
       (e) => e.transactionId == entry.transactionId,
     );
     if (index >= 0) {
       final old = _entries[index];
-      _entries[index] = entry.copyWith(
+      final owner = entry.restore ? entry : old;
+      _entries[index] = PendingPurchase(
+        transactionId: old.transactionId,
+        productId: old.productId,
+        appUserId: owner.appUserId,
+        appreferId: owner.appreferId,
+        storeFields: entry.storeFields,
         enqueuedAt: old.enqueuedAt,
         attempts: old.attempts + entry.attempts,
         restore: old.restore || entry.restore,
@@ -162,11 +219,14 @@ class PendingPurchaseQueue {
   }
 
   Future<bool> remove(String transactionId) {
+    _reloadIfUnreadable();
     _entries.removeWhere((e) => e.transactionId == transactionId);
+    if (_unreadable) _removedWhileUnreadable.add(transactionId);
     return _save();
   }
 
   Future<bool> recordAttempt(String transactionId) {
+    _reloadIfUnreadable();
     final index = _entries.indexWhere((e) => e.transactionId == transactionId);
     if (index < 0) return Future.value(true);
     _entries[index] = _entries[index].withAttempts(
@@ -175,9 +235,16 @@ class PendingPurchaseQueue {
     return _save();
   }
 
+  /// Writes the queue again (after a failed write or an unreadable read).
+  Future<bool> persist() {
+    _reloadIfUnreadable();
+    return _save();
+  }
+
   /// Drops entries that have failed too often or are too old. The server still
   /// gets those purchases from App Store / Google Play notifications.
-  List<PendingPurchase> prune(DateTime now) {
+  Future<List<PendingPurchase>> prune(DateTime now) async {
+    _reloadIfUnreadable();
     final dropped = _entries
         .where(
           (e) =>
@@ -188,17 +255,21 @@ class PendingPurchaseQueue {
     if (dropped.isEmpty) return const [];
     final ids = dropped.map((e) => e.transactionId).toSet();
     _entries.removeWhere((e) => ids.contains(e.transactionId));
-    _save();
+    if (_unreadable) _removedWhileUnreadable.addAll(ids);
+    await _save();
     return dropped;
   }
 
   Future<bool> _save() async {
     if (_unreadable) return false;
+    final snapshot = List.of(_entries);
     try {
-      return await _prefs.setString(
+      final ok = await _prefs.setString(
         _key,
-        jsonEncode(_entries.map((e) => e.toJson()).toList()),
+        jsonEncode(snapshot.map((e) => e.toJson()).toList()),
       );
+      if (ok) _onDisk = {for (final e in snapshot) e.transactionId};
+      return ok;
     } catch (_) {
       return false;
     }
