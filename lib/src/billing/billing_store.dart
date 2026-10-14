@@ -37,6 +37,15 @@ class StorePurchase {
   /// made with, when the store reports one.
   final String? accountToken;
 
+  /// Apple `originalTransactionId`, when the store reports one.
+  final String? originalTransactionId;
+
+  /// Google Play order id (`GPA.1234-5678-9012-34567`, renewals end in `..N`).
+  final String? orderId;
+
+  /// When the store says the purchase was made, when it does.
+  final DateTime? purchasedAt;
+
   /// The plugin object, handed back to the app in `PurchaseResult`.
   final PurchaseDetails? details;
 
@@ -60,6 +69,9 @@ class StorePurchase {
     bool? needsAcknowledgement,
     this.errorMessage,
     this.accountToken,
+    this.originalTransactionId,
+    this.orderId,
+    this.purchasedAt,
     this.details,
     Future<void> Function()? complete,
     Future<void> Function()? acknowledge,
@@ -68,6 +80,23 @@ class StorePurchase {
        acknowledge = acknowledge ?? complete ?? _noop;
 
   static Future<void> _noop() async {}
+
+  static final _googleRenewalOrder = RegExp(r'\.\.\d+$');
+
+  /// A subscription renewal, not a purchase someone started: Apple when the
+  /// original transaction id differs from the transaction id, Google when the
+  /// order id carries a `..N` renewal suffix (not the first order of its
+  /// chain). A renewal never matches or uses up a saved purchase intent.
+  bool get isRenewal => switch (store) {
+    BillingStore.appStore =>
+      originalTransactionId != null &&
+          originalTransactionId!.isNotEmpty &&
+          id.isNotEmpty &&
+          originalTransactionId != id,
+    BillingStore.playStore =>
+      orderId != null && _googleRenewalOrder.hasMatch(orderId!),
+    _ => false,
+  };
 
   /// A Google Play consumable (consumed only after AppRefer recorded it).
   bool get isGoogleConsumable =>

@@ -89,6 +89,12 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
         accountToken: _nonEmpty(
           details.billingClientPurchase.obfuscatedAccountId,
         ),
+        orderId: _nonEmpty(details.billingClientPurchase.orderId),
+        purchasedAt: details.billingClientPurchase.purchaseTime > 0
+            ? DateTime.fromMillisecondsSinceEpoch(
+                details.billingClientPurchase.purchaseTime,
+              )
+            : null,
         details: details,
         complete: () =>
             consumable ? _consumeGoogle(details) : _acknowledgeGoogle(details),
@@ -111,6 +117,8 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
       needsCompletion: details.pendingCompletePurchase,
       errorMessage: details.error?.message,
       accountToken: json?.appAccountToken,
+      originalTransactionId: json?.originalTransactionId,
+      purchasedAt: json?.purchaseDate,
       details: details,
       complete: () async {
         if (details.pendingCompletePurchase)
@@ -230,6 +238,10 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
             signedTransaction: t.receiptData,
             kind: AppleTransactionJson.parse(t.jsonRepresentation)?.kind,
             accountToken: _nonEmpty(t.appAccountToken),
+            originalTransactionId: _nonEmpty(t.originalId),
+            purchasedAt: AppleTransactionJson.parse(
+              t.jsonRepresentation,
+            )?.purchaseDate,
             complete: () => SK2Transaction.finish(int.parse(t.id)),
           ),
       ];
@@ -356,6 +368,8 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
           needsCompletion: mapped.needsCompletion,
           needsAcknowledgement: mapped.needsAcknowledgement,
           accountToken: mapped.accountToken,
+          orderId: mapped.orderId,
+          purchasedAt: mapped.purchasedAt,
           details: details,
           complete: mapped.complete,
           acknowledge: mapped.acknowledge,
@@ -427,6 +441,7 @@ class AppleTransactionJson {
   final bool isUpgraded;
   final BillingPeriodType periodType;
   final String? appAccountToken;
+  final DateTime? purchaseDate;
 
   const AppleTransactionJson({
     this.productId,
@@ -437,6 +452,7 @@ class AppleTransactionJson {
     this.isUpgraded = false,
     this.periodType = BillingPeriodType.normal,
     this.appAccountToken,
+    this.purchaseDate,
   });
 
   static AppleTransactionJson? parse(String? raw) {
@@ -474,6 +490,7 @@ class AppleTransactionJson {
                 (json['appAccountToken'] as String).isNotEmpty
             ? json['appAccountToken'] as String
             : null,
+        purchaseDate: _date(json['purchaseDate']),
       );
     } catch (_) {
       return null;

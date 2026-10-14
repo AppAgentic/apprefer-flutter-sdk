@@ -167,6 +167,8 @@ class FakeStore implements BillingStoreAdapter {
     String? jws = 'jws.payload.sig',
     StoreProductKind kind = StoreProductKind.autoRenewable,
     String? accountToken,
+    String? originalTransactionId,
+    DateTime? purchasedAt,
   }) => StorePurchase(
     id: id,
     productId: productId,
@@ -175,6 +177,8 @@ class FakeStore implements BillingStoreAdapter {
     signedTransaction: jws,
     kind: kind,
     accountToken: accountToken,
+    originalTransactionId: originalTransactionId,
+    purchasedAt: purchasedAt,
     needsCompletion: status == StorePurchaseStatus.purchased,
     complete: () => _finish(id, completed),
   );
@@ -188,6 +192,8 @@ class FakeStore implements BillingStoreAdapter {
     StorePurchaseStatus status = StorePurchaseStatus.purchased,
     String? accountToken,
     bool isAcknowledged = false,
+    String? orderId,
+    DateTime? purchasedAt,
   }) => StorePurchase(
     id: purchaseToken,
     productId: productId,
@@ -196,6 +202,8 @@ class FakeStore implements BillingStoreAdapter {
     purchaseToken: purchaseToken,
     kind: kind,
     accountToken: accountToken,
+    orderId: orderId,
+    purchasedAt: purchasedAt,
     needsCompletion: kind == StoreProductKind.consumable || !isAcknowledged,
     needsAcknowledgement: !isAcknowledged,
     complete: () => _finish(purchaseToken, completed),

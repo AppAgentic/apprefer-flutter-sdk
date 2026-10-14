@@ -145,6 +145,7 @@ class BillingEngine {
            PurchaseIntentStore(
              storage.prefs,
              BillingStorage.purchaseIntentsKey,
+             now: now,
            ),
        _options = options,
        _appreferId = appreferId,
@@ -439,7 +440,10 @@ class BillingEngine {
         );
       case StorePurchaseStatus.purchased:
       case StorePurchaseStatus.restored:
-        final waiter = _waiters.remove(purchase.productId);
+        // A renewal is not the purchase a waiting `purchase()` call started.
+        final waiter = purchase.isRenewal
+            ? null
+            : _waiters.remove(purchase.productId);
         final info = await process(
           purchase,
           appUserId: waiter?.appUserId,
@@ -474,8 +478,11 @@ class BillingEngine {
   ///
   /// [appUserId] is the user who started the purchase. Otherwise a purchase
   /// tagged with an account token issued to a user on this device goes to that
-  /// user, then one matching a saved purchase intent to the user who started
-  /// it, and anything else to the current user. Never sent as a restore.
+  /// user, then a new purchase (never a renewal) matching a saved purchase
+  /// intent to the user who started it, and anything else to the current
+  /// user. While saved intents are lost (see [PurchaseIntentStore]) an
+  /// untagged new purchase with no intent is left open with the store for up
+  /// to 48 hours before it goes to the current user. Never sent as a restore.
   Future<AppReferCustomerInfo> process(
     StorePurchase purchase, {
     String? appUserId,
@@ -523,20 +530,43 @@ class BillingEngine {
       return localFallback();
     }
     final byToken = initiator == null ? _ownerByToken(purchase) : null;
-    PurchaseIntent? intent;
-    try {
-      intent =
-          waiterIntent ?? (initiator == null ? _intentFor(purchase) : null);
-    } on AppReferBillingException catch (e) {
-      if (byToken == null) {
-        // Who started it can't be read: never given to whoever is current.
-        // Left open with the store, which delivers it again.
-        _logger.warn(
-          'Billing: purchase ${purchase.id} left open until its owner can be read ($e)',
-        );
-        return localFallback();
+    var intent = waiterIntent;
+    String? note;
+    var held = false;
+    if (intent == null && initiator == null && !purchase.isRenewal) {
+      try {
+        intent = await _intentFor(purchase);
+        if (intent == null &&
+            byToken == null &&
+            purchase.accountToken == null) {
+          final lost = _intents.lostMarker();
+          if (lost != null) {
+            final since = await _intents.hold(lost, _key(purchase));
+            final at = purchase.purchasedAt;
+            final from = at != null && at.isBefore(since) ? at : since;
+            if (_now().isBefore(from.add(PurchaseIntentStore.lostHold))) {
+              _logger.warn(
+                'Billing: purchase ${purchase.id} left open: saved purchase intents were lost and it carries no account token',
+              );
+              return localFallback();
+            }
+            held = true;
+            note =
+                'Owner guessed: saved purchase intents were lost on ${lost.lostAt.toUtc().toIso8601String()}; after a ${PurchaseIntentStore.lostHold.inHours} h hold this untagged purchase went to the user signed in then ($current)';
+            _logger.warn('Billing: purchase ${purchase.id}: $note');
+          }
+        }
+      } on AppReferBillingException catch (e) {
+        if (byToken == null) {
+          // Who started it can't be read: never given to whoever is current.
+          // Left open with the store, which delivers it again.
+          _logger.warn(
+            'Billing: purchase ${purchase.id} left open until its owner can be read ($e)',
+          );
+          return localFallback();
+        }
+        intent = null;
       }
-      intent = null;
     }
     final user = initiator ?? byToken ?? intent?.appUserId ?? current;
     final attributes = user == current
@@ -551,6 +581,7 @@ class BillingEngine {
       await _complete(purchase);
       await _rejected.remove(purchase.store, purchase.id);
       await _dropIntent(intent);
+      if (held) await _releaseHold(purchase);
       final info = await _accept(response, user);
       await drainQueue();
       return user == currentAppUserId
@@ -572,11 +603,15 @@ class BillingEngine {
           user,
           deviceId,
           e.toString(),
+          note: note,
         );
       }
       // Until a copy is on disk the store delivers the purchase again, and the
       // intent is still needed.
-      if (secured) await _dropIntent(intent);
+      if (secured) {
+        await _dropIntent(intent);
+        if (held) await _releaseHold(purchase);
+      }
       return _answerAfterUploadFailure(e.isRetryable ? e : null);
     }
   }
@@ -587,13 +622,17 @@ class BillingEngine {
     return token == null ? null : _storage.appUserIdForAccountToken(token);
   }
 
-  /// The saved intent for a purchase delivered without its `purchase()` call
-  /// (Ask to Buy approved later, the app restarted, or a user switch
+  static String _key(StorePurchase purchase) =>
+      '${purchase.store.value}:${purchase.id}';
+
+  /// The saved intent for a new purchase delivered without its `purchase()`
+  /// call (Ask to Buy approved later, the app restarted, or a user switch
   /// meanwhile): the one with the purchase's account token; for an untagged
-  /// purchase, the oldest for the same product. Throws
-  /// [AppReferBillingErrorCode.storage] when the intents can't be read.
-  PurchaseIntent? _intentFor(StorePurchase purchase) {
-    final intents = _intents.read();
+  /// purchase, the oldest for the same product, with or without a token.
+  /// Never called for a renewal. Throws [AppReferBillingErrorCode.storage]
+  /// when the intents can't be read.
+  Future<PurchaseIntent?> _intentFor(StorePurchase purchase) async {
+    final intents = await _intents.read();
     final token = purchase.accountToken?.toLowerCase();
     if (token != null) {
       for (final i in intents) {
@@ -605,6 +644,14 @@ class BillingEngine {
         intents.where((i) => i.productId == purchase.productId).toList()
           ..sort((a, b) => a.startedAt.compareTo(b.startedAt));
     return sameProduct.isEmpty ? null : sameProduct.first;
+  }
+
+  Future<void> _releaseHold(StorePurchase purchase) async {
+    try {
+      await _intents.release(_key(purchase));
+    } catch (e) {
+      _logger.warn('Billing: could not release held purchase ($e)');
+    }
   }
 
   Future<void> _dropIntent(PurchaseIntent? intent) async {
@@ -674,8 +721,9 @@ class BillingEngine {
     Map<String, String>? fields,
     String? user,
     String? deviceId,
-    String reason,
-  ) async {
+    String reason, {
+    String? note,
+  }) async {
     final saved = await _rejected.add(
       RejectedPurchase(
         transactionId: purchase.id,
@@ -689,6 +737,7 @@ class BillingEngine {
         reason: reason,
         rejectedAt: _now(),
         raw: fields == null ? _rawPurchase(purchase) : null,
+        note: note,
       ),
     );
     if (!saved) {
@@ -828,6 +877,13 @@ class BillingEngine {
       } else {
         await process(purchase);
       }
+    }
+    // Purchases held while intents are lost and no longer open are forgotten;
+    // the marker goes once nothing is held.
+    try {
+      await _intents.clearLostIfDone(open: {for (final p in open) _key(p)});
+    } catch (e) {
+      _logger.warn('Billing: could not update the lost-intents marker ($e)');
     }
   }
 

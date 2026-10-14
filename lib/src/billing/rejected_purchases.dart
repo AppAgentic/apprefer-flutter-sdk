@@ -35,6 +35,10 @@ class RejectedPurchase {
   /// What the store plugin delivered, as JSON, when it gave no verifiable data.
   final String? raw;
 
+  /// For support: e.g. that its owner was guessed because the saved purchase
+  /// intents were lost.
+  final String? note;
+
   const RejectedPurchase({
     required this.transactionId,
     required this.productId,
@@ -47,6 +51,7 @@ class RejectedPurchase {
     required this.reason,
     required this.rejectedAt,
     this.raw,
+    this.note,
   });
 
   bool get isConsumable => kind == 'consumable';
@@ -67,6 +72,7 @@ class RejectedPurchase {
     'reason': reason,
     'rejectedAtMs': rejectedAt.millisecondsSinceEpoch,
     if (raw != null) 'raw': raw,
+    if (note != null) 'note': note,
   };
 
   static RejectedPurchase? fromJson(Object? json) {
@@ -102,6 +108,7 @@ class RejectedPurchase {
         ms is num ? ms.round() : 0,
       ),
       raw: str(json['raw']),
+      note: str(json['note']),
     );
   }
 }
@@ -110,11 +117,10 @@ class RejectedPurchase {
 /// that can't be read is never overwritten: writes are refused (so nothing is
 /// completed with the store) until it reads again, and then what was added
 /// meanwhile is merged in. An entry counts as saved only while the stored list
-/// holds it with the same contents ([isDurable]). Owned by `BillingEngine`.
+/// holds it with the same contents ([isDurable]). There is no size cap and
+/// nothing is evicted: an entry leaves only once AppRefer has recorded the
+/// purchase ([remove]). Owned by `BillingEngine`.
 class RejectedPurchaseLog {
-  /// Oldest entries beyond this are dropped.
-  static const maxEntries = 200;
-
   final SharedPreferences _prefs;
   final String _key;
   List<RejectedPurchase> _entries = [];
@@ -209,9 +215,6 @@ class RejectedPurchaseLog {
         if (e.key != entry.key) e,
       entry,
     ];
-    if (_entries.length > maxEntries) {
-      _entries = _entries.sublist(_entries.length - maxEntries);
-    }
     await _save();
     return _onDisk[entry.key] == _encode(entry);
   }
