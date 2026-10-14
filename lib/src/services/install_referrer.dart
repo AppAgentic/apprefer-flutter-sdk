@@ -22,9 +22,7 @@ class AppReferInstallReferrer {
         return null;
       }
       final referrerMap = Map<String, dynamic>.from(result);
-      _logger.info(
-        'Install Referrer retrieved: ${referrerMap['installReferrer']}',
-      );
+      _logger.info('Install Referrer retrieved: ${referrerMap['installReferrer']}');
       return referrerMap;
     } on PlatformException catch (e) {
       _logger.warn('Install Referrer unavailable: ${e.message}');

@@ -170,10 +170,7 @@ class AppReferSDK {
   }) async {
     final sdk = _instance;
     if (sdk == null) {
-      assert(() {
-        print('[AppRefer] trackEvent called before configure() — ignoring');
-        return true;
-      }());
+      assert(() { print('[AppRefer] trackEvent called before configure() — ignoring'); return true; }());
       return;
     }
     if (!sdk._storage.isSdkEnabled()) return;
@@ -202,12 +199,7 @@ class AppReferSDK {
   }) async {
     final sdk = _instance;
     if (sdk == null) {
-      assert(() {
-        print(
-          '[AppRefer] setAdvancedMatching called before configure() — ignoring',
-        );
-        return true;
-      }());
+      assert(() { print('[AppRefer] setAdvancedMatching called before configure() — ignoring'); return true; }());
       return;
     }
     if (!sdk._storage.isSdkEnabled()) return;
@@ -245,10 +237,7 @@ class AppReferSDK {
   static Future<void> setUserId(String userId) async {
     final sdk = _instance;
     if (sdk == null) {
-      assert(() {
-        print('[AppRefer] setUserId called before configure() — ignoring');
-        return true;
-      }());
+      assert(() { print('[AppRefer] setUserId called before configure() — ignoring'); return true; }());
       return;
     }
     await sdk._storage.setUserId(userId);

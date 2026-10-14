@@ -6,8 +6,10 @@ class AppReferLogger {
 
   static const _tag = '[AppRefer]';
 
-  const AppReferLogger({bool debug = false, this.logLevel = 1})
-    : _debugEnabled = debug;
+  const AppReferLogger({
+    bool debug = false,
+    this.logLevel = 1,
+  }) : _debugEnabled = debug;
 
   void error(String message) {
     if (_debugEnabled && logLevel >= 1) {
