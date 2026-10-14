@@ -19,3 +19,4 @@ export 'src/billing/billing_engine.dart'
     show FetchPolicy, PurchaseOutcome, PurchaseResult;
 export 'src/billing/billing_error.dart';
 export 'src/billing/customer_info.dart' hide BillingCustomerResponse;
+export 'src/billing/rejected_purchases.dart' show RejectedPurchase;

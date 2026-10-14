@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:in_app_purchase/in_app_purchase.dart';
 
@@ -9,6 +10,8 @@ import 'billing_storage.dart';
 import 'billing_store.dart';
 import 'customer_info.dart';
 import 'pending_purchase_queue.dart';
+import 'purchase_intents.dart';
+import 'rejected_purchases.dart';
 
 enum FetchPolicy {
   /// The cached answer if it is under 5 minutes old, otherwise the server.
@@ -62,6 +65,8 @@ class BillingEngine {
   final BillingStorage _storage;
   final PendingPurchaseQueue _queue;
   final BillingStoreAdapter _store;
+  final RejectedPurchaseLog _rejected;
+  final PurchaseIntentStore _intents;
   final BillingEngineOptions _options;
   final Future<String?> Function() _appreferId;
   final AppReferLogger _logger;
@@ -101,15 +106,24 @@ class BillingEngine {
   final _inFlight = <String, Future<AppReferCustomerInfo>>{};
 
   /// `purchase()` calls waiting for their result on the update stream, with
-  /// the app user who started each one.
+  /// the app user who started each one and the intent saved for it.
   final _waiters =
-      <String, ({Completer<PurchaseResult> completer, String? appUserId})>{};
+      <
+        String,
+        ({
+          Completer<PurchaseResult> completer,
+          String? appUserId,
+          PurchaseIntent? intent,
+        })
+      >{};
 
   BillingEngine({
     required BillingApiClient api,
     required BillingStorage storage,
     required PendingPurchaseQueue queue,
     required BillingStoreAdapter store,
+    RejectedPurchaseLog? rejected,
+    PurchaseIntentStore? intents,
     BillingEngineOptions options = const BillingEngineOptions(),
     String? appUserId,
     required Future<String?> Function() appreferId,
@@ -120,6 +134,18 @@ class BillingEngine {
        _storage = storage,
        _queue = queue,
        _store = store,
+       _rejected =
+           rejected ??
+           RejectedPurchaseLog(
+             storage.prefs,
+             BillingStorage.rejectedPurchasesKey,
+           ),
+       _intents =
+           intents ??
+           PurchaseIntentStore(
+             storage.prefs,
+             BillingStorage.purchaseIntentsKey,
+           ),
        _options = options,
        _appreferId = appreferId,
        _logger = logger,
@@ -302,6 +328,8 @@ class BillingEngine {
     final queued = {
       for (final e in _queue.entries)
         if (e.appUserId == user) e.transactionId,
+      for (final e in _rejected.entries)
+        if (e.appUserId == user) e.transactionId,
     };
     final mine = [
       for (final e in await _activeEntitlements())
@@ -392,25 +420,31 @@ class BillingEngine {
   Future<void> _handleUpdate(StorePurchase purchase) async {
     switch (purchase.status) {
       case StorePurchaseStatus.pending:
+        // The saved intent stays: the purchase may complete after a restart,
+        // a logout or a user switch.
         _resolve(purchase.productId, PurchaseOutcome.pending, null);
       case StorePurchaseStatus.canceled:
         if (purchase.needsCompletion) await _complete(purchase);
+        await _dropIntent(_waiters[purchase.productId]?.intent);
         _resolve(purchase.productId, PurchaseOutcome.userCancelled, null);
       case StorePurchaseStatus.error:
         if (purchase.needsCompletion) await _complete(purchase);
-        _waiters
-            .remove(purchase.productId)
-            ?.completer
-            .completeError(
-              AppReferBillingException(
-                AppReferBillingErrorCode.store,
-                message: purchase.errorMessage,
-              ),
-            );
+        final waiter = _waiters.remove(purchase.productId);
+        await _dropIntent(waiter?.intent);
+        waiter?.completer.completeError(
+          AppReferBillingException(
+            AppReferBillingErrorCode.store,
+            message: purchase.errorMessage,
+          ),
+        );
       case StorePurchaseStatus.purchased:
       case StorePurchaseStatus.restored:
         final waiter = _waiters.remove(purchase.productId);
-        final info = await process(purchase, appUserId: waiter?.appUserId);
+        final info = await process(
+          purchase,
+          appUserId: waiter?.appUserId,
+          intent: waiter?.intent,
+        );
         waiter?.completer.complete(
           PurchaseResult(PurchaseOutcome.purchased, purchase.details, info),
         );
@@ -434,21 +468,25 @@ class BillingEngine {
 
   /// Sends a store purchase to AppRefer, then completes it with the store. If
   /// AppRefer can't take it now, it is queued on disk and secured with the
-  /// store (see [_queueAndSecure]); access comes from the store meanwhile.
+  /// store (see [_queueAndSecure]); if AppRefer refuses it for good, it is
+  /// saved to the rejected list first (see [_secureRejected]). Access comes
+  /// from the store meanwhile.
   ///
   /// [appUserId] is the user who started the purchase. Otherwise a purchase
   /// tagged with an account token issued to a user on this device goes to that
-  /// user, and anything else to the current user. Never sent as a restore.
+  /// user, then one matching a saved purchase intent to the user who started
+  /// it, and anything else to the current user. Never sent as a restore.
   Future<AppReferCustomerInfo> process(
     StorePurchase purchase, {
     String? appUserId,
+    PurchaseIntent? intent,
   }) {
     final key = '${purchase.store.value}:${purchase.id}';
     final running = _inFlight[key];
     if (running != null) return running;
     // A block body: `=> _inFlight.remove(key)` would return this very future
     // to whenComplete, which would then wait on itself.
-    final future = _process(purchase, appUserId).whenComplete(() {
+    final future = _process(purchase, appUserId, intent).whenComplete(() {
       _inFlight.remove(key);
     });
     _inFlight[key] = future;
@@ -458,13 +496,22 @@ class BillingEngine {
   Future<AppReferCustomerInfo> _process(
     StorePurchase purchase,
     String? initiator,
+    PurchaseIntent? waiterIntent,
   ) async {
     final fields = purchase.storeFields;
     if (fields == null || purchase.id.isEmpty) {
       _logger.error(
-        'Billing: purchase of ${purchase.productId} has no verifiable store data; completed without granting access',
+        'Billing: purchase of ${purchase.productId} has no verifiable store data; not granting access',
       );
-      await _complete(purchase);
+      if (await _secureRejected(
+        purchase,
+        fields,
+        null,
+        null,
+        'no verifiable store data',
+      )) {
+        await _dropIntent(waiterIntent);
+      }
       return _answerAfterUploadFailure();
     }
 
@@ -475,7 +522,23 @@ class BillingEngine {
       // server acknowledges from its store notification within 3 days).
       return localFallback();
     }
-    final user = initiator ?? _ownerByToken(purchase) ?? current;
+    final byToken = initiator == null ? _ownerByToken(purchase) : null;
+    PurchaseIntent? intent;
+    try {
+      intent =
+          waiterIntent ?? (initiator == null ? _intentFor(purchase) : null);
+    } on AppReferBillingException catch (e) {
+      if (byToken == null) {
+        // Who started it can't be read: never given to whoever is current.
+        // Left open with the store, which delivers it again.
+        _logger.warn(
+          'Billing: purchase ${purchase.id} left open until its owner can be read ($e)',
+        );
+        return localFallback();
+      }
+      intent = null;
+    }
+    final user = initiator ?? byToken ?? intent?.appUserId ?? current;
     final attributes = user == current
         ? _storage.pendingAttributes
         : const <String, String>{};
@@ -486,23 +549,36 @@ class BillingEngine {
       );
       _storage.clearSentAttributes(attributes);
       await _complete(purchase);
+      await _rejected.remove(purchase.store, purchase.id);
+      await _dropIntent(intent);
       final info = await _accept(response, user);
       await drainQueue();
       return user == currentAppUserId
           ? info
           : customerInfo(FetchPolicy.cachedOrFetched);
     } on AppReferBillingException catch (e) {
+      final bool secured;
       if (e.isRetryable) {
         _notePause(e);
-        await _queueAndSecure(purchase, fields, user, deviceId, e);
-        return _answerAfterUploadFailure(e);
+        secured = await _queueAndSecure(purchase, fields, user, deviceId, e);
+      } else {
+        // Refused for good (400/413/422): kept on the device for support and
+        // Restore Purchases; the store fallback still unlocks a verified
+        // purchase.
+        _logger.error('Billing: AppRefer rejected purchase ${purchase.id}: $e');
+        secured = await _secureRejected(
+          purchase,
+          fields,
+          user,
+          deviceId,
+          e.toString(),
+        );
       }
-      // Rejected as malformed: retrying won't help. Store notifications still
-      // reach the server; the store fallback still unlocks a verified purchase.
-      _logger.error('Billing: AppRefer rejected purchase ${purchase.id}: $e');
+      // Until a copy is on disk the store delivers the purchase again, and the
+      // intent is still needed.
+      if (secured) await _dropIntent(intent);
+      return _answerAfterUploadFailure(e.isRetryable ? e : null);
     }
-    await _complete(purchase);
-    return _answerAfterUploadFailure();
   }
 
   /// The user an account token on the purchase was issued to on this device.
@@ -511,13 +587,42 @@ class BillingEngine {
     return token == null ? null : _storage.appUserIdForAccountToken(token);
   }
 
+  /// The saved intent for a purchase delivered without its `purchase()` call
+  /// (Ask to Buy approved later, the app restarted, or a user switch
+  /// meanwhile): the one with the purchase's account token; for an untagged
+  /// purchase, the oldest for the same product. Throws
+  /// [AppReferBillingErrorCode.storage] when the intents can't be read.
+  PurchaseIntent? _intentFor(StorePurchase purchase) {
+    final intents = _intents.read();
+    final token = purchase.accountToken?.toLowerCase();
+    if (token != null) {
+      for (final i in intents) {
+        if (i.accountToken?.toLowerCase() == token) return i;
+      }
+      return null;
+    }
+    final sameProduct =
+        intents.where((i) => i.productId == purchase.productId).toList()
+          ..sort((a, b) => a.startedAt.compareTo(b.startedAt));
+    return sameProduct.isEmpty ? null : sameProduct.first;
+  }
+
+  Future<void> _dropIntent(PurchaseIntent? intent) async {
+    if (intent == null) return;
+    try {
+      await _intents.remove(intent);
+    } catch (e) {
+      _logger.warn('Billing: could not drop purchase intent ($e)');
+    }
+  }
+
   /// Queues a purchase AppRefer couldn't take, then secures it with the
   /// store once the queue entry is on disk: Google is acknowledged (never
   /// consumed), so Google can't refund it even if the app isn't opened again
   /// within 3 days; Apple is finished. Until the entry is on disk the purchase
   /// stays open and [retryUnfinished] saves and secures it on the next
   /// foreground (the server acknowledges Google purchases too).
-  Future<void> _queueAndSecure(
+  Future<bool> _queueAndSecure(
     StorePurchase purchase,
     Map<String, String> fields,
     String user,
@@ -539,23 +644,122 @@ class BillingEngine {
         restore: restore,
       ),
     );
-    await _secureQueued(purchase);
+    return _secureQueued(purchase);
   }
 
   /// Secures a queued purchase with the store, only once its retry copy is
-  /// on disk (saving it again first if needed).
-  Future<void> _secureQueued(StorePurchase purchase) async {
+  /// on disk (saving it again first if needed). Returns whether it is.
+  Future<bool> _secureQueued(StorePurchase purchase) async {
     if (!_queue.isDurable(purchase.id) && !await _queue.persist()) {
       _logger.error(
         'Billing: could not save purchase ${purchase.id}; left open so the store delivers it again',
       );
-      return;
+      return false;
     }
-    if (!_queue.isDurable(purchase.id)) return;
+    if (!_queue.isDurable(purchase.id)) return false;
     if (purchase.store == BillingStore.playStore) {
       await _acknowledge(purchase);
     } else {
       await _complete(purchase);
+    }
+    return true;
+  }
+
+  /// A purchase AppRefer won't take (final 400/413/422, or no verifiable store
+  /// data): its full data is saved to the rejected list first, and only then
+  /// is it secured with the store. Until that copy is on disk nothing is
+  /// completed, so the store delivers it again. Returns whether it is on disk.
+  Future<bool> _secureRejected(
+    StorePurchase purchase,
+    Map<String, String>? fields,
+    String? user,
+    String? deviceId,
+    String reason,
+  ) async {
+    final saved = await _rejected.add(
+      RejectedPurchase(
+        transactionId: purchase.id,
+        productId: purchase.productId,
+        store: purchase.store,
+        appUserId: user,
+        appreferId: deviceId,
+        storeFields: fields,
+        accountToken: purchase.accountToken,
+        kind: _kindName(purchase.kind),
+        reason: reason,
+        rejectedAt: _now(),
+        raw: fields == null ? _rawPurchase(purchase) : null,
+      ),
+    );
+    if (!saved) {
+      _logger.error(
+        'Billing: could not save rejected purchase ${purchase.id}; left open so the store delivers it again',
+      );
+      return false;
+    }
+    await _completeRejected(purchase);
+    return true;
+  }
+
+  /// Secures an archived purchase with the store, only once its archived copy
+  /// is on disk (saving it again first if needed): never from a copy held only
+  /// in memory.
+  Future<void> _secureArchived(StorePurchase purchase) async {
+    if (!_rejected.isDurable(purchase.store, purchase.id) &&
+        (!await _rejected.persist() ||
+            !_rejected.isDurable(purchase.store, purchase.id))) {
+      _logger.error(
+        'Billing: could not save rejected purchase ${purchase.id}; left open so the store delivers it again',
+      );
+      return;
+    }
+    await _completeRejected(purchase);
+  }
+
+  /// A consumable is never consumed or finished here: Google is only
+  /// acknowledged (so it is not refunded) and Apple is left unfinished, so it
+  /// stays recoverable. Anything else is completed.
+  Future<void> _completeRejected(StorePurchase purchase) async {
+    if (purchase.kind == StoreProductKind.consumable) {
+      if (purchase.store == BillingStore.playStore) {
+        await _acknowledge(purchase);
+      }
+    } else {
+      await _complete(purchase);
+    }
+  }
+
+  static String? _kindName(StoreProductKind? kind) => switch (kind) {
+    StoreProductKind.autoRenewable => 'auto_renewable',
+    StoreProductKind.nonRenewable => 'non_renewable',
+    StoreProductKind.consumable => 'consumable',
+    StoreProductKind.nonConsumable => 'non_consumable',
+    null => null,
+  };
+
+  /// What the store plugin delivered, for support, when there is nothing
+  /// AppRefer can verify.
+  static String? _rawPurchase(StorePurchase purchase) {
+    final d = purchase.details;
+    try {
+      return jsonEncode({
+        'id': purchase.id,
+        'productId': purchase.productId,
+        'status': purchase.status.name,
+        'accountToken': purchase.accountToken,
+        'signedTransaction': purchase.signedTransaction,
+        'purchaseToken': purchase.purchaseToken,
+        if (d != null) ...{
+          'purchaseID': d.purchaseID,
+          'transactionDate': d.transactionDate,
+          'localVerificationData': d.verificationData.localVerificationData,
+          'serverVerificationData': d.verificationData.serverVerificationData,
+          'verificationSource': d.verificationData.source,
+          'error': d.error?.message,
+        },
+      });
+    } catch (_) {
+      return null;
     }
   }
 
@@ -617,6 +821,10 @@ class BillingEngine {
       } else if (_queue.contains(purchase.id)) {
         // Sending it is the retry queue's job; only secure it with the store.
         await _secureQueued(purchase);
+      } else if (_rejected.contains(purchase.store, purchase.id)) {
+        // Refused for good and kept for Restore Purchases: a consumable stays
+        // unconsumed (Apple: unfinished) on purpose.
+        await _secureArchived(purchase);
       } else {
         await process(purchase);
       }
@@ -655,14 +863,43 @@ class BillingEngine {
     // The initiator is read before anything is awaited, so a logIn/logOut
     // while the token is fetched or the sheet is open can't change it.
     final initiator = _activeUser();
-    _waiters[product.id] = (completer: waiter, appUserId: null);
+    _waiters[product.id] = (completer: waiter, appUserId: null, intent: null);
+    PurchaseIntent? intent;
     try {
       final user = await initiator;
-      _waiters[product.id] = (completer: waiter, appUserId: user);
+      if (user == null) {
+        throw const AppReferBillingException(
+          AppReferBillingErrorCode.storage,
+          message:
+              'Could not read or save the app user on this device; the purchase was not started',
+        );
+      }
+      final accountToken = await _accountTokenFor(user);
+      // Saved before the sheet opens, so a purchase delivered after a restart,
+      // logout or user switch still goes to this user.
+      intent = PurchaseIntent(
+        appUserId: user,
+        productId: product.id,
+        accountToken: accountToken,
+        startedAt: _now(),
+      );
+      if (!await _intents.add(intent)) {
+        intent = null;
+        throw const AppReferBillingException(
+          AppReferBillingErrorCode.storage,
+          message:
+              'Could not save who started the purchase on this device; the purchase was not started',
+        );
+      }
+      _waiters[product.id] = (
+        completer: waiter,
+        appUserId: user,
+        intent: intent,
+      );
       await _store.buy(
         product,
         StorePurchaseOptions(
-          accountToken: user == null ? null : await _accountTokenFor(user),
+          accountToken: accountToken,
           promotionalOffer: options.promotionalOffer,
           winBackOfferId: options.winBackOfferId,
           changeSubscriptionParam: options.changeSubscriptionParam,
@@ -672,6 +909,7 @@ class BillingEngine {
       if (identical(_waiters[product.id]?.completer, waiter)) {
         _waiters.remove(product.id);
       }
+      await _dropIntent(intent);
       if (e is AppReferBillingException) rethrow;
       throw AppReferBillingException(
         AppReferBillingErrorCode.store,
@@ -691,7 +929,19 @@ class BillingEngine {
       await _store.sync();
       final purchases = await _store.restore();
       final user = await restoring;
-      if (purchases.isEmpty) return customerInfo(FetchPolicy.fetchCurrent);
+      // Archived purchases the store no longer lists (finished App Store
+      // purchases) are sent again too.
+      final listed = {for (final p in purchases) '${p.store.value}:${p.id}'};
+      final archived = [
+        for (final e in _rejected.entries)
+          if (e.storeFields != null &&
+              e.transactionId.isNotEmpty &&
+              !listed.contains('${e.store.value}:${e.transactionId}'))
+            e,
+      ];
+      if (purchases.isEmpty && archived.isEmpty) {
+        return customerInfo(FetchPolicy.fetchCurrent);
+      }
       // Identity unreadable: nothing can be queued for anyone, so the
       // purchases stay open with the store.
       if (user == null) return localFallback();
@@ -719,6 +969,7 @@ class BillingEngine {
           last = await _api.send(
             RecordPurchase(user, deviceId, fields, const {}, restore: true),
           );
+          await _rejected.remove(purchase.store, purchase.id);
           await _complete(purchase);
         } on AppReferBillingException catch (e) {
           failed = e;
@@ -734,10 +985,38 @@ class BillingEngine {
             );
             if (e.isConnectivity || e.pausesQueue) paused = e;
           } else {
-            await _complete(purchase);
+            _logger.error(
+              'Billing: AppRefer rejected restored purchase ${purchase.id}: $e',
+            );
+            await _secureRejected(purchase, fields, user, deviceId, '$e');
           }
         }
       }
+      for (final entry in archived) {
+        if (paused != null) break;
+        try {
+          last = await _api.send(
+            RecordPurchase(
+              user,
+              deviceId,
+              entry.storeFields!,
+              const {},
+              restore: true,
+            ),
+          );
+          await _rejected.remove(entry.store, entry.transactionId);
+          // A consumable kept open can now be consumed.
+          if (entry.isConsumable) _recorded.add(entry.transactionId);
+        } on AppReferBillingException catch (e) {
+          // Kept in the list either way; sent again with the next restore.
+          failed = e;
+          if (e.isRetryable) {
+            _notePause(e);
+            if (e.isConnectivity || e.pausesQueue) paused = e;
+          }
+        }
+      }
+      if (_recorded.isNotEmpty) await retryUnfinished();
       // A server answer is filtered to this customer's purchases (its queued
       // restores included); with none, unrestricted fallback only on outage.
       if (last != null) return _accept(last, user);
@@ -782,10 +1061,11 @@ class BillingEngine {
   /// Returns whether a Google consumable was recorded (and can now be consumed).
   Future<bool> _drain() async {
     var consumables = false;
-    for (final dropped in await _queue.prune(_now())) {
+    for (final old in _queue.expired(_now())) {
       _logger.error(
-        'Billing: gave up resending purchase ${dropped.transactionId} after ${dropped.attempts} attempts',
+        'Billing: gave up resending purchase ${old.transactionId} after ${old.attempts} attempts',
       );
+      await _moveToRejected(old, 'not recorded after ${old.attempts} attempts');
     }
     for (final entry in _queue.entries) {
       try {
@@ -809,7 +1089,10 @@ class BillingEngine {
         }
       } on AppReferBillingException catch (e) {
         if (!e.isRetryable) {
-          await _queue.remove(entry.transactionId);
+          _logger.error(
+            'Billing: AppRefer rejected queued purchase ${entry.transactionId}: $e',
+          );
+          await _moveToRejected(entry, e.toString());
           continue;
         }
         if (e.pausesQueue) {
@@ -824,6 +1107,35 @@ class BillingEngine {
       }
     }
     return consumables;
+  }
+
+  /// Moves a queued purchase to the rejected list; it leaves the queue only
+  /// once that copy is on disk (a queued Google purchase was acknowledged,
+  /// never consumed, so it stays recoverable).
+  Future<void> _moveToRejected(PendingPurchase entry, String reason) async {
+    final saved = await _rejected.add(
+      RejectedPurchase(
+        transactionId: entry.transactionId,
+        productId: entry.productId,
+        store: entry.storeFields['store'] == 'play_store'
+            ? BillingStore.playStore
+            : BillingStore.appStore,
+        appUserId: entry.appUserId,
+        appreferId: entry.appreferId,
+        storeFields: entry.storeFields,
+        accountToken: null,
+        kind: entry.isConsumable ? 'consumable' : null,
+        reason: reason,
+        rejectedAt: _now(),
+      ),
+    );
+    if (saved) {
+      await _queue.removeIfUnchanged(entry);
+    } else {
+      _logger.error(
+        'Billing: could not save rejected purchase ${entry.transactionId}; kept in the retry queue',
+      );
+    }
   }
 
   /// Backs the retry queue off after a "not now" status, or for as long as
@@ -845,6 +1157,9 @@ class BillingEngine {
       'Billing: AppRefer answered $error; retrying queued purchases in ${delay.inSeconds}s',
     );
   }
+
+  /// See `AppReferBilling.rejectedPurchases`.
+  List<RejectedPurchase> rejectedPurchases() => _rejected.entries;
 
   // --- Purchases ---
 

@@ -19,6 +19,7 @@ import 'billing_store.dart';
 import 'customer_info.dart';
 import 'in_app_purchase_store.dart';
 import 'pending_purchase_queue.dart';
+import 'rejected_purchases.dart';
 
 /// AppRefer Billing: App Store (StoreKit 2) and Google Play purchases and
 /// entitlements, verified and recorded by AppRefer. A drop-in replacement for
@@ -366,6 +367,13 @@ class AppReferBilling {
   /// Throws if the user cancels the App Store sign-in.
   static Future<AppReferCustomerInfo> restorePurchases() async =>
       (await _requireEngine()).restore();
+
+  /// Store purchases AppRefer refused for good, that had no verifiable store
+  /// data, or that could not be delivered after many retries. Each is kept on
+  /// the device (with its signed store data) before it is completed with the
+  /// store, for support; [restorePurchases] sends them again.
+  static Future<List<RejectedPurchase>> rejectedPurchases() async =>
+      (await _requireEngine()).rejectedPurchases();
 }
 
 class _LifecycleObserver with WidgetsBindingObserver {

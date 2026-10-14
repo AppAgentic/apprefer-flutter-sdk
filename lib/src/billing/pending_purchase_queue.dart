@@ -255,23 +255,22 @@ class PendingPurchaseQueue {
     return _save();
   }
 
-  /// Drops entries that have failed too often or are too old. The server still
-  /// gets those purchases from App Store / Google Play notifications.
-  Future<List<PendingPurchase>> prune(DateTime now) async {
+  /// Entries that have failed too often or are too old. The engine moves each
+  /// to the rejected list and only then takes it out of the queue.
+  List<PendingPurchase> expired(DateTime now) => [
+    for (final e in entries)
+      if (e.attempts >= maxAttempts || now.difference(e.enqueuedAt) > maxAge) e,
+  ];
+
+  /// Removes the entry only if it is still exactly [entry] (not taken over or
+  /// refreshed meanwhile). Returns whether it was removed and saved.
+  Future<bool> removeIfUnchanged(PendingPurchase entry) async {
     _reloadIfUnreadable();
-    final dropped = _entries
-        .where(
-          (e) =>
-              e.attempts >= maxAttempts ||
-              now.difference(e.enqueuedAt) > maxAge,
-        )
-        .toList();
-    if (dropped.isEmpty) return const [];
-    final ids = dropped.map((e) => e.transactionId).toSet();
-    _entries.removeWhere((e) => ids.contains(e.transactionId));
-    if (_unreadable) _removedWhileUnreadable.addAll(ids);
-    await _save();
-    return dropped;
+    final index = _entries.indexWhere(
+      (e) => e.transactionId == entry.transactionId,
+    );
+    if (index < 0 || _encode(_entries[index]) != _encode(entry)) return false;
+    return remove(entry.transactionId);
   }
 
   Future<bool> _save() async {

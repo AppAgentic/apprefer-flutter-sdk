@@ -26,10 +26,10 @@ class AppReferHttpClient {
   }) : _logger = logger;
 
   Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        'X-SDK-Version': _sdkVersion,
-        'X-AppRefer-Key': apiKey,
-      };
+    'Content-Type': 'application/json',
+    'X-SDK-Version': _sdkVersion,
+    'X-AppRefer-Key': apiKey,
+  };
 
   Future<Map<String, dynamic>?> post(
     String path,
@@ -144,10 +144,7 @@ class AppReferHttpClient {
     return null;
   }
 
-  Future<Map<String, dynamic>?> _getWithRetries(
-    String url,
-    String path,
-  ) async {
+  Future<Map<String, dynamic>?> _getWithRetries(String url, String path) async {
     final target = Uri.parse('$url$path');
     for (int attempt = 0; attempt < _maxRetries; attempt++) {
       try {
@@ -193,10 +190,7 @@ class AppReferHttpClient {
     return null;
   }
 
-  Future<Map<String, dynamic>?> _getOnce(
-    String url,
-    String path,
-  ) async {
+  Future<Map<String, dynamic>?> _getOnce(String url, String path) async {
     final target = Uri.parse('$url$path');
     try {
       _logger.debug('GET $target (fallback)');

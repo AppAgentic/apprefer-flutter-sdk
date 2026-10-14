@@ -50,10 +50,14 @@ class Attribution {
       gclid: json['gclid'] as String?,
       ttclid: json['ttclid'] as String?,
       queryParams: (json['query_params'] ?? json['queryParams']) is Map
-          ? Map<String, dynamic>.from((json['query_params'] ?? json['queryParams']) as Map)
+          ? Map<String, dynamic>.from(
+              (json['query_params'] ?? json['queryParams']) as Map,
+            )
           : const {},
       customData: (json['custom_data'] ?? json['customData']) is Map
-          ? Map<String, dynamic>.from((json['custom_data'] ?? json['customData']) as Map)
+          ? Map<String, dynamic>.from(
+              (json['custom_data'] ?? json['customData']) as Map,
+            )
           : const {},
       createdAt: json['created_at'] != null
           ? (DateTime.tryParse(json['created_at'] as String) ?? DateTime.now())

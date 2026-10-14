@@ -24,6 +24,8 @@ class BillingStorage {
   static const _customerInfo = 'apprefer_billing_customer_info';
   static const _productKinds = 'apprefer_billing_product_kinds';
   static const pendingPurchasesKey = 'apprefer_billing_pending_purchases';
+  static const rejectedPurchasesKey = 'apprefer_billing_rejected_purchases';
+  static const purchaseIntentsKey = 'apprefer_billing_purchase_intents';
 
   final SharedPreferences prefs;
 

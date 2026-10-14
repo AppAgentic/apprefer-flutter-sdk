@@ -258,7 +258,7 @@ void main() {
       expect(q.isEmpty, isTrue);
     });
 
-    test('prunes too many attempts and too old', () async {
+    test('lists too many attempts and too old as expired', () async {
       SharedPreferences.setMockInitialValues({});
       final q = PendingPurchaseQueue(
         await SharedPreferences.getInstance(),
@@ -267,12 +267,15 @@ void main() {
       await q.add(entry('ok'));
       await q.add(entry('tired', attempts: PendingPurchaseQueue.maxAttempts));
       await q.add(entry('old', at: now.subtract(const Duration(days: 91))));
-      final dropped = await q.prune(now);
+      final expired = q.expired(now);
       expect(
-        dropped.map((e) => e.transactionId),
+        expired.map((e) => e.transactionId),
         unorderedEquals(['tired', 'old']),
       );
-      expect(q.entries.map((e) => e.transactionId), ['ok']);
+      // Listing them removes nothing: the engine archives each first.
+      expect(q.entries, hasLength(3));
+      expect(await q.removeIfUnchanged(expired.first), isTrue);
+      expect(q.entries, hasLength(2));
     });
 
     test('corrupt data starts empty', () async {
