@@ -1,3 +1,4 @@
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 
 import 'package:apprefer/src/billing/billing_api_client.dart';
@@ -18,6 +19,10 @@ BillingApiClient client(
 );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
   group('request building', () {
     test('create customer', () {
       final r = BillingApiClient.makeRequest(

@@ -15,7 +15,7 @@ dependencies:
   apprefer:
     git:
       url: https://github.com/AppAgentic/apprefer-flutter-sdk.git
-      ref: 0.5.0
+      ref: 0.6.0
 ```
 
 Then run `flutter pub get`.
@@ -330,3 +330,46 @@ Push transport stays in the host app: forward APNs/FCM registration and notifica
 taps to these APIs. On Android registration creates `apprefer_support`; configure
 FCM to use that channel for support replies. iOS payloads use `apprefer: {type:
 support_reply, conversationId: ...}`; Android uses those fields directly in data.
+
+## Tracking consent (0.6.0)
+
+The SDK never prompts for ATT. On iOS, it reads the current ATT status:
+authorized → `granted`, denied/restricted → `denied`, and notDetermined →
+`undetermined` (before iOS 14: `granted`). Call
+`trackingConsentDidChange()` immediately after your app's own ATT prompt.
+Configure and app activation also check for a changed decision, independently
+of the first-open attribution flag. A failed report retries on the next trigger;
+a successful report updates the cached attribution and saved reported consent.
+
+On Android, call `setTrackingConsent(true)` or `setTrackingConsent(false)`
+with your app's choice. The choice persists across launches. Until set (or after
+passing `null`), requests omit `tracking_consent` and retain legacy routing.
+
+```dart
+// Android: persist the app's tracking choice (null restores legacy routing).
+await AppReferSDK.setTrackingConsent(false);
+// iOS: immediately after awaiting YOUR app's ATT prompt:
+await AppReferSDK.trackingConsentDidChange();
+```
+
+Every attribution, event, user-linking and billing request selects its host from
+the current consent: granted uses only `https://trk.apprefer.com`;
+denied/undetermined use only `https://apprefer.com`, with no cross-host
+fallback. Android legacy requests retain tracking-host primary and main-host
+fallback. Support always uses `https://apprefer.com`. IDFA is sent only when
+granted; GAID is sent only when granted or legacy. Advanced matching is dropped
+locally unless tracking is granted or legacy. First-party analytics, billing and
+support continue to work when tracking is denied.
+
+For iOS apps (including Flutter and React Native), declare **only**
+`trk.apprefer.com` in your app's `PrivacyInfo.xcprivacy` tracking-domain list:
+
+```xml
+<key>NSPrivacyTrackingDomains</key>
+<array>
+    <string>trk.apprefer.com</string>
+</array>
+```
+
+Do not add `apprefer.com` to `NSPrivacyTrackingDomains`; it serves the
+first-party path when ATT has not been granted.
