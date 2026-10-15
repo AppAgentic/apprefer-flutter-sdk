@@ -7,6 +7,7 @@ import AppTrackingTransparency
 
 public class AppReferPlugin: NSObject, FlutterPlugin {
     public static func register(with registrar: FlutterPluginRegistrar) {
+        SupportBridge.register(with: registrar)
         let channel = FlutterMethodChannel(
             name: "com.apprefer.sdk/adservices",
             binaryMessenger: registrar.messenger()

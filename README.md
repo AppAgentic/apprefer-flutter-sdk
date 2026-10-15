@@ -261,3 +261,48 @@ Testing: use a sandbox Apple ID or a Play license tester. Transactions from an X
 ## License
 
 Proprietary. All rights reserved.
+
+## Support chat (AppRefer Support)
+
+An in-app help chat your team answers from the AppRefer inbox. Includes a home,
+new-message screen, conversation threads, screenshot attachments and reply badges.
+Uses the SDK key and device/user IDs from `AppReferSDK.configure` / `setUserId`.
+
+```dart
+// After configuring AppReferSDK:
+await AppReferSDK.support.open(context: context);
+await AppReferSDK.support.compose('Problem with my subscription', context: context);
+await AppReferSDK.support.identify(name: 'María', email: 'maria@example.com');
+AppReferSDK.support.accentColor = Colors.deepPurple;
+AppReferSDK.support.title = 'My app support'; // defaults to <App name> support
+final unread = await AppReferSDK.support.unreadCount();
+
+// For context-free notification handling, assign your MaterialApp navigatorKey:
+AppReferSDK.support.navigatorKey = navigatorKey;
+await AppReferSDK.support.registerPushToken(fcmToken);
+// From a notification tap (not every foreground notification):
+if (AppReferSDK.support.handleNotification(message.data)) return;
+// On sign-out / token removal:
+await AppReferSDK.support.removePushToken(fcmToken);
+
+// Or embed in your own route:
+const AppReferSupportView();
+const AppReferSupportView(conversationId: 'conversation-id');
+const AppReferSupportView(composing: 'Report a problem');
+```
+
+Customers can attach up to four screenshots per message. Native system photo
+pickers need no photo-library permission. Images are reduced to at most 1600 px
+and JPEG-compressed below 700 KB before direct upload. No new dependencies.
+Session tokens use iOS Keychain and Android Keystore-backed AES-GCM storage
+(including RSA-wrapped AES on Android 5).
+
+The home refreshes every 15 seconds and visible conversations every 4 seconds;
+backgrounding or closing stops polling. Failed messages remain available to retry
+while the view is open. Dark mode, keyboard insets and system text scaling follow
+the host Flutter theme. Supply your app's theme/accent as usual.
+
+Push transport stays in the host app: forward APNs/FCM registration and notification
+taps to these APIs. On Android registration creates `apprefer_support`; configure
+FCM to use that channel for support replies. iOS payloads use `apprefer: {type:
+support_reply, conversationId: ...}`; Android uses those fields directly in data.

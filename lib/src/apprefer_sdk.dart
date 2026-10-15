@@ -1,3 +1,4 @@
+import 'support/apprefer_support.dart';
 import 'dart:io';
 
 import 'config.dart';
@@ -13,6 +14,7 @@ import 'services/storage.dart';
 import 'version.dart';
 
 class AppReferSDK {
+  static AppReferSupport get support => AppReferSupport.instance;
   static AppReferSDK? _instance;
 
   late AppReferConfig _config;

@@ -1,3 +1,7 @@
+## 0.5.0
+
+- AppRefer Support: embeddable help chat, conversations, screenshot uploads, secure sessions, unread counts and push routing.
+
 ## Unreleased
 
 - Add AppRefer Billing (`AppReferBilling`), an App Store / Google Play purchases and entitlements module that replaces RevenueCat, built on the official `in_app_purchase` plugins (StoreKit 2 on iOS 15+, Play Billing on Android):
