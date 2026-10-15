@@ -37,6 +37,8 @@ public class AppReferPlugin: NSObject, FlutterPlugin {
                     try? await SKAdNetwork.updatePostbackConversionValue(fine, coarseValue: value, lockWindow: false)
                 } else if #available(iOS 15.4, *) {
                     try? await SKAdNetwork.updatePostbackConversionValue(fine)
+                } else {
+                    SKAdNetwork.updateConversionValue(fine)
                 }
                 result(nil)
             }

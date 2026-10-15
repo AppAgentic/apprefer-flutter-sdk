@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'dart:math';
+import 'dart:async';
 import 'package:flutter/services.dart';
 import 'http_client.dart';
 import 'storage.dart';
@@ -12,6 +13,8 @@ class ConversionValue {
   final DateTime Function() now;
   final Future<void> Function(int, String) update;
   bool _inFlight = false;
+  bool _rerunForced = false;
+  bool _recheckScheduled = false;
   static const trialEvents = {
     'startTrial',
     'trial_started',
@@ -44,13 +47,39 @@ class ConversionValue {
   }
 
   Future<void> refresh({bool force = false}) async {
-    if (!isIOS() || !storage.isSdkEnabled() || _inFlight) return;
+    if (!isIOS() || !storage.isSdkEnabled()) return;
+    if (_inFlight) {
+      if (force) _rerunForced = true;
+      return;
+    }
     _inFlight = true;
     try {
       final firstRun = DateTime.tryParse(await storage.getFirstRunDate());
       if (firstRun != null &&
           now().difference(firstRun) > const Duration(days: 35))
         return;
+      force = force || _rerunForced;
+      do {
+        _rerunForced = false;
+        final raised = await _refreshOnce(force: force);
+        if (force && !raised && !_recheckScheduled) {
+          _recheckScheduled = true;
+          Timer(const Duration(seconds: 90), () {
+            _recheckScheduled = false;
+            unawaited(_refreshOnce(force: true));
+          });
+        }
+        force = true;
+      } while (_rerunForced);
+    } catch (_) {
+      /* Best effort, including storage failures. */
+    } finally {
+      _inFlight = false;
+    }
+  }
+
+  Future<bool> _refreshOnce({required bool force}) async {
+    try {
       var value = storage.conversionValue();
       if (value == null) {
         await update(0, 'low');
@@ -61,15 +90,16 @@ class ConversionValue {
       if (!force &&
           checked != null &&
           now().difference(checked) < const Duration(minutes: 10))
-        return;
+        return false;
       final response = await client.post('/api/track/conversion-value', {
         'device_id': await storage.getDeviceId(),
+        'installed_at': await storage.getFirstRunDate(),
       });
       final fine = response?['fine'];
       final coarse = response?['coarse'];
       if (fine is! int || fine < 0 || fine > 63 || !_coarse.contains(coarse))
-        return;
-      if (!storage.isSdkEnabled()) return;
+        return false;
+      if (!storage.isSdkEnabled()) return false;
       await storage.setConversionCheckedAt(now());
       final nextFine = max(value.fine, fine);
       final nextCoarse =
@@ -77,13 +107,12 @@ class ConversionValue {
             _coarse.indexOf(value.coarse),
             _coarse.indexOf(coarse as String),
           )];
-      if (nextFine == value.fine && nextCoarse == value.coarse) return;
+      if (nextFine == value.fine && nextCoarse == value.coarse) return false;
       await update(nextFine, nextCoarse);
       await storage.setConversionValue(nextFine, nextCoarse);
+      return true;
     } catch (_) {
-      /* Best effort; retry on a later trigger. */
-    } finally {
-      _inFlight = false;
+      return false; /* Best effort; retry on a later trigger. */
     }
   }
 }

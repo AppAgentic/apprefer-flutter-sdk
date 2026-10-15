@@ -1,5 +1,6 @@
 import 'dart:async' show Completer;
 import 'dart:convert';
+import 'package:fake_async/fake_async.dart';
 import 'package:apprefer/apprefer.dart';
 import 'package:apprefer/src/services/conversion_value.dart';
 import 'package:apprefer/src/services/http_client.dart';
@@ -104,7 +105,7 @@ void main() {
     expect(requests.length, 3);
   });
   test(
-    'uses first-party host, key and only device_id for every consent',
+    'uses first-party host, key and install date for every consent',
     () async {
       final prefs = await SharedPreferences.getInstance();
       for (final consent in ['granted', 'denied', 'undetermined']) {
@@ -117,7 +118,10 @@ void main() {
           'https://apprefer.com/api/track/conversion-value',
         );
         expect(r.headers['X-AppRefer-Key'], 'pk_test');
-        expect(jsonDecode(r.body), {'device_id': await storage.getDeviceId()});
+        expect(jsonDecode(r.body), {
+          'device_id': await storage.getDeviceId(),
+          'installed_at': await storage.getFirstRunDate(),
+        });
       }
     },
   );
@@ -229,8 +233,10 @@ void main() {
       await http.runWithClient(() async {
         await configureSDK();
         requests.clear();
-        for (final event in ConversionValue.trialEvents)
+        for (final event in ConversionValue.trialEvents) {
           await AppReferSDK.trackEvent(event);
+          await Future<void>.delayed(Duration.zero);
+        }
         await AppReferSDK.trackEvent('paid', revenue: 1);
         await AppReferSDK.trackEvent('ordinary');
         await AppReferSDK.trackEvent('refund', revenue: -1);
@@ -298,5 +304,77 @@ void main() {
     time = time.add(const Duration(milliseconds: 1));
     await refresh(force: true);
     expect(requests.length, 1);
+  });
+  test('forced checks during a stale request rerun once', () async {
+    final entered = Completer<void>();
+    final release = Completer<http.Response>();
+    var count = 0;
+    client = MockClient((r) async {
+      count++;
+      if (count == 1) {
+        entered.complete();
+        return release.future;
+      }
+      return http.Response('{"fine":30,"coarse":"high"}', 200);
+    });
+    final first = refresh();
+    await entered.future;
+    await refresh(force: true);
+    await refresh(force: true);
+    release.complete(http.Response('{"fine":0,"coarse":"low"}', 200));
+    await first;
+    expect(count, 2);
+    expect(updates.last, (30, 'high'));
+  });
+  test('one delayed recheck after 90 seconds without recurrence', () {
+    fakeAsync((clock) {
+      refresh(force: true);
+      clock.flushMicrotasks();
+      refresh(force: true);
+      clock.flushMicrotasks();
+      expect(requests.length, 2);
+      clock.elapse(const Duration(milliseconds: 89999));
+      expect(requests.length, 2);
+      response = {'fine': 30, 'coarse': 'high'};
+      clock.elapse(const Duration(milliseconds: 1));
+      clock.flushMicrotasks();
+      expect(requests.length, 3);
+      expect(updates.last, (30, 'high'));
+      clock.elapse(const Duration(minutes: 3));
+      clock.flushMicrotasks();
+      expect(requests.length, 3);
+    });
+  });
+  test('trackEvent completes before a pending conversion response', () async {
+    await http.runWithClient(() async {
+      await configureSDK();
+      final finish = Completer<http.Response>();
+      final entered = Completer<void>();
+      client = MockClient((r) async {
+        if (r.url.path.endsWith('conversion-value')) {
+          entered.complete();
+          return finish.future;
+        }
+        return http.Response('{}', 200);
+      });
+      await http.runWithClient(() async {
+        await AppReferSDK.trackEvent('purchase', revenue: 1);
+        await entered.future;
+        finish.complete(http.Response('{"fine":30,"coarse":"high"}', 200));
+        await Future<void>.delayed(Duration.zero);
+      }, () => client);
+    }, () => client);
+  });
+  test('delayed no-increase check never schedules another', () {
+    fakeAsync((clock) {
+      refresh(force: true);
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 90));
+      clock.flushMicrotasks();
+      expect(requests.length, 2);
+      clock.elapse(const Duration(minutes: 5));
+      clock.flushMicrotasks();
+      expect(requests.length, 2);
+    });
   });
 }

@@ -237,7 +237,7 @@ class AppReferSDK with WidgetsBindingObserver {
     sdk._logger.info('Tracking event: $eventName');
     await sdk._httpClient.post('/api/track/event', body);
     if ((revenue ?? 0) > 0 || ConversionValue.trialEvents.contains(eventName)) {
-      await sdk._conversion.refresh(force: true);
+      unawaited(sdk._conversion.refresh(force: true));
     }
   }
 
