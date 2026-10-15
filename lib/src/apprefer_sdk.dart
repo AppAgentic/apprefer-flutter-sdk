@@ -19,6 +19,7 @@ import 'version.dart';
 
 class AppReferSDK with WidgetsBindingObserver {
   Future<void>? _consentSync;
+  bool _consentRecheck = false;
   static AppReferSupport get support => AppReferSupport.instance;
   static AppReferSDK? _instance;
 
@@ -70,8 +71,7 @@ class AppReferSDK with WidgetsBindingObserver {
     // Record first run date
     await sdk._storage.getFirstRunDate();
 
-    if (sdk._storage.isMatchRequestAttempted() ||
-        !sdk._storage.isSdkEnabled()) {
+    if (sdk._storage.isMatchRequestAttempted()) {
       await trackingConsentDidChange();
     }
 
@@ -153,10 +153,6 @@ class AppReferSDK with WidgetsBindingObserver {
       return null;
     }
 
-    if (consent != null) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(TrackingConsent.reportedKey, consent);
-    }
     // Update kill switch from server
     final sdkEnabled = response['sdkEnabled'] as bool? ?? true;
     await _storage.setSdkEnabled(sdkEnabled);
@@ -164,6 +160,11 @@ class AppReferSDK with WidgetsBindingObserver {
       _logger.info('SDK disabled by server');
       await _storage.setMatchRequestAttempted(true);
       return null;
+    }
+
+    if (consent != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(TrackingConsent.reportedKey, consent);
     }
 
     // Parse attribution
@@ -182,7 +183,8 @@ class AppReferSDK with WidgetsBindingObserver {
     await _storage.setInstallEventSent(true);
     await _storage.setLastConfigFetch(DateTime.now().toIso8601String());
 
-    return attribution;
+    await trackingConsentDidChange();
+    return _getCachedAttribution() ?? attribution;
   }
 
   /// Track non-purchase events (signup, tutorial_complete, etc.)
@@ -314,20 +316,34 @@ class AppReferSDK with WidgetsBindingObserver {
   /// Call after the app's own ATT prompt. Failed reports retry on the next trigger.
   static Future<void> trackingConsentDidChange() async {
     final sdk = _instance;
-    if (sdk == null) return;
+    if (sdk == null ||
+        !sdk._storage.isSdkEnabled() ||
+        !sdk._storage.isMatchRequestAttempted())
+      return;
     if (sdk._consentSync != null) {
+      sdk._consentRecheck = true;
       await sdk._consentSync;
-      return trackingConsentDidChange();
+      return;
     }
-    sdk._consentSync = sdk._reportConsent();
-    try {
-      await sdk._consentSync;
-    } finally {
-      sdk._consentSync = null;
-    }
+    sdk._consentSync = () async {
+      try {
+        do {
+          sdk._consentRecheck = false;
+          try {
+            await sdk._reportConsent();
+          } catch (e) {
+            sdk._logger.error('Consent sync failed: $e');
+          }
+        } while (sdk._consentRecheck);
+      } finally {
+        sdk._consentSync = null;
+      }
+    }();
+    await sdk._consentSync;
   }
 
   Future<void> _reportConsent() async {
+    if (!_storage.isSdkEnabled() || !_storage.isMatchRequestAttempted()) return;
     final consent = await TrackingConsent.current();
     final prefs = await SharedPreferences.getInstance();
     if (consent == null ||
@@ -341,9 +357,28 @@ class AppReferSDK with WidgetsBindingObserver {
       if (_storage.getUserId() != null)
         'customer_user_id': _storage.getUserId(),
     };
-    if (consent == 'granted') {
+    if (Platform.isIOS && consent == 'granted') {
       final idfa = await _adServices.getIdfa();
       if (idfa != null) body['idfa'] = idfa;
+    }
+    if (Platform.isAndroid && TrackingConsent.allowed(consent)) {
+      final gaid = await _adServices.getGaid();
+      if (gaid != null) body['gaid'] = gaid;
+    }
+    if (prefs.getString(TrackingConsent.reportedKey) == null) {
+      if (Platform.isIOS) {
+        final token = await _adServices.getAdServicesToken();
+        if (token != null) body['asa_token'] = token;
+      }
+      if (Platform.isAndroid) {
+        final referrer = await _installReferrer.getInstallReferrer();
+        body['install_referrer'] = referrer?['installReferrer'];
+        body['ar_click_id'] = AppReferInstallReferrer.extractClickId(
+          referrer?['installReferrer'] as String?,
+        );
+        body['referrer_click_ts'] = referrer?['referrerClickTimestampSeconds'];
+        body['referrer_install_ts'] = referrer?['installBeginTimestampSeconds'];
+      }
     }
     final response = await _httpClient.post(
       '/api/track/configure',
@@ -352,6 +387,10 @@ class AppReferSDK with WidgetsBindingObserver {
       consentSnapshot: true,
     );
     if (response == null) return;
+    if (response['sdkEnabled'] == false) {
+      await _storage.setSdkEnabled(false);
+      return;
+    }
     final raw = response['attribution'] as Map<String, dynamic>?;
     if (raw != null) {
       await _storage.setAttributionCache(

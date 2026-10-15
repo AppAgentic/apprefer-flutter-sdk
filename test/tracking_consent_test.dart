@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'package:apprefer/src/apprefer_sdk.dart';
 import 'package:apprefer/src/config.dart';
 import 'package:apprefer/src/services/tracking_consent.dart';
@@ -144,4 +145,186 @@ void main() {
       }, () => fake);
     },
   );
+
+  test(
+    'first open blocks activation and explicit checks then rechecks choice',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(TrackingConsent.consentKey, 'denied');
+      final started = Completer<void>();
+      final finish = Completer<http.Response>();
+      final sent = <Map<String, dynamic>>[];
+      await http.runWithClient(
+        () async {
+          final configure = AppReferSDK.configure(
+            const AppReferConfig(apiKey: 'pk'),
+          );
+          await started.future;
+          await prefs.setString(TrackingConsent.consentKey, 'granted');
+          WidgetsBinding.instance.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          );
+          await AppReferSDK.trackingConsentDidChange();
+          expect(sent.length, 1);
+          finish.complete(http.Response('{}', 200));
+          await configure;
+          expect(sent.map((b) => b['tracking_consent']), ['denied', 'granted']);
+          expect(prefs.getString(TrackingConsent.reportedKey), 'granted');
+        },
+        () => MockClient((request) async {
+          sent.add(jsonDecode(request.body) as Map<String, dynamic>);
+          if (sent.length == 1) {
+            started.complete();
+            return finish.future;
+          }
+          return http.Response('{}', 200);
+        }),
+      );
+    },
+  );
+
+  test(
+    'kill switch preserves attribution and reported choice and blocks later sync',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(TrackingConsent.consentKey, 'denied');
+      var calls = 0;
+      var disable = false;
+      await http.runWithClient(
+        () async {
+          await AppReferSDK.configure(const AppReferConfig(apiKey: 'pk'));
+          final cached = (await AppReferSDK.getAttribution())?.network;
+          disable = true;
+          await prefs.setString(TrackingConsent.consentKey, 'granted');
+          await AppReferSDK.trackingConsentDidChange();
+          expect(prefs.getBool('apprefer_sdk_enabled'), false);
+          expect(prefs.getString(TrackingConsent.reportedKey), 'denied');
+          expect((await AppReferSDK.getAttribution())?.network, cached);
+          final previous = calls;
+          await AppReferSDK.trackingConsentDidChange();
+          await AppReferSDK.configure(const AppReferConfig(apiKey: 'pk'));
+          expect(calls, previous);
+        },
+        () => MockClient((_) async {
+          calls++;
+          return http.Response(
+            jsonEncode(
+              disable
+                  ? {'sdkEnabled': false}
+                  : {
+                      'attribution': {
+                        'network': 'paid',
+                        'matchType': 'referrer',
+                      },
+                    },
+            ),
+            200,
+          );
+        }),
+      );
+    },
+  );
+
+  test('first-open disabled response does not mark consent reported', () async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(TrackingConsent.consentKey, 'denied');
+    var calls = 0;
+    await http.runWithClient(
+      () async {
+        await AppReferSDK.configure(const AppReferConfig(apiKey: 'pk'));
+        expect(prefs.getString(TrackingConsent.reportedKey), isNull);
+        await AppReferSDK.trackingConsentDidChange();
+        expect(calls, 1);
+      },
+      () => MockClient((_) async {
+        calls++;
+        return http.Response('{"sdkEnabled":false}', 200);
+      }),
+    );
+  });
+
+  test(
+    'check while syncing rechecks changed choice before completing',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(TrackingConsent.consentKey, 'denied');
+      await http.runWithClient(
+        () => AppReferSDK.configure(const AppReferConfig(apiKey: 'pk')),
+        () => MockClient((_) async => http.Response('{}', 200)),
+      );
+      await prefs.setString(TrackingConsent.consentKey, 'undetermined');
+      final started = Completer<void>();
+      final finish = Completer<http.Response>();
+      final sent = <String>[];
+      await http.runWithClient(
+        () async {
+          final first = AppReferSDK.trackingConsentDidChange();
+          await started.future;
+          await prefs.setString(TrackingConsent.consentKey, 'granted');
+          final next = AppReferSDK.trackingConsentDidChange();
+          finish.complete(http.Response('{}', 200));
+          await Future.wait([first, next]);
+          expect(sent, ['undetermined', 'granted']);
+          expect(prefs.getString(TrackingConsent.reportedKey), 'granted');
+        },
+        () => MockClient((request) async {
+          sent.add(jsonDecode(request.body)['tracking_consent'] as String);
+          if (sent.length == 1) {
+            started.complete();
+            return finish.future;
+          }
+          return http.Response('{}', 200);
+        }),
+      );
+    },
+  );
+
+  test(
+    'Support and explicit clients keep configured POST and GET hosts',
+    () async {
+      final prefs = await SharedPreferences.getInstance();
+      final urls = <String>[];
+      await http.runWithClient(
+        () async {
+          for (final consent in ['granted', 'denied', 'undetermined']) {
+            await prefs.setString(TrackingConsent.consentKey, consent);
+            for (final host in [
+              'https://apprefer.com',
+              'https://specific.example',
+            ]) {
+              final client = AppReferHttpClient(
+                baseUrl: host,
+                apiKey: 'pk',
+                logger: AppReferLogger(debug: false, logLevel: 0),
+              );
+              urls.clear();
+              await client.post('/support', {});
+              await client.get('/support');
+              expect(urls, [host, host]);
+            }
+          }
+        },
+        () => MockClient((request) async {
+          urls.add(request.url.origin);
+          return http.Response('{}', 200);
+        }),
+      );
+    },
+  );
+
+  test('explicit billing host stays pinned under granted consent', () async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(TrackingConsent.consentKey, 'granted');
+    final urls = <String>[];
+    final billing = BillingApiClient(
+      baseUrls: const ['https://specific.example'],
+      apiKey: () => 'pk',
+      client: MockClient((r) async {
+        urls.add(r.url.origin);
+        return http.Response('{}', 503);
+      }),
+    );
+    await expectLater(billing.send(const GetCustomer('u')), throwsException);
+    expect(urls, ['https://specific.example']);
+  });
 }

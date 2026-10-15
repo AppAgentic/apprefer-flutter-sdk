@@ -172,10 +172,13 @@ class BillingApiClient {
     // that merely could not be reached must not lose that.
     AppReferBillingException? pause;
 
-    for (final baseUrl in TrackingConsent.hosts(
-      await TrackingConsent.current(),
-      baseUrls,
-    )) {
+    final hosts =
+        baseUrls.length == 2 &&
+            baseUrls[0] == 'https://trk.apprefer.com' &&
+            baseUrls[1] == 'https://apprefer.com'
+        ? TrackingConsent.hosts(await TrackingConsent.current(), baseUrls)
+        : baseUrls;
+    for (final baseUrl in hosts) {
       final request = makeRequest(endpoint, baseUrl, key);
       final http.Response response;
       try {

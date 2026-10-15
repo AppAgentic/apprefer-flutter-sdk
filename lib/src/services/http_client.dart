@@ -19,6 +19,18 @@ class AppReferHttpClient {
   final String apiKey;
   final AppReferLogger _logger;
 
+  // Only the default tracking pair follows consent. Explicit hosts stay pinned.
+  bool get _routesTracking =>
+      baseUrl == 'https://trk.apprefer.com' &&
+      fallbackUrl == 'https://apprefer.com';
+
+  List<String> _hosts(String? consent) {
+    final configured = [baseUrl, if (fallbackUrl != null) fallbackUrl!];
+    return _routesTracking
+        ? TrackingConsent.hosts(consent, configured)
+        : configured;
+  }
+
   AppReferHttpClient({
     required this.baseUrl,
     this.fallbackUrl,
@@ -42,10 +54,7 @@ class AppReferHttpClient {
     if (body['event_name'] == '_advanced_matching' &&
         !TrackingConsent.allowed(current))
       return null;
-    final hosts = TrackingConsent.hosts(current, [
-      baseUrl,
-      if (fallbackUrl != null) fallbackUrl!,
-    ]);
+    final hosts = _hosts(current);
     final result = await _postWithRetries(hosts.first, path, body);
     if (result != null) return result;
 
@@ -141,10 +150,7 @@ class AppReferHttpClient {
   }
 
   Future<Map<String, dynamic>?> get(String path) async {
-    final hosts = TrackingConsent.hosts(await TrackingConsent.current(), [
-      baseUrl,
-      if (fallbackUrl != null) fallbackUrl!,
-    ]);
+    final hosts = _hosts(await TrackingConsent.current());
     final result = await _getWithRetries(hosts.first, path);
     if (result != null) return result;
 
