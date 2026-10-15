@@ -1,11 +1,12 @@
 ## 0.5.0
 
+- AI personas: approved name and portrait, explicit AI tag, and a hand-over pill when a person is needed.
 - AppRefer Support: embeddable help chat, conversations, screenshot uploads, secure sessions, unread counts and push routing.
 - Support chat "Concierge" design, matching the iOS SDK: hero home with presence pill, continue card, quick-help topic tiles and a floating composer; conversation with a floating header, grouped tailed bubbles, quick replies and a full-screen image viewer; light and dark.
   - Removed `replyTimeText`; added `replyTime` ("under an hour"), `teamNames`, `topics` (`AppReferSupportTopic`, optional `action`) and `appIcon` (defaults to the launcher icon).
   - `compose(text)` opens the home with the field pre-filled and focused; the separate new-message screen is gone. A picked topic becomes the conversation `subject`.
 
-## Unreleased
+### Billing and attribution
 
 - Add AppRefer Billing (`AppReferBilling`), an App Store / Google Play purchases and entitlements module that replaces RevenueCat, built on the official `in_app_purchase` plugins (StoreKit 2 on iOS 15+, Play Billing on Android):
   - `configure(apiKey:, appUserId:, entitlementsByProduct:, defaultEntitlement:, consumableProductIds:)` with an anonymous `$ARAnon:<UUID>` id, and the store purchase listener started at configure

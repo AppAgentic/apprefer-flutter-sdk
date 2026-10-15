@@ -15,6 +15,7 @@ dependencies:
   apprefer:
     git:
       url: https://github.com/AppAgentic/apprefer-flutter-sdk.git
+      ref: 0.5.0
 ```
 
 Then run `flutter pub get`.
