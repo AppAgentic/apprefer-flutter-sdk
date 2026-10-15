@@ -46,7 +46,7 @@ class ConversionValue {
     }
   }
 
-  Future<void> refresh({bool force = false}) async {
+  Future<void> refresh({bool force = false, bool allowRecheck = true}) async {
     if (!isIOS() || !storage.isSdkEnabled()) return;
     if (_inFlight) {
       if (force) _rerunForced = true;
@@ -62,11 +62,12 @@ class ConversionValue {
       do {
         _rerunForced = false;
         final raised = await _refreshOnce(force: force);
-        if (force && !raised && !_recheckScheduled) {
+        if (force && !raised && allowRecheck && !_recheckScheduled) {
           _recheckScheduled = true;
           Timer(const Duration(seconds: 90), () {
             _recheckScheduled = false;
-            unawaited(_refreshOnce(force: true));
+            // Through the guarded path (enabled, window, one check at a time), without another recheck.
+            unawaited(refresh(force: true, allowRecheck: false));
           });
         }
         force = true;
@@ -101,6 +102,8 @@ class ConversionValue {
         return false;
       if (!storage.isSdkEnabled()) return false;
       await storage.setConversionCheckedAt(now());
+      // Compare with what is stored now, not before the request.
+      value = storage.conversionValue() ?? value;
       final nextFine = max(value.fine, fine);
       final nextCoarse =
           _coarse[max(
