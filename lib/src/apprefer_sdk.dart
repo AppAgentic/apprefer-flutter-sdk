@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/tracking_consent.dart';
+import 'services/conversion_value.dart';
 import 'support/apprefer_support.dart';
 import 'dart:io';
 
@@ -31,7 +32,15 @@ class AppReferSDK with WidgetsBindingObserver {
   late AppReferAdServices _adServices;
   late AppReferInstallReferrer _installReferrer;
 
+  late ConversionValue _conversion;
+
   AppReferSDK._();
+
+  /// Refresh iOS conversion values after purchases made outside AppRefer Billing.
+  /// A no-op on Android.
+  static Future<void> updateConversionValue() async {
+    await _instance?._conversion.refresh(force: true);
+  }
 
   /// Configure + resolve attribution in ONE call.
   /// On first open: sends device signals + AdServices token to backend,
@@ -52,6 +61,14 @@ class AppReferSDK with WidgetsBindingObserver {
       fallbackUrl: AppReferConfig.fallbackUrl,
       apiKey: config.apiKey,
       logger: sdk._logger,
+    );
+    sdk._conversion = ConversionValue(
+      storage: sdk._storage,
+      client: AppReferHttpClient(
+        baseUrl: 'https://apprefer.com',
+        apiKey: config.apiKey,
+        logger: sdk._logger,
+      ),
     );
     sdk._deviceInfo = AppReferDeviceInfo(logger: sdk._logger);
     sdk._adServices = AppReferAdServices(logger: sdk._logger);
@@ -84,6 +101,7 @@ class AppReferSDK with WidgetsBindingObserver {
     // If match already attempted, return cached attribution
     if (sdk._storage.isMatchRequestAttempted()) {
       sdk._logger.info('Skipping match request: existing install detected.');
+      unawaited(sdk._conversion.refresh());
       return _getCachedAttribution();
     }
 
@@ -93,6 +111,8 @@ class AppReferSDK with WidgetsBindingObserver {
     } catch (e) {
       sdk._logger.error('Attribution resolution failed: $e');
       return null;
+    } finally {
+      unawaited(sdk._conversion.refresh());
     }
   }
 
@@ -216,6 +236,9 @@ class AppReferSDK with WidgetsBindingObserver {
 
     sdk._logger.info('Tracking event: $eventName');
     await sdk._httpClient.post('/api/track/event', body);
+    if ((revenue ?? 0) > 0 || ConversionValue.trialEvents.contains(eventName)) {
+      await sdk._conversion.refresh(force: true);
+    }
   }
 
   /// Meta Advanced Matching: send hashed user PII to improve CAPI match rates.
@@ -305,6 +328,7 @@ class AppReferSDK with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      unawaited(_conversion.refresh());
       unawaited(
         trackingConsentDidChange().catchError((Object e) {
           _logger.error('Consent sync failed: $e');

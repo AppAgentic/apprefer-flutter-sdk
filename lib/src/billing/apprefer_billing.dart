@@ -8,6 +8,7 @@ import 'package:in_app_purchase_storekit/in_app_purchase_storekit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config.dart';
+import '../apprefer_sdk.dart';
 import '../services/logger.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
@@ -355,7 +356,7 @@ class AppReferBilling {
     ChangeSubscriptionParam? changeSubscriptionParam,
   }) async {
     final engine = await _requireEngine();
-    return engine.purchase(
+    final result = await engine.purchase(
       product,
       StorePurchaseOptions(
         promotionalOffer: promotionalOffer,
@@ -363,6 +364,10 @@ class AppReferBilling {
         changeSubscriptionParam: changeSubscriptionParam,
       ),
     );
+    if (result.outcome == PurchaseOutcome.purchased) {
+      unawaited(AppReferSDK.updateConversionValue());
+    }
+    return result;
   }
 
   /// `AppStore.sync()` (iOS), then sends every purchase the store owns to AppRefer.
