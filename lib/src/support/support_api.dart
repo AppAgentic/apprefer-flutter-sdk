@@ -152,8 +152,10 @@ class SupportAPI {
     List<String> ids,
     Map<String, dynamic> context, {
     required String clientMessageId,
+    String? subject,
   }) => call('POST', '/conversations', {
     'text': text,
+    if (subject != null && subject.isNotEmpty) 'subject': subject,
     if (ids.isNotEmpty) 'attachmentIds': ids,
     'context': context,
     'clientMessageId': clientMessageId,

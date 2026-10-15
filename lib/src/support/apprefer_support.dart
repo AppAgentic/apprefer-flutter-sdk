@@ -1,12 +1,14 @@
-import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui';
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../services/device_info.dart';
 import '../services/logger.dart';
 import 'support_api.dart';
+import 'support_style.dart';
 
 /// Shared support configuration and presentation API.
 class AppReferSupport {
@@ -16,9 +18,30 @@ class AppReferSupport {
 
   /// Set this to the host MaterialApp navigatorKey for context-free push routing.
   GlobalKey<NavigatorState>? navigatorKey;
+
+  /// Bubble and button colour. Defaults to the host theme's primary colour.
   Color? accentColor;
+
+  /// Hero title. Defaults to "<App name> support".
   String? title;
-  String replyTimeText = 'Ask us anything. We usually reply in under an hour.';
+
+  /// How fast the team usually answers, completing "We usually reply in …".
+  String replyTime = 'under an hour';
+
+  /// First names of the people who answer (e.g. `['Jay']`), shown on the help home.
+  List<String> teamNames = const [];
+
+  /// The quick-help tiles on the home screen. Empty hides them.
+  List<AppReferSupportTopic> topics = AppReferSupportTopic.defaults;
+
+  /// The icon on the home screen. Defaults to the app's launcher icon.
+  ImageProvider? appIcon;
+
+  Future<Uint8List?>? _launcherIcon;
+  Future<Uint8List?> launcherIcon() => _launcherIcon ??= supportChannel
+      .invokeMethod<Uint8List>('appIcon')
+      .then<Uint8List?>((v) => v, onError: (_) => null);
+
   Future<void> identify({String? name, String? email}) async {
     api.name = name?.trim().isEmpty == true ? null : name?.trim();
     api.email = email?.trim().isEmpty == true ? null : email?.trim();
@@ -27,14 +50,17 @@ class AppReferSupport {
 
   Future<void> open({BuildContext? context, String? conversationId}) =>
       _present(context, AppReferSupportView(conversationId: conversationId));
+
+  /// Opens the help home with the message field pre-filled and focused.
   Future<void> compose(String prefill, {BuildContext? context}) =>
       _present(context, AppReferSupportView(composing: prefill));
   Future<void> _present(BuildContext? context, Widget view) async {
     final nav = context == null
         ? navigatorKey?.currentState
         : Navigator.of(context);
-    if (nav == null)
+    if (nav == null) {
       throw StateError('Pass context or set AppRefer.support.navigatorKey.');
+    }
     await nav.push(
       MaterialPageRoute<void>(fullscreenDialog: true, builder: (_) => view),
     );
@@ -76,7 +102,58 @@ class AppReferSupport {
   );
 }
 
-/// Embeddable home, compose and conversation screens.
+/// A quick-help tile on the home screen. Tapping it starts a message on that
+/// topic (the title becomes the conversation subject), or runs [action]
+/// instead (e.g. your own restore-purchases flow).
+class AppReferSupportTopic {
+  const AppReferSupportTopic({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.tint,
+    required this.prompt,
+    this.action,
+  });
+  final String title, subtitle;
+  final IconData icon;
+  final Color tint;
+
+  /// The hint in the message field once the tile is picked.
+  final String prompt;
+  final VoidCallback? action;
+
+  static const billing = AppReferSupportTopic(
+    title: 'Billing & refunds',
+    subtitle: 'Charges, plans, receipts',
+    icon: Icons.credit_card_rounded,
+    tint: Color(0xff6e4aff),
+    prompt: 'What happened with the charge?',
+  );
+  static const restore = AppReferSupportTopic(
+    title: 'Restore purchase',
+    subtitle: 'Get your plan back',
+    icon: Icons.refresh_rounded,
+    tint: Color(0xff2e8ffa),
+    prompt: 'Which plan did you buy, and on which account?',
+  );
+  static const bug = AppReferSupportTopic(
+    title: 'Report a bug',
+    subtitle: 'Screenshots welcome',
+    icon: Icons.bug_report_rounded,
+    tint: Color(0xfff04554),
+    prompt: 'What went wrong? A screenshot helps.',
+  );
+  static const idea = AppReferSupportTopic(
+    title: 'Suggest an idea',
+    subtitle: 'We read every one',
+    icon: Icons.lightbulb_rounded,
+    tint: Color(0xff1fb866),
+    prompt: 'What would make the app better for you?',
+  );
+  static const defaults = [billing, restore, bug, idea];
+}
+
+/// Embeddable help chat: the home and conversations.
 class AppReferSupportView extends StatefulWidget {
   const AppReferSupportView({
     super.key,
@@ -84,33 +161,44 @@ class AppReferSupportView extends StatefulWidget {
     this.composing,
     this.api,
   });
-  final String? conversationId, composing;
+  final String? conversationId;
+
+  /// Opens the home with the message field pre-filled and focused.
+  final String? composing;
   final SupportAPI? api;
   @override
   State<AppReferSupportView> createState() => _SupportViewState();
 }
 
 class _Pending {
-  _Pending(this.text, this.images, this.conversation);
+  _Pending(this.text, this.images, this.conversation, {this.subject});
   final String clientMessageId = newSupportMessageId();
   final String text;
-  final String? conversation;
+  final String? conversation, subject;
   bool inFlight = false;
   final List<Uint8List> images;
   bool failed = false;
   final List<String> ids = [];
 }
 
+bool _sameImages(List<Uint8List> a, List<Uint8List> b) =>
+    a.length == b.length &&
+    List.generate(a.length, (i) => identical(a[i], b[i])).every((x) => x);
+
 class _SupportViewState extends State<AppReferSupportView>
     with WidgetsBindingObserver {
-  final text = TextEditingController();
-  final scroll = ScrollController();
+  final homeText = TextEditingController(),
+      threadText = TextEditingController();
+  final homeFocus = FocusNode(), threadFocus = FocusNode();
+  final homeScroll = ScrollController(), scroll = ScrollController();
   final config = AppReferSupport.instance;
   late final SupportAPI api = widget.api ?? config.api;
   String? id, pollCursor;
   int generation = 0;
   _Pending? firstSend;
-  String subject = '', appName = 'App', error = '';
+  AppReferSupportTopic? topic;
+  String appName = 'App', sendError = '', loadError = '';
+  MemoryImage? launcherImage;
   late final Future<void> metadataReady;
   Map<String, dynamic> metadata = {
     'appVersion': 'unknown',
@@ -120,28 +208,36 @@ class _SupportViewState extends State<AppReferSupportView>
     'locale': PlatformDispatcher.instance.locale.toString(),
   };
   List<Map<String, dynamic>> conversations = [], messages = [];
-  List<Uint8List> images = [];
+  List<Uint8List> homeImages = [], threadImages = [];
   final List<_Pending> pending = [];
-  bool composing = false,
-      sending = false,
-      loading = true,
-      refreshing = false,
-      active = true;
+  bool sending = false, loading = true, refreshing = false, active = true;
+  double composerHeight = 90;
   Timer? timer;
-  bool get dark => Theme.of(context).brightness == Brightness.dark;
-  Color get surface => dark ? const Color(0xff1c1c1e) : const Color(0xfff2f2f7);
-  Color get accent =>
-      config.accentColor ?? Theme.of(context).colorScheme.primary;
+  late SupportPalette palette;
+  late SupportColors colors;
+  ThemeData? _theme;
+  Object? _themeKey;
   String get title => config.title ?? '$appName support';
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     id = widget.conversationId;
-    composing = widget.composing != null;
-    text.text = widget.composing ?? '';
-    text.addListener(_changed);
+    homeText.text = widget.composing ?? '';
+    homeText.addListener(_changed);
+    threadText.addListener(_changed);
     metadataReady = _context();
+    config.launcherIcon().then((bytes) {
+      if (mounted && bytes != null && bytes.isNotEmpty) {
+        setState(() => launcherImage = MemoryImage(bytes));
+      }
+    });
+    if (widget.composing != null && id == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) homeFocus.requestFocus();
+      });
+    }
     _refresh();
     _timer();
   }
@@ -156,7 +252,7 @@ class _SupportViewState extends State<AppReferSupportView>
       final d = await AppReferDeviceInfo(
         logger: AppReferLogger(debug: false),
       ).getDeviceInfo();
-      if (mounted)
+      if (mounted) {
         setState(() {
           appName = p.appName;
           metadata = {
@@ -168,6 +264,7 @@ class _SupportViewState extends State<AppReferSupportView>
             'platform': Platform.isIOS ? 'ios' : 'android',
           };
         });
+      }
     } catch (_) {
       /* Metadata is best effort. */
     }
@@ -175,14 +272,15 @@ class _SupportViewState extends State<AppReferSupportView>
 
   void _timer() {
     timer?.cancel();
-    if (active)
+    if (active) {
       timer = Timer.periodic(Duration(seconds: id == null ? 15 : 4), (_) {
-        if (!composing &&
-            mounted &&
+        if (mounted &&
             TickerMode.valuesOf(context).enabled &&
-            (ModalRoute.of(context)?.isCurrent ?? true))
+            (ModalRoute.of(context)?.isCurrent ?? true)) {
           _refresh();
+        }
       });
+    }
   }
 
   @override
@@ -196,8 +294,13 @@ class _SupportViewState extends State<AppReferSupportView>
   void dispose() {
     timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
-    text.removeListener(_changed);
-    text.dispose();
+    for (final c in [homeText, threadText]) {
+      c.removeListener(_changed);
+      c.dispose();
+    }
+    homeFocus.dispose();
+    threadFocus.dispose();
+    homeScroll.dispose();
     scroll.dispose();
     super.dispose();
   }
@@ -218,21 +321,23 @@ class _SupportViewState extends State<AppReferSupportView>
               ? x
               : '${b['lastMessageAt']}'.compareTo('${a['lastMessageAt']}');
         });
-        if (mounted && id == current && generation == currentGeneration)
+        if (mounted && id == current && generation == currentGeneration) {
           setState(() => conversations = result);
+        }
       } else {
         final result = await api.thread(current, after: pollCursor);
         if (mounted && id == current && generation == currentGeneration) {
           final count = messages.length;
           setState(() {
-            subject = '${result['conversation']['subject']}';
             for (final m in List<Map<String, dynamic>>.from(
               result['messages'],
             )) {
               final timestamp = m['createdAt'] as String?;
               if (timestamp != null &&
-                  (pollCursor == null || timestamp.compareTo(pollCursor!) > 0))
+                  (pollCursor == null ||
+                      timestamp.compareTo(pollCursor!) > 0)) {
                 pollCursor = timestamp;
+              }
               if (!messages.any((old) => old['id'] == m['id'])) messages.add(m);
             }
             messages.sort(
@@ -242,9 +347,9 @@ class _SupportViewState extends State<AppReferSupportView>
           if (messages.length != count) _bottom();
         }
       }
-      if (mounted) setState(() => error = '');
+      if (mounted) setState(() => loadError = '');
     } catch (e) {
-      if (mounted) setState(() => error = '$e');
+      if (mounted) setState(() => loadError = '$e');
     } finally {
       refreshing = false;
       if (mounted) {
@@ -256,113 +361,154 @@ class _SupportViewState extends State<AppReferSupportView>
 
   void _bottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && scroll.hasClients)
+      if (mounted && scroll.hasClients) {
         scroll.animateTo(
           scroll.position.maxScrollExtent,
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOut,
         );
+      }
     });
   }
 
-  void _back() {
-    if (id != null || composing) {
-      setState(() {
-        generation++;
-        sending = false;
-        firstSend = null;
-        pollCursor = null;
-        id = null;
-        composing = false;
-        messages = [];
-        subject = '';
-        text.clear();
-        images = [];
-      });
-      _timer();
-      _refresh();
-    } else {
-      Navigator.maybePop(context);
-    }
+  void _openConversation(String conversation) {
+    setState(() {
+      generation++;
+      pollCursor = null;
+      messages = [];
+      id = conversation;
+      loading = true;
+      loadError = '';
+      threadText.clear();
+      threadImages = [];
+    });
+    _timer();
+    _refresh();
   }
 
-  Future<void> _pick() async {
-    if (images.length >= 4) return;
+  void _back() {
+    if (id == null) {
+      Navigator.maybePop(context);
+      return;
+    }
+    setState(() {
+      generation++;
+      pollCursor = null;
+      id = null;
+      messages = [];
+      loadError = '';
+      threadText.clear();
+      threadImages = [];
+    });
+    _timer();
+    _refresh();
+  }
+
+  Future<void> _pick(bool home) async {
+    final target = home ? homeImages : threadImages;
+    if (target.length >= 4) return;
     try {
       final picked = await supportChannel.invokeListMethod<Uint8List>(
         'pick',
-        4 - images.length,
+        4 - target.length,
       );
-      if (mounted)
-        setState(() => images.addAll((picked ?? []).take(4 - images.length)));
+      if (!mounted) return;
+      setState(() {
+        final list = home ? homeImages : threadImages;
+        list.addAll((picked ?? []).take(4 - list.length));
+      });
     } catch (e) {
-      if (mounted) setState(() => error = '$e');
+      if (mounted) setState(() => sendError = '$e');
     }
   }
 
-  Future<void> _send() async {
-    if (sending || (text.text.trim().isEmpty && images.isEmpty)) return;
+  void _pickTopic(AppReferSupportTopic t) {
+    if (t.action != null) {
+      t.action!();
+      return;
+    }
+    setState(() => topic = t);
+    homeFocus.requestFocus();
+  }
+
+  /// Starts a conversation from the home; a retry reuses the clientMessageId.
+  Future<void> _start() async {
+    final body = homeText.text.trim();
+    if (sending || (body.isEmpty && homeImages.isEmpty)) return;
+    final subject = topic?.title;
     final currentGeneration = generation;
     final p =
-        id == null &&
-            firstSend != null &&
-            firstSend!.text == text.text.trim() &&
-            firstSend!.images.length == images.length &&
-            List.generate(
-              images.length,
-              (i) => identical(firstSend!.images[i], images[i]),
-            ).every((same) => same)
+        firstSend != null &&
+            firstSend!.text == body &&
+            firstSend!.subject == subject &&
+            _sameImages(firstSend!.images, homeImages)
         ? firstSend!
-        : _Pending(text.text.trim(), List.of(images), id);
-    if (id == null) {
-      firstSend = p;
-      setState(() => sending = true);
-      try {
-        p.ids.clear();
-        for (final image in p.images) {
-          p.ids.add(await api.upload(image));
-        }
-        // Device details are nice to have; never hold a message back for them.
-        await metadataReady.timeout(
-          const Duration(seconds: 2),
-          onTimeout: () {},
-        );
-        final result = await api.start(
-          p.text,
-          p.ids,
-          metadata,
-          clientMessageId: p.clientMessageId,
-        );
-        if (!mounted || generation != currentGeneration) return;
-        setState(() {
-          firstSend = null;
-          pollCursor = null;
-          id = result['conversation']['id'] as String;
-          subject = '${result['conversation']['subject']}';
-          messages = List<Map<String, dynamic>>.from(result['messages']);
-          composing = false;
-          images = [];
-          text.clear();
-          error = '';
-        });
-        _timer();
-        _bottom();
-      } catch (e) {
-        if (mounted && generation == currentGeneration)
-          setState(() => error = '$e');
-      } finally {
-        if (mounted && generation == currentGeneration)
-          setState(() => sending = false);
+        : _Pending(body, List.of(homeImages), null, subject: subject);
+    firstSend = p;
+    setState(() {
+      sending = true;
+      sendError = '';
+    });
+    try {
+      p.ids.clear();
+      for (final image in p.images) {
+        p.ids.add(await api.upload(image));
       }
-    } else {
+      // Device details are nice to have; never hold a message back for them.
+      await metadataReady.timeout(const Duration(seconds: 2), onTimeout: () {});
+      final result = await api.start(
+        p.text,
+        p.ids,
+        metadata,
+        clientMessageId: p.clientMessageId,
+        subject: p.subject,
+      );
+      if (!mounted) return;
       setState(() {
-        pending.add(p);
-        text.clear();
-        images = [];
+        firstSend = null;
+        if (homeText.text.trim() == p.text) homeText.clear();
+        if (_sameImages(p.images, homeImages)) homeImages = [];
+        if (topic?.title == p.subject) topic = null;
       });
+      homeFocus.unfocus();
+      if (generation != currentGeneration || id != null) {
+        // The customer moved on meanwhile: the message is sent, don't jump.
+        if (id == null) _refresh();
+        return;
+      }
+      setState(() {
+        generation++;
+        pollCursor = null;
+        id = result['conversation']['id'] as String;
+        messages = List<Map<String, dynamic>>.from(result['messages']);
+        loading = false;
+        threadText.clear();
+        threadImages = [];
+      });
+      _timer();
       _bottom();
-      await _deliver(p, id!);
+    } catch (e) {
+      if (mounted) setState(() => sendError = '$e');
+    } finally {
+      if (mounted) setState(() => sending = false);
     }
+  }
+
+  Future<void> _sendThread([String? quick]) async {
+    final conversation = id;
+    final body = quick ?? threadText.text.trim();
+    final images = quick == null ? List.of(threadImages) : <Uint8List>[];
+    if (conversation == null || (body.isEmpty && images.isEmpty)) return;
+    final p = _Pending(body, images, conversation);
+    setState(() {
+      pending.add(p);
+      if (quick == null) {
+        threadText.clear();
+        threadImages = [];
+      }
+    });
+    _bottom();
+    await _deliver(p, conversation);
   }
 
   Future<void> _deliver(_Pending p, String conversation) async {
@@ -380,173 +526,39 @@ class _SupportViewState extends State<AppReferSupportView>
         p.ids,
         clientMessageId: p.clientMessageId,
       );
-      if (mounted)
+      if (mounted) {
         setState(() {
           pending.remove(p);
           if (id == conversation &&
-              !messages.any((old) => old['id'] == m['id']))
+              !messages.any((old) => old['id'] == m['id'])) {
             messages.add(m);
-          error = '';
+          }
+          sendError = '';
         });
+      }
       _bottom();
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           p.failed = true;
-          error = '$e';
+          sendError = '$e';
         });
+      }
     } finally {
       p.inFlight = false;
     }
   }
 
-  Widget _glass(Widget child) => ClipRRect(
-    borderRadius: BorderRadius.circular(32),
-    child: BackdropFilter(
-      filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-      child: Container(
-        decoration: BoxDecoration(
-          color: surface.withValues(alpha: .75),
-          borderRadius: BorderRadius.circular(32),
-          border: Border.all(
-            color: Theme.of(context).dividerColor.withValues(alpha: .12),
-          ),
-        ),
-        child: child,
-      ),
-    ),
-  );
-  Widget _sendButton() => IconButton.filled(
-    onPressed: sending || (text.text.trim().isEmpty && images.isEmpty)
-        ? null
-        : _send,
-    style: IconButton.styleFrom(
-      backgroundColor: accent,
-      foregroundColor: Colors.white,
-    ),
-    tooltip: 'Send',
-    icon: sending
-        ? const SizedBox(
-            width: 18,
-            height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          )
-        : const Icon(Icons.arrow_upward),
-  );
-  Widget _header() => Padding(
-    padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
-    child: Row(
-      children: [
-        _glass(
-          IconButton(
-            onPressed: _back,
-            tooltip: id == null && !composing ? 'Close' : 'Back',
-            icon: Icon(
-              id == null && !composing ? Icons.close : Icons.chevron_left,
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Center(
-            child: _glass(
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 18,
-                  vertical: 8,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      composing
-                          ? 'New message'
-                          : id != null
-                          ? subject
-                          : 'Help',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 17,
-                      ),
-                    ),
-                    if (composing || id != null)
-                      Text(
-                        title,
-                        style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        composing ? _sendButton() : const SizedBox(width: 40),
-      ],
-    ),
-  );
-  Widget _attachments() => SingleChildScrollView(
-    scrollDirection: Axis.horizontal,
-    child: Row(
-      children: [
-        for (var i = 0; i < images.length; i++)
-          Padding(
-            padding: const EdgeInsets.only(right: 10),
-            child: Stack(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Image.memory(
-                    images[i],
-                    width: 72,
-                    height: 96,
-                    fit: BoxFit.cover,
-                  ),
-                ),
-                Positioned(
-                  right: 0,
-                  top: 0,
-                  child: IconButton(
-                    tooltip: 'Remove screenshot',
-                    onPressed: sending
-                        ? null
-                        : () => setState(() => images.removeAt(i)),
-                    icon: const Icon(Icons.cancel, color: Colors.white),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        if (images.length < 4)
-          InkWell(
-            onTap: sending ? null : _pick,
-            borderRadius: BorderRadius.circular(12),
-            child: Container(
-              width: 104,
-              constraints: const BoxConstraints(minHeight: 96),
-              decoration: BoxDecoration(
-                color: accent.withValues(alpha: .1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              padding: const EdgeInsets.all(8),
-              child: Column(
-                children: [
-                  Icon(Icons.add_photo_alternate_outlined, color: accent),
-                  const SizedBox(height: 6),
-                  Text('Screenshot', style: TextStyle(color: accent)),
-                ],
-              ),
-            ),
-          ),
-      ],
-    ),
-  );
+  // MARK: Formatting
+
+  DateTime? _date(dynamic value) => DateTime.tryParse('$value')?.toLocal();
+  String _clock(DateTime date) =>
+      MaterialLocalizations.of(context).formatTimeOfDay(
+        TimeOfDay.fromDateTime(date),
+        alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+      );
   String _time(dynamic value) {
-    final date = DateTime.tryParse('$value')?.toLocal();
+    final date = _date(value);
     if (date == null) return '';
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -556,206 +568,659 @@ class _SupportViewState extends State<AppReferSupportView>
         : day == today.subtract(const Duration(days: 1))
         ? 'Yesterday'
         : MaterialLocalizations.of(context).formatShortDate(date);
-    return '$label, ${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(date))}';
+    return '$label, ${_clock(date)}';
   }
 
-  Widget _home() => Expanded(
-    child: Column(
-      children: [
-        Expanded(
-          child: RefreshIndicator(
-            onRefresh: _refresh,
-            child: ListView(
-              padding: const EdgeInsets.all(20),
-              children: [
-                Text(
-                  title,
-                  style: TextStyle(color: accent, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Hi ${api.name?.split(' ').firstOrNull ?? 'there'} 👋',
-                  style: const TextStyle(
-                    fontSize: 34,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  config.replyTimeText,
-                  style: TextStyle(
-                    fontSize: 17,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                if (loading) const Center(child: CircularProgressIndicator()),
-                if (conversations.isNotEmpty)
-                  Text(
-                    conversations.length == 1
-                        ? 'Your conversation'
-                        : 'Your conversations',
-                    style: Theme.of(context).textTheme.labelLarge,
-                  ),
-                const SizedBox(height: 8),
-                for (final c in conversations)
-                  Container(
-                    decoration: BoxDecoration(
-                      color: surface,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: accent.withValues(alpha: .15),
+  // MARK: Shared pieces
+
+  List<BoxShadow> _shadow(double opacity, double blur, double y) => [
+    BoxShadow(
+      color: SupportColors.shadow.withValues(alpha: opacity),
+      blurRadius: blur,
+      offset: Offset(0, y),
+    ),
+  ];
+
+  Widget _button(
+    String label,
+    VoidCallback? onTap,
+    Widget child, {
+    ShapeBorder shape = const CircleBorder(),
+  }) => Tooltip(
+    message: label,
+    excludeFromSemantics: true,
+    child: Semantics(
+      button: true,
+      label: label,
+      enabled: onTap != null,
+      child: Material(
+        type: MaterialType.transparency,
+        shape: shape,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(onTap: onTap, customBorder: shape, child: child),
+      ),
+    ),
+  );
+
+  /// Translucent bar: blurred backdrop under a card-coloured wash.
+  Widget _glass({
+    required double radius,
+    required Widget child,
+    List<BoxShadow>? shadow,
+  }) => DecoratedBox(
+    decoration: BoxDecoration(
+      borderRadius: BorderRadius.circular(radius),
+      boxShadow: shadow,
+    ),
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: colors.card.withValues(alpha: colors.dark ? 0.8 : 0.85),
+            borderRadius: BorderRadius.circular(radius),
+            border: Border.all(
+              color: colors.dark
+                  ? Colors.white.withValues(alpha: 0.07)
+                  : Colors.white.withValues(alpha: 0.6),
+            ),
+          ),
+          child: child,
+        ),
+      ),
+    ),
+  );
+
+  Widget _label(String text) => Text(
+    text.toUpperCase(),
+    style: TextStyle(
+      fontSize: 12,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0.6,
+      color: colors.muted,
+    ),
+  );
+
+  Widget _badgeOrTime(Map<String, dynamic> c) {
+    final unread = c['unread'] as int? ?? 0;
+    if (unread > 0) {
+      return Semantics(
+        label: '$unread unread',
+        excludeSemantics: true,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: ShapeDecoration(
+            color: palette.accent,
+            shape: const StadiumBorder(),
+          ),
+          child: Text(
+            '$unread',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: palette.onAccent,
+            ),
+          ),
+        ),
+      );
+    }
+    return Text(
+      _time(c['lastMessageAt']),
+      style: TextStyle(fontSize: 12, color: colors.muted),
+    );
+  }
+
+  Widget _errorLine(String text) => Center(
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: ShapeDecoration(
+          color: colors.card,
+          shape: const StadiumBorder(),
+        ),
+        child: Text(
+          text,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+            color: Color(0xffe5383b),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  // MARK: Composer
+
+  Widget _composer({required bool home, required List<Widget> above}) {
+    final controller = home ? homeText : threadText;
+    final images = home ? homeImages : threadImages;
+    final busy = home && sending;
+    final canSend =
+        !busy && (controller.text.trim().isNotEmpty || images.isNotEmpty);
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.paddingOf(context).bottom + 8,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final w in above) ...[w, const SizedBox(height: 8)],
+          if (images.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18),
+              child: _attachments(home, images, busy),
+            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            child: _glass(
+              radius: 29,
+              shadow: _shadow(0.18, 20, 10),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(6, 7, 7, 7),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    _button(
+                      'Add screenshot',
+                      busy || images.length >= 4 ? null : () => _pick(home),
+                      SizedBox(
+                        width: 44,
+                        height: 44,
                         child: Icon(
-                          c['status'] == 'closed'
-                              ? Icons.check
-                              : Icons.chat_bubble,
-                          color: accent,
+                          home ? Icons.photo_camera_rounded : Icons.add_rounded,
+                          size: home ? 24 : 26,
+                          color: colors.muted,
                         ),
                       ),
-                      title: Text(
-                        '${c['subject']}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: TextField(
+                        controller: controller,
+                        focusNode: home ? homeFocus : threadFocus,
+                        minLines: 1,
+                        maxLines: 5,
+                        keyboardType: TextInputType.multiline,
+                        textCapitalization: TextCapitalization.sentences,
+                        cursorColor: palette.accent,
+                        style: TextStyle(fontSize: 17, color: colors.primary),
+                        decoration: InputDecoration(
+                          isCollapsed: true,
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(
+                            vertical: 11,
+                          ),
+                          hintText: home
+                              ? topic?.prompt ?? 'Ask us anything…'
+                              : 'Message',
+                          hintMaxLines: 1,
+                          hintStyle: TextStyle(
+                            fontSize: 17,
+                            color: colors.muted.withValues(alpha: 0.8),
+                          ),
+                        ),
                       ),
-                      subtitle: Text(
-                        '${c['preview']}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(width: 6),
+                    _button(
+                      'Send',
+                      canSend ? (home ? _start : () => _sendThread()) : null,
+                      Container(
+                        width: 44,
+                        height: 44,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: canSend ? palette.bubble : null,
+                          color: canSend
+                              ? null
+                              : Colors.grey.withValues(alpha: 0.3),
+                        ),
+                        child: busy
+                            ? SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: palette.onAccent,
+                                ),
+                              )
+                            : Icon(
+                                Icons.arrow_upward_rounded,
+                                size: 24,
+                                color: canSend
+                                    ? palette.onAccent
+                                    : Colors.white,
+                              ),
                       ),
-                      trailing: (c['unread'] as int? ?? 0) > 0
-                          ? Badge(
-                              backgroundColor: accent,
-                              label: Text('${c['unread']}'),
-                            )
-                          : Text(
-                              _time(c['lastMessageAt']),
-                              style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _attachments(bool home, List<Uint8List> images, bool busy) =>
+      SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(0, 8, 8, 8),
+          child: Row(
+            children: [
+              for (var i = 0; i < images.length; i++)
+                Padding(
+                  padding: const EdgeInsets.only(right: 10),
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Container(
+                        width: 62,
+                        height: 88,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.white, width: 3),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.12),
+                              blurRadius: 6,
+                              offset: const Offset(0, 3),
                             ),
-                      onTap: () {
-                        setState(() {
-                          generation++;
-                          pollCursor = null;
-                          messages = [];
-                          id = c['id'] as String;
-                          subject = '${c['subject']}';
-                          loading = true;
-                        });
-                        _timer();
-                        _refresh();
-                      },
+                          ],
+                          image: DecorationImage(
+                            image: MemoryImage(images[i]),
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        top: -6,
+                        right: -6,
+                        child: _button(
+                          'Remove screenshot',
+                          busy
+                              ? null
+                              : () => setState(() {
+                                  (home ? homeImages : threadImages).removeAt(
+                                    i,
+                                  );
+                                }),
+                          Container(
+                            width: 22,
+                            height: 22,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.black.withValues(alpha: 0.6),
+                            ),
+                            child: const Icon(
+                              Icons.close_rounded,
+                              size: 14,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              if (images.length < 4)
+                _button(
+                  'Add another screenshot',
+                  busy ? null : () => _pick(home),
+                  Container(
+                    width: 62,
+                    height: 88,
+                    decoration: BoxDecoration(
+                      color: colors.card.withValues(alpha: 0.9),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(Icons.add_rounded, color: palette.accent),
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+
+  // MARK: Home
+
+  String get _greeting {
+    final first = supportFirstName(api.name);
+    return first == null ? 'Hi there 👋' : 'Hi $first 👋';
+  }
+
+  Widget _home() {
+    final selection = supportContinueSelection(conversations);
+    final current = selection.current;
+    final topics = config.topics;
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: SingleChildScrollView(
+            controller: homeScroll,
+            physics: const AlwaysScrollableScrollPhysics(),
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _hero(),
+                // Pulled up so the first card overlaps the hero's lower edge.
+                Transform.translate(
+                  offset: const Offset(0, -62),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 78),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final section in [
+                          if (current != null) _continueCard(current),
+                          if (topics.isNotEmpty)
+                            _quickHelp(topics, labelled: current != null),
+                          if (selection.others.isNotEmpty)
+                            _pastConversations(selection.others),
+                          if (loading && conversations.isEmpty)
+                            const Center(child: CircularProgressIndicator()),
+                          if (loadError.isNotEmpty && conversations.isEmpty)
+                            Text(
+                              loadError,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: colors.muted,
+                              ),
+                            ),
+                        ]) ...[section, const SizedBox(height: 24)],
+                      ],
                     ),
                   ),
+                ),
               ],
             ),
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-          child: FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: accent,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.all(20),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(22),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: _composer(
+            home: true,
+            above: [
+              if (sendError.isNotEmpty) _errorLine(sendError),
+              if (topic != null) _topicChip(topic!),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _hero() {
+    final on = palette.onAccent;
+    return CustomPaint(
+      painter: SupportHeroPainter(palette, homeScroll),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          22,
+          MediaQuery.paddingOf(context).top + 18,
+          22,
+          88,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _appIcon(),
+                const Spacer(),
+                _button(
+                  'Close',
+                  () => Navigator.maybePop(context),
+                  ClipOval(
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: palette.darkOnAccent
+                              ? Colors.black.withValues(alpha: 0.06)
+                              : Colors.white.withValues(alpha: 0.24),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.45),
+                          ),
+                        ),
+                        child: Icon(Icons.close_rounded, size: 22, color: on),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: on.withValues(alpha: 0.85),
               ),
             ),
-            onPressed: () => setState(() {
-              generation++;
-              composing = true;
-            }),
-            child: const Row(
+            const SizedBox(height: 2),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _greeting,
+                maxLines: 1,
+                style: TextStyle(
+                  fontSize: 38,
+                  height: 1.15,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -1,
+                  color: on,
+                ),
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'How can we help today?',
+              style: TextStyle(
+                fontSize: 19,
+                fontWeight: FontWeight.w500,
+                color: on.withValues(alpha: 0.92),
+              ),
+            ),
+            const SizedBox(height: 18),
+            _presence(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _appIcon() {
+    final image = config.appIcon ?? launcherImage;
+    final initials = appName.trim().isEmpty
+        ? '•'
+        : appName.trim().characters.take(2).toString().toUpperCase();
+    return ExcludeSemantics(
+      child: Container(
+        width: 46,
+        height: 46,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(13),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.25),
+              blurRadius: 16,
+              offset: const Offset(0, 6),
+            ),
+          ],
+          gradient: image == null
+              ? const LinearGradient(
+                  colors: [Color(0xff29205c), Color(0xff0f0a1f)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                )
+              : null,
+          image: image == null
+              ? null
+              : DecorationImage(image: image, fit: BoxFit.cover),
+        ),
+        child: image == null
+            ? Text(
+                initials,
+                textScaler: TextScaler.noScaling,
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: palette.light,
+                ),
+              )
+            : null,
+      ),
+    );
+  }
+
+  List<Color> _avatarColors(int i) => switch (i % 3) {
+    0 => [palette.warm, palette.hot],
+    1 => const [Color(0xff5cadff), Color(0xff2e73f2)],
+    _ => const [Color(0xff4d4d4d), Color(0xff141414)],
+  };
+
+  Widget _presence() {
+    final all = config.teamNames.where((n) => n.trim().isNotEmpty).toList();
+    final names = all.take(3).toList();
+    final reply = config.replyTime;
+    final line = names.isEmpty
+        ? 'We usually reply in $reply'
+        : all.length == 1
+        ? '${names.first} · usually replies in $reply'
+        : '${names.first} and the team · usually $reply';
+    final on = palette.onAccent;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(8, 7, 14, 7),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(
+          alpha: palette.darkOnAccent ? 0.06 : 0.16,
+        ),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: on.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 28 + 20.0 * (names.isEmpty ? 0 : names.length - 1),
+            height: 28,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: names.isEmpty
+                  ? [
+                      SupportAvatar(
+                        size: 28,
+                        colors: [palette.warm, palette.hot],
+                        icon: Icons.chat_bubble_rounded,
+                        ring: true,
+                      ),
+                    ]
+                  : [
+                      for (var i = names.length - 1; i >= 0; i--)
+                        Positioned(
+                          left: 20.0 * i,
+                          child: SupportAvatar(
+                            name: names[i],
+                            size: 28,
+                            colors: _avatarColors(i),
+                            ring: true,
+                          ),
+                        ),
+                    ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Flexible(
+            child: Text(
+              line,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+                color: on,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _continueCard(Map<String, dynamic> c) {
+    final firstTeam = config.teamNames.where((n) => n.trim().isNotEmpty);
+    return _Pressable(
+      onTap: () => _openConversation(c['id'] as String),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: colors.card,
+          borderRadius: BorderRadius.circular(26),
+          boxShadow: _shadow(0.22, 22, 14),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _label('Continue'),
+            const SizedBox(height: 12),
+            Row(
               children: [
-                Icon(Icons.forum),
-                SizedBox(width: 12),
+                SupportAvatar(
+                  name: firstTeam.firstOrNull,
+                  size: 46,
+                  colors: [palette.warm, palette.hot],
+                  icon: firstTeam.isEmpty ? Icons.forum_rounded : null,
+                ),
+                const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Send us a message',
+                        '${c['subject'] ?? ''}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 17,
+                          fontSize: 16,
                           fontWeight: FontWeight.w600,
+                          color: colors.primary,
                         ),
                       ),
+                      const SizedBox(height: 2),
                       Text(
-                        'Screenshots welcome',
-                        style: TextStyle(fontSize: 13),
+                        c['lastFrom'] == 'customer'
+                            ? 'You: ${c['preview'] ?? ''}'
+                            : '${c['preview'] ?? ''}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 14, color: colors.muted),
                       ),
                     ],
                   ),
                 ),
-                Icon(Icons.chevron_right),
+                const SizedBox(width: 6),
+                _badgeOrTime(c),
               ],
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-  Widget _bubble(Map<String, dynamic> m, bool author) {
-    final customer = m['from'] == 'customer';
-    final name = '${m['authorName'] ?? 'Team'}';
-    return Align(
-      alignment: customer ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * .82,
-        ),
-        margin: const EdgeInsets.only(bottom: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!customer && author)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
-                child: Text(
-                  m['from'] == 'bot'
-                      ? '$title · instant answer'
-                      : name.contains('@')
-                      ? 'Team'
-                      : name.split(' ').first,
-                  style: Theme.of(context).textTheme.labelMedium,
-                ),
-              ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: customer ? accent : surface,
-                borderRadius: BorderRadius.circular(22),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if ('${m['text']}'.isNotEmpty)
-                    Text(
-                      '${m['text']}',
-                      style: TextStyle(
-                        fontSize: 17,
-                        color: customer ? Colors.white : null,
-                      ),
-                    ),
-                  for (final a in (m['attachments'] as List? ?? []))
-                    if ('${a['contentType']}'.startsWith('image/') &&
-                        a['url'] != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.network(
-                            '${a['url']}',
-                            width: 200,
-                            fit: BoxFit.contain,
-                            errorBuilder: (_, e, s) =>
-                                const Text('Image unavailable'),
-                          ),
-                        ),
-                      ),
-                ],
-              ),
             ),
           ],
         ),
@@ -763,188 +1228,853 @@ class _SupportViewState extends State<AppReferSupportView>
     );
   }
 
-  Widget _thread() => Expanded(
-    child: Column(
+  Widget _quickHelp(
+    List<AppReferSupportTopic> topics, {
+    required bool labelled,
+  }) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (labelled) ...[
+        Padding(
+          padding: const EdgeInsets.only(left: 6),
+          child: _label('Quick help'),
+        ),
+        const SizedBox(height: 10),
+      ],
+      for (var i = 0; i < topics.length; i += 2) ...[
+        if (i > 0) const SizedBox(height: 10),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(child: _tile(topics[i])),
+            const SizedBox(width: 10),
+            Expanded(
+              child: i + 1 < topics.length
+                  ? _tile(topics[i + 1])
+                  : const SizedBox(),
+            ),
+          ],
+        ),
+      ],
+    ],
+  );
+
+  Widget _tile(AppReferSupportTopic t) => _Pressable(
+    onTap: () => _pickTopic(t),
+    child: Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.card,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: _shadow(0.07, 10, 2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: t.tint.withValues(alpha: 0.13),
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(t.icon, size: 19, color: t.tint),
+          ),
+          const SizedBox(height: 10),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              t.title,
+              maxLines: 1,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: colors.primary,
+              ),
+            ),
+          ),
+          Text(
+            t.subtitle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 12.5, color: colors.muted),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _pastConversations(List<Map<String, dynamic>> others) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(left: 6),
+        child: _label('Your conversations'),
+      ),
+      const SizedBox(height: 10),
+      DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: _shadow(0.07, 10, 2),
+        ),
+        child: Material(
+          color: colors.card,
+          borderRadius: BorderRadius.circular(20),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              for (final c in others) ...[
+                _row(c),
+                if (!identical(c, others.last))
+                  Divider(
+                    height: 1,
+                    thickness: 0.5,
+                    indent: 64,
+                    color: colors.muted.withValues(alpha: 0.3),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+
+  Widget _row(Map<String, dynamic> c) {
+    final unread = (c['unread'] as int? ?? 0) > 0;
+    return InkWell(
+      onTap: () => _openConversation(c['id'] as String),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: palette.accent.withValues(alpha: 0.13),
+              ),
+              child: Icon(
+                c['status'] == 'closed'
+                    ? Icons.check_rounded
+                    : Icons.chat_bubble_rounded,
+                size: 17,
+                color: palette.accent,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${c['subject'] ?? ''}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: unread ? FontWeight.w600 : FontWeight.w400,
+                      color: colors.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${c['preview'] ?? ''}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 13.5, color: colors.muted),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            _badgeOrTime(c),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _topicChip(AppReferSupportTopic t) => Align(
+    alignment: Alignment.centerLeft,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+        decoration: ShapeDecoration(
+          color: colors.card,
+          shape: StadiumBorder(
+            side: BorderSide(color: t.tint.withValues(alpha: 0.25)),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(t.icon, size: 15, color: t.tint),
+            const SizedBox(width: 6),
+            Text(
+              t.title,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: t.tint,
+              ),
+            ),
+            const SizedBox(width: 2),
+            _button(
+              'Remove topic',
+              () => setState(() => topic = null),
+              Padding(
+                padding: const EdgeInsets.all(6),
+                child: Icon(Icons.close_rounded, size: 14, color: t.tint),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  // MARK: Conversation
+
+  /// The person answering: the newest team reply's author (never an email).
+  String? get _agent {
+    for (final m in messages.reversed) {
+      if (m['from'] != 'team') continue;
+      final name = supportFirstName(m['authorName'] as String?);
+      if (name != null) return name;
+    }
+    return null;
+  }
+
+  bool _fromCustomer(int i) => messages[i]['from'] == 'customer';
+  bool _sameSide(int a, int b) =>
+      a >= 0 &&
+      b < messages.length &&
+      _fromCustomer(a) == _fromCustomer(b) &&
+      messages[a]['from'] == messages[b]['from'];
+  bool _showsTime(int i) {
+    if (i < 0 || i >= messages.length) return false;
+    if (i == 0) return true;
+    final a = _date(messages[i - 1]['createdAt']);
+    final b = _date(messages[i]['createdAt']);
+    return a != null && b != null && b.difference(a).inSeconds > 3600;
+  }
+
+  Widget _thread() {
+    final top = MediaQuery.paddingOf(context).top;
+    final mine = pending.where((p) => p.conversation == id).toList();
+    final last = messages.lastOrNull;
+    final quickReplies =
+        !loading &&
+        mine.isEmpty &&
+        threadText.text.isEmpty &&
+        threadImages.isEmpty &&
+        last != null &&
+        last['from'] != 'customer';
+    final lastDate = _date(last?['createdAt']);
+    final error = sendError.isNotEmpty ? sendError : loadError;
+    return Stack(
       children: [
-        Expanded(
+        Positioned.fill(
           child: ListView(
             controller: scroll,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            padding: EdgeInsets.fromLTRB(14, top + 86, 14, composerHeight + 12),
             children: [
-              if (loading) const Center(child: CircularProgressIndicator()),
+              if (loading && messages.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.only(top: 30),
+                  child: Center(child: CircularProgressIndicator()),
+                ),
               for (var i = 0; i < messages.length; i++) ...[
-                if (i == 0 ||
-                    (DateTime.tryParse('${messages[i]['createdAt']}')
-                                ?.difference(
-                                  DateTime.tryParse(
-                                        '${messages[i - 1]['createdAt']}',
-                                      ) ??
-                                      DateTime.now(),
-                                )
-                                .inMinutes ??
-                            0) >
-                        60)
+                if (_showsTime(i))
                   Padding(
-                    padding: const EdgeInsets.all(12),
+                    padding: EdgeInsets.only(top: i == 0 ? 4 : 16, bottom: 8),
                     child: Center(
                       child: Text(
                         _time(messages[i]['createdAt']),
-                        style: Theme.of(context).textTheme.bodySmall,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: colors.muted,
+                        ),
                       ),
                     ),
                   ),
-                _bubble(
-                  messages[i],
-                  i == 0 ||
-                      messages[i - 1]['from'] != messages[i]['from'] ||
-                      messages[i - 1]['authorName'] !=
-                          messages[i]['authorName'],
+                Padding(
+                  padding: EdgeInsets.only(
+                    top: i > 0 && !_showsTime(i)
+                        ? (_sameSide(i - 1, i) ? 3 : 10)
+                        : 0,
+                  ),
+                  child: _message(i),
                 ),
               ],
-              for (final p in pending.where((p) => p.conversation == id))
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: InkWell(
-                    onTap: p.failed ? () => _deliver(p, id!) : null,
-                    child: Opacity(
-                      opacity: .5,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: accent,
-                              borderRadius: BorderRadius.circular(22),
-                            ),
-                            child: Column(
-                              children: [
-                                Text(
-                                  p.text,
-                                  style: const TextStyle(color: Colors.white),
-                                ),
-                                for (final image in p.images)
-                                  Image.memory(
-                                    image,
-                                    width: 120,
-                                    height: 120,
-                                    fit: BoxFit.cover,
-                                  ),
-                              ],
-                            ),
-                          ),
-                          Text(
-                            p.failed ? 'Not sent · Tap to retry' : 'Sending…',
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+              for (final p in mine)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: _pendingBubble(p),
                 ),
-              if ((messages.isNotEmpty &&
-                      messages.last['from'] == 'customer') ||
-                  pending.any((p) => p.conversation == id))
-                const Padding(
-                  padding: EdgeInsets.all(12),
+              if (!loading && mine.isEmpty && last?['from'] == 'customer')
+                Padding(
+                  padding: const EdgeInsets.only(top: 5, right: 4),
                   child: Text(
-                    "We'll notify you when the team replies.",
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.grey),
+                    "${lastDate == null ? 'Sent' : 'Sent ${_clock(lastDate)}'} · we'll notify you when the team replies",
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: colors.muted,
+                    ),
                   ),
                 ),
             ],
           ),
         ),
-        if (images.isNotEmpty)
-          Padding(padding: const EdgeInsets.all(12), child: _attachments()),
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              _glass(
-                IconButton(
-                  onPressed: images.length < 4 ? _pick : null,
-                  tooltip: 'Add screenshot',
-                  icon: const Icon(Icons.add),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _glass(
-                  TextField(
-                    controller: text,
-                    minLines: 1,
-                    maxLines: 5,
-                    decoration: const InputDecoration(
-                      hintText: 'Message',
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              _sendButton(),
-            ],
+        Positioned(top: top + 10, left: 12, right: 12, child: _threadHeader()),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: _MeasureSize(
+            onChange: (size) {
+              if (mounted && size.height != composerHeight) {
+                setState(() => composerHeight = size.height);
+              }
+            },
+            child: _composer(
+              home: false,
+              above: [
+                if (error.isNotEmpty) _errorLine(error),
+                if (quickReplies) _quickReplies(),
+              ],
+            ),
           ),
         ),
       ],
-    ),
-  );
-  @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: id == null && !composing,
-    onPopInvokedWithResult: (popped, result) {
-      if (!popped) _back();
-    },
-    child: Scaffold(
-      backgroundColor: dark ? const Color(0xff121214) : Colors.white,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _header(),
-            if (error.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Text(
-                  error,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+    );
+  }
+
+  Widget _threadHeader() {
+    final agent = _agent;
+    return _glass(
+      radius: 32,
+      shadow: _shadow(0.14, 16, 8),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 64),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(
+            children: [
+              _button(
+                'Back',
+                _back,
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: colors.primary.withValues(alpha: 0.05),
+                  ),
+                  child: Icon(
+                    Icons.chevron_left_rounded,
+                    size: 30,
+                    color: palette.accent,
+                  ),
                 ),
               ),
-            if (composing)
+              const SizedBox(width: 10),
+              SupportAvatar(
+                name: agent,
+                size: 42,
+                colors: [palette.warm, palette.hot],
+                icon: agent == null ? Icons.forum_rounded : null,
+              ),
+              const SizedBox(width: 10),
               Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    TextField(
-                      controller: text,
-                      autofocus: true,
-                      minLines: 6,
-                      maxLines: null,
-                      enabled: !sending,
-                      decoration: const InputDecoration(
-                        hintText: 'How can we help? Tell us what happened.',
-                        border: InputBorder.none,
+                    Text(
+                      agent ?? '$appName team',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: colors.primary,
                       ),
                     ),
-                    const SizedBox(height: 16),
-                    _attachments(),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 1),
                     Text(
-                      'Sent with: app ${metadata['appVersion'] ?? '?'} · ${metadata['device'] ?? '?'} · ${metadata['os'] ?? '?'}',
-                      style: Theme.of(context).textTheme.bodySmall,
+                      'Usually replies in ${config.replyTime}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 12.5, color: colors.muted),
                     ),
                   ],
                 ),
-              )
-            else if (id != null)
-              _thread()
-            else
-              _home(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _message(int i) {
+    final m = messages[i];
+    final lastOfGroup =
+        i == messages.length - 1 || !_sameSide(i, i + 1) || _showsTime(i + 1);
+    if (m['from'] == 'customer') return _customerBubble(m, lastOfGroup);
+    if (m['from'] == 'bot') return _botCard(m);
+    return _teamBubble(m, lastOfGroup);
+  }
+
+  List<String> _imageUrls(Map<String, dynamic> m) => [
+    for (final a in (m['attachments'] as List? ?? []))
+      if (a is Map &&
+          '${a['contentType']}'.startsWith('image/') &&
+          a['url'] != null)
+        '${a['url']}',
+  ];
+
+  Widget _thumb({String? url, Uint8List? bytes}) {
+    final decoration = BoxDecoration(
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: Colors.white, width: 3),
+      color: colors.muted.withValues(alpha: 0.2),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.12),
+          blurRadius: 6,
+          offset: const Offset(0, 4),
+        ),
+      ],
+    );
+    final image = ClipRRect(
+      borderRadius: BorderRadius.circular(11),
+      child: bytes != null
+          ? Image.memory(bytes, fit: BoxFit.cover)
+          : Image.network(
+              url!,
+              fit: BoxFit.cover,
+              errorBuilder: (_, e, s) => Icon(
+                Icons.broken_image_outlined,
+                color: colors.muted,
+                semanticLabel: 'Image unavailable',
+              ),
+            ),
+    );
+    final box = Container(
+      width: 74,
+      height: 112,
+      decoration: decoration,
+      child: image,
+    );
+    if (url == null) return box;
+    return _button(
+      'Screenshot',
+      () => _view(url),
+      box,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    );
+  }
+
+  Widget _thumbs(List<Widget> thumbs, {bool end = false}) => Padding(
+    padding: const EdgeInsets.only(bottom: 6),
+    child: Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      alignment: end ? WrapAlignment.end : WrapAlignment.start,
+      children: thumbs,
+    ),
+  );
+
+  Widget _customerBubble(Map<String, dynamic> m, bool tail) {
+    final urls = _imageUrls(m);
+    final text = '${m['text'] ?? ''}';
+    return Padding(
+      padding: const EdgeInsets.only(left: 60),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (urls.isNotEmpty)
+            _thumbs([for (final u in urls) _thumb(url: u)], end: true),
+          if (text.isNotEmpty) _gradientBubble(text, tail),
+        ],
+      ),
+    );
+  }
+
+  Widget _gradientBubble(String text, bool tail) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
+    decoration: BoxDecoration(
+      gradient: palette.bubble,
+      borderRadius: BorderRadius.only(
+        topLeft: const Radius.circular(22),
+        topRight: const Radius.circular(22),
+        bottomLeft: const Radius.circular(22),
+        bottomRight: Radius.circular(tail ? 6 : 22),
+      ),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: 16, height: 1.3, color: palette.onAccent),
+    ),
+  );
+
+  Widget _teamBubble(Map<String, dynamic> m, bool avatar) {
+    final urls = _imageUrls(m);
+    final text = '${m['text'] ?? ''}';
+    return Padding(
+      padding: const EdgeInsets.only(right: 40),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          SizedBox(
+            width: 30,
+            height: 30,
+            child: avatar
+                ? SupportAvatar(
+                    name: supportFirstName(m['authorName'] as String?),
+                    size: 30,
+                    colors: [palette.warm, palette.hot],
+                    icon: supportFirstName(m['authorName'] as String?) == null
+                        ? Icons.forum_rounded
+                        : null,
+                  )
+                : null,
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (urls.isNotEmpty)
+                  _thumbs([for (final u in urls) _thumb(url: u)]),
+                if (text.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 15,
+                      vertical: 11,
+                    ),
+                    decoration: BoxDecoration(
+                      color: colors.card,
+                      borderRadius: BorderRadius.only(
+                        topLeft: const Radius.circular(22),
+                        topRight: const Radius.circular(22),
+                        bottomRight: const Radius.circular(22),
+                        bottomLeft: Radius.circular(avatar ? 6 : 22),
+                      ),
+                      boxShadow: _shadow(0.06, 8, 2),
+                    ),
+                    child: Text(
+                      text,
+                      style: TextStyle(
+                        fontSize: 16,
+                        height: 1.3,
+                        color: colors.primary,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _botCard(Map<String, dynamic> m) => Padding(
+    padding: const EdgeInsets.only(right: 50),
+    child: Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: colors.card,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: _shadow(0.06, 10, 2),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '✦ INSTANT ANSWER',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.4,
+                color: palette.accent,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${m['text'] ?? ''}',
+              style: TextStyle(
+                fontSize: 15.5,
+                height: 1.3,
+                color: colors.primary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  Widget _pendingBubble(_Pending p) => Padding(
+    padding: const EdgeInsets.only(left: 60),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Opacity(
+          opacity: 0.6,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (p.images.isNotEmpty)
+                _thumbs([
+                  for (final b in p.images) _thumb(bytes: b),
+                ], end: true),
+              if (p.text.isNotEmpty) _gradientBubble(p.text, true),
+            ],
+          ),
+        ),
+        const SizedBox(height: 5),
+        if (p.failed)
+          GestureDetector(
+            onTap: id == null ? null : () => _deliver(p, id!),
+            child: const Text(
+              'Not sent · Tap to retry',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xffe5383b),
+              ),
+            ),
+          )
+        else
+          Text(
+            'Sending…',
+            style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w500,
+              color: colors.muted,
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _quickReplies() {
+    Widget chip(String label, VoidCallback onTap) => _button(
+      label,
+      onTap,
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+        decoration: ShapeDecoration(
+          color: colors.card,
+          shape: StadiumBorder(
+            side: BorderSide(color: palette.accent.withValues(alpha: 0.18)),
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: palette.accent,
+          ),
+        ),
+      ),
+      shape: const StadiumBorder(),
+    );
+    const thanks = "👍 Thanks, that's sorted";
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      child: Row(
+        children: [
+          chip(thanks, () => _sendThread(thanks)),
+          const SizedBox(width: 8),
+          chip('I have another question', threadFocus.requestFocus),
+        ],
+      ),
+    );
+  }
+
+  void _view(String url) => Navigator.of(context).push(
+    PageRouteBuilder<void>(
+      opaque: true,
+      pageBuilder: (_, _, _) => _SupportImageViewer(url: url),
+      transitionsBuilder: (_, animation, _, child) =>
+          FadeTransition(opacity: animation, child: child),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final host = Theme.of(context);
+    final accent = config.accentColor ?? host.colorScheme.primary;
+    final dark =
+        host.brightness == Brightness.dark ||
+        MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+    final brightness = dark ? Brightness.dark : Brightness.light;
+    palette = SupportPalette(accent);
+    colors = SupportColors(dark);
+    final overlay = id == null
+        ? (palette.darkOnAccent
+              ? SystemUiOverlayStyle.dark
+              : SystemUiOverlayStyle.light)
+        : (dark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark);
+    final themeKey = (
+      accent,
+      brightness,
+      host.textTheme.bodyMedium?.fontFamily,
+    );
+    if (themeKey != _themeKey) {
+      _themeKey = themeKey;
+      _theme = ThemeData(
+        brightness: brightness,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: accent,
+          brightness: brightness,
+          primary: accent,
+        ),
+        fontFamily: themeKey.$3,
+        scaffoldBackgroundColor: colors.background,
+        textSelectionTheme: TextSelectionThemeData(
+          cursorColor: accent,
+          selectionColor: accent.withValues(alpha: 0.3),
+          selectionHandleColor: accent,
+        ),
+      );
+    }
+    return Theme(
+      data: _theme!,
+      child: AnnotatedRegion<SystemUiOverlayStyle>(
+        value: overlay,
+        child: PopScope(
+          canPop: id == null,
+          onPopInvokedWithResult: (popped, result) {
+            if (!popped) _back();
+          },
+          child: Scaffold(
+            backgroundColor: colors.background,
+            body: id == null ? _home() : _thread(),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shrinks slightly while pressed, like the iOS cards.
+class _Pressable extends StatefulWidget {
+  const _Pressable({required this.onTap, required this.child});
+  final VoidCallback onTap;
+  final Widget child;
+  @override
+  State<_Pressable> createState() => _PressableState();
+}
+
+class _PressableState extends State<_Pressable> {
+  bool down = false;
+  void _set(bool value) {
+    if (down != value) setState(() => down = value);
+  }
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _set(true),
+      onTapUp: (_) => _set(false),
+      onTapCancel: () => _set(false),
+      onTap: widget.onTap,
+      child: AnimatedScale(
+        scale: down ? 0.97 : 1,
+        duration: const Duration(milliseconds: 120),
+        child: widget.child,
+      ),
+    ),
+  );
+}
+
+/// Reports its child's size after layout (the floating composer's height).
+class _MeasureSize extends SingleChildRenderObjectWidget {
+  const _MeasureSize({required this.onChange, required super.child});
+  final ValueChanged<Size> onChange;
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderMeasureSize(onChange);
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderMeasureSize renderObject,
+  ) => renderObject.onChange = onChange;
+}
+
+class _RenderMeasureSize extends RenderProxyBox {
+  _RenderMeasureSize(this.onChange);
+  ValueChanged<Size> onChange;
+  Size? _last;
+  @override
+  void performLayout() {
+    super.performLayout();
+    if (size == _last) return;
+    _last = size;
+    final reported = size;
+    WidgetsBinding.instance.addPostFrameCallback((_) => onChange(reported));
+  }
+}
+
+class _SupportImageViewer extends StatelessWidget {
+  const _SupportImageViewer({required this.url});
+  final String url;
+  @override
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+    value: SystemUiOverlayStyle.light,
+    child: Material(
+      color: Colors.black,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => Navigator.maybePop(context),
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: Image.network(
+                url,
+                fit: BoxFit.contain,
+                loadingBuilder: (_, child, progress) => progress == null
+                    ? child
+                    : const Center(
+                        child: CircularProgressIndicator(color: Colors.white),
+                      ),
+                errorBuilder: (_, e, s) => const Center(
+                  child: Icon(Icons.broken_image_outlined, color: Colors.white),
+                ),
+              ),
+            ),
+            Positioned(
+              top: MediaQuery.paddingOf(context).top + 16,
+              right: 16,
+              child: IconButton(
+                tooltip: 'Close',
+                onPressed: () => Navigator.maybePop(context),
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.white.withValues(alpha: 0.18),
+                ),
+                icon: const Icon(Icons.close_rounded, color: Colors.white),
+              ),
+            ),
           ],
         ),
       ),

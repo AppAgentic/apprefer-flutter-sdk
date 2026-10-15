@@ -139,37 +139,53 @@ void main() {
     expect(find.text('own'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
-  testWidgets('first send completion cannot replace a newer compose draft', (
-    tester,
-  ) async {
-    final completion = Completer<http.Response>();
-    final client = fake((r) async {
-      if (r.method == 'POST') return completion.future;
-      return response({'conversations': []});
-    });
-    await tester.pumpWidget(
-      MaterialApp(
-        home: AppReferSupportView(api: client, composing: 'first'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Send'));
-    // Past the device-details wait, so the first send is really in flight.
-    await tester.pump(const Duration(seconds: 3));
-    await tester.tap(find.byTooltip('Back'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Send us a message'));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField), 'new draft');
-    await tester.pump();
-    completion.complete(
-      response({'conversation': conversation, 'messages': []}),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('New message'), findsOneWidget);
-    expect(find.text('new draft'), findsOneWidget);
-    await tester.pumpWidget(const SizedBox());
-  });
+  testWidgets(
+    'a first send finishing after the customer moved on does not jump',
+    (tester) async {
+      final completion = Completer<http.Response>();
+      final paths = <String>[];
+      final other = {
+        ...conversation,
+        'id': 'other',
+        'subject': 'Older question',
+      };
+      final client = fake((r) async {
+        paths.add(r.url.path);
+        if (r.method == 'POST') return completion.future;
+        if (r.url.path.endsWith('/conversations')) {
+          return response({
+            'conversations': [other],
+          });
+        }
+        return response({'conversation': other, 'messages': []});
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppReferSupportView(api: client, composing: 'first'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('first'), findsOneWidget);
+      await tester.tap(find.byTooltip('Send'));
+      // Past the device-details wait, so the first send is really in flight.
+      await tester.pump(const Duration(seconds: 3));
+      await tester.tap(find.text('Older question'));
+      await tester.pumpAndSettle();
+      completion.complete(
+        response({
+          'conversation': {...conversation, 'id': 'new'},
+          'messages': [],
+        }),
+      );
+      await tester.pumpAndSettle();
+      expect(paths.where((p) => p.endsWith('/conversations/new')), isEmpty);
+      expect(find.byTooltip('Back'), findsOneWidget);
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
+      expect(find.text('first'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
   testWidgets('text-only retry reuses id and next send gets a new id', (
     tester,
   ) async {
@@ -275,9 +291,7 @@ void main() {
         await tester.pumpAndSettle();
         if (!first) await tester.enterText(find.byType(TextField), 'hello');
         await tester.pump();
-        await tester.tap(
-          first ? find.text('Screenshot') : find.byTooltip('Add screenshot'),
-        );
+        await tester.tap(find.byTooltip('Add screenshot'));
         await tester.pumpAndSettle();
         await tester.tap(find.byTooltip('Send'));
         await tester.pumpAndSettle();
@@ -298,10 +312,14 @@ void main() {
     );
   }
   setUp(() {
-    AppReferSupport.instance.title = 'Sparkly support';
-    AppReferSupport.instance.accentColor = const Color(0xff7955ff);
+    final support = AppReferSupport.instance;
+    support.title = 'Sparkly support';
+    support.accentColor = const Color(0xff7955ff);
+    support.teamNames = const ['Jay', 'Ana'];
+    support.replyTime = 'under an hour';
+    support.topics = AppReferSupportTopic.defaults;
   });
-  testWidgets('home greeting, conversation and compose navigation', (
+  testWidgets('home: greeting, presence, continue card and topics', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(400, 840);
@@ -318,15 +336,115 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Hi María 👋'), findsOneWidget);
-    expect(find.text('Your conversation'), findsOneWidget);
+    expect(find.text('Sparkly support'), findsOneWidget);
+    expect(
+      find.text('Jay and the team · usually under an hour'),
+      findsOneWidget,
+    );
+    expect(find.text('CONTINUE'), findsOneWidget);
+    expect(find.text('You: That fixed it, thank you!'), findsOneWidget);
+    expect(find.text('QUICK HELP'), findsOneWidget);
+    expect(find.text('YOUR CONVERSATIONS'), findsNothing);
+    expect(find.text('Ask us anything…'), findsOneWidget);
+    expect(tester.takeException(), isNull);
     await capture(tester, 'home');
-    await tester.tap(find.text('Send us a message'));
+    await tester.tap(find.text('Report a bug'));
     await tester.pumpAndSettle();
-    expect(find.text('New message'), findsOneWidget);
-    expect(find.text('Screenshot'), findsOneWidget);
-    await capture(tester, 'compose');
+    expect(find.text('Report a bug'), findsNWidgets(2));
+    expect(find.text('What went wrong? A screenshot helps.'), findsOneWidget);
+    await capture(tester, 'home-topic');
+    await tester.tap(find.byTooltip('Remove topic'));
+    await tester.pumpAndSettle();
+    expect(find.text('Ask us anything…'), findsOneWidget);
+    await tester.tap(find.text("My weekly quest isn't counting…"));
+    await tester.pumpAndSettle();
+    expect(find.text('Jay'), findsOneWidget);
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    expect(find.text('CONTINUE'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
+  testWidgets('presence line follows the team names', (tester) async {
+    final support = AppReferSupport.instance;
+    for (final (names, line) in [
+      (<String>[], 'We usually reply in a few hours'),
+      (['Jay'], 'Jay · usually replies in a few hours'),
+    ]) {
+      support.teamNames = names;
+      support.replyTime = 'a few hours';
+      await tester.pumpWidget(
+        MaterialApp(home: AppReferSupportView(api: api())),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(line), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+  testWidgets('compose opens the home pre-filled and focused', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppReferSupportView(api: api(), composing: 'Refund please'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Hi María 👋'), findsOneWidget);
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, 'Refund please');
+    expect(field.focusNode!.hasFocus, isTrue);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets(
+    'a topic sends its title as the subject; an action runs instead',
+    (tester) async {
+      final bodies = <Map<String, dynamic>>[];
+      var restored = 0;
+      AppReferSupport.instance.topics = [
+        AppReferSupportTopic.bug,
+        AppReferSupportTopic(
+          title: 'Restore purchase',
+          subtitle: 'Get your plan back',
+          icon: Icons.refresh,
+          tint: Colors.blue,
+          prompt: '',
+          action: () => restored++,
+        ),
+      ];
+      final client = fake((r) async {
+        if (r.method == 'POST') {
+          bodies.add(Map<String, dynamic>.from(jsonDecode(r.body)));
+          return response({
+            'conversation': {...conversation, 'id': 'new'},
+            'messages': [
+              message('n1', '2026-10-15T10:00:00Z', 'The quest is stuck'),
+            ],
+          });
+        }
+        if (r.url.path.endsWith('/conversations')) {
+          return response({'conversations': []});
+        }
+        return response({'conversation': conversation, 'messages': []});
+      });
+      await tester.pumpWidget(
+        MaterialApp(home: AppReferSupportView(api: client)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore purchase'));
+      await tester.pumpAndSettle();
+      expect(restored, 1);
+      expect(find.byTooltip('Remove topic'), findsNothing);
+      await tester.tap(find.text('Report a bug'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'The quest is stuck');
+      await tester.pump();
+      await tester.tap(find.byTooltip('Send'));
+      await tester.pumpAndSettle();
+      expect(bodies.single['subject'], 'Report a bug');
+      expect(bodies.single['text'], 'The quest is stuck');
+      expect(find.byTooltip('Back'), findsOneWidget);
+      expect(find.text('The quest is stuck'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
   testWidgets('thread reply layout', (tester) async {
     tester.view.physicalSize = const Size(400, 840);
     tester.view.devicePixelRatio = 1;

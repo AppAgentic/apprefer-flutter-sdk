@@ -35,6 +35,13 @@ final class SupportBridge: NSObject, FlutterPlugin, PHPickerViewControllerDelega
                 result(status == errSecSuccess ? nil : FlutterError(code: "secure_storage", message: "Unable to save support session", details: status))
             } else { SecItemDelete(query as CFDictionary); result(nil) }
         case "notificationChannel": result(nil)
+        case "appIcon":
+            // The launcher icon for the help home; nil falls back to initials.
+            guard let icons = Bundle.main.infoDictionary?["CFBundleIcons"] as? [String: Any],
+                  let primary = icons["CFBundlePrimaryIcon"] as? [String: Any],
+                  let name = (primary["CFBundleIconFiles"] as? [String])?.last,
+                  let png = UIImage(named: name)?.pngData() else { result(nil); return }
+            result(FlutterStandardTypedData(bytes: png))
         case "pick":
             guard reply == nil else { result(FlutterError(code: "picker_busy", message: "Photo picker already open", details: nil)); return }
             var config = PHPickerConfiguration(); config.filter = .images; config.selectionLimit = max(1, min(4, call.arguments as? Int ?? 4))

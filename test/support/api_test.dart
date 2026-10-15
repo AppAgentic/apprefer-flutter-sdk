@@ -156,9 +156,11 @@ void main() {
         ['a'],
         {'platform': 'android'},
         clientMessageId: 'start-123',
+        subject: 'Report a bug',
       );
       expect(jsonDecode(requests.last.body), {
         'text': 'hello',
+        'subject': 'Report a bug',
         'attachmentIds': ['a'],
         'context': {'platform': 'android'},
         'clientMessageId': 'start-123',

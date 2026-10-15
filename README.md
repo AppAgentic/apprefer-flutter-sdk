@@ -264,17 +264,34 @@ Proprietary. All rights reserved.
 
 ## Support chat (AppRefer Support)
 
-An in-app help chat your team answers from the AppRefer inbox. Includes a home,
-new-message screen, conversation threads, screenshot attachments and reply badges.
-Uses the SDK key and device/user IDs from `AppReferSDK.configure` / `setUserId`.
+An in-app help chat your team answers from the AppRefer inbox: a help home
+(greeting, who answers and how fast, the conversation to pick up again, quick-help
+topics and a message field), conversation threads, screenshot attachments and reply
+badges. Uses the SDK key and device/user IDs from `AppReferSDK.configure` / `setUserId`.
 
 ```dart
 // After configuring AppReferSDK:
 await AppReferSDK.support.open(context: context);
+// Opens the home with the message field pre-filled and focused:
 await AppReferSDK.support.compose('Problem with my subscription', context: context);
 await AppReferSDK.support.identify(name: 'María', email: 'maria@example.com');
-AppReferSDK.support.accentColor = Colors.deepPurple;
+AppReferSDK.support.accentColor = Colors.deepPurple; // hero, bubbles, send button
 AppReferSDK.support.title = 'My app support'; // defaults to <App name> support
+AppReferSDK.support.replyTime = 'a few hours'; // "We usually reply in …"
+AppReferSDK.support.teamNames = ['Jay']; // first names shown on the home
+AppReferSDK.support.appIcon = const AssetImage('assets/icon.png'); // defaults to the launcher icon
+AppReferSDK.support.topics = [
+  AppReferSupportTopic.billing,
+  AppReferSupportTopic(
+    title: 'Restore purchase',
+    subtitle: 'Get your plan back',
+    icon: Icons.refresh_rounded,
+    tint: Colors.blue,
+    prompt: 'Which plan did you buy?',
+    action: () => AppReferBilling.restorePurchases(), // runs instead of starting a message
+  ),
+  AppReferSupportTopic.bug,
+]; // [] hides the tiles
 final unread = await AppReferSDK.support.unreadCount();
 
 // For context-free notification handling, assign your MaterialApp navigatorKey:
@@ -291,6 +308,12 @@ const AppReferSupportView(conversationId: 'conversation-id');
 const AppReferSupportView(composing: 'Report a problem');
 ```
 
+`topics` defaults to Billing & refunds, Restore purchase, Report a bug and Suggest
+an idea. Picking a tile sets the message field's hint to the topic's `prompt` and
+sends its `title` as the conversation subject. `replyTimeText` was removed: use
+`replyTime`. The home's colours (hero glows, bubbles, avatars) are derived from
+`accentColor`; on a bright accent such as yellow, text on it turns dark.
+
 Customers can attach up to four screenshots per message. Native system photo
 pickers need no photo-library permission. Images are reduced to at most 1600 px
 and JPEG-compressed below 700 KB before direct upload. No new dependencies.
@@ -299,8 +322,8 @@ Session tokens use iOS Keychain and Android Keystore-backed AES-GCM storage
 
 The home refreshes every 15 seconds and visible conversations every 4 seconds;
 backgrounding or closing stops polling. Failed messages remain available to retry
-while the view is open. Dark mode, keyboard insets and system text scaling follow
-the host Flutter theme. Supply your app's theme/accent as usual.
+while the view is open. The chat is dark when the device is in dark mode or the
+host theme is dark; keyboard insets and system text scaling are respected.
 
 Push transport stays in the host app: forward APNs/FCM registration and notification
 taps to these APIs. On Android registration creates `apprefer_support`; configure

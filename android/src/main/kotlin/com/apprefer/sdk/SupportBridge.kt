@@ -84,6 +84,28 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
                     if (Build.VERSION.SDK_INT >= 26) (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(NotificationChannel("apprefer_support", "Support replies", NotificationManager.IMPORTANCE_DEFAULT))
                     result.success(null)
                 }
+                "appIcon" -> {
+                    // The launcher icon for the help home, full-bleed like iOS (the SDK rounds it).
+                    val icon = context.packageManager.getApplicationIcon(context.packageName)
+                    val size = 144
+                    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                    val canvas = android.graphics.Canvas(bitmap)
+                    if (Build.VERSION.SDK_INT >= 26 && icon is android.graphics.drawable.AdaptiveIconDrawable) {
+                        // Layers are 108dp with the visible 72dp in the middle: draw them unmasked, cropped to it.
+                        val bleed = size / 4
+                        for (layer in listOfNotNull(icon.background, icon.foreground)) {
+                            layer.setBounds(-bleed, -bleed, size + bleed, size + bleed)
+                            layer.draw(canvas)
+                        }
+                    } else {
+                        icon.setBounds(0, 0, size, size)
+                        icon.draw(canvas)
+                    }
+                    val out = ByteArrayOutputStream()
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                    bitmap.recycle()
+                    result.success(out.toByteArray())
+                }
                 "pick" -> {
                     check(pending == null) { "Photo picker already open" }
                     val host = activity ?: error("No foreground activity")

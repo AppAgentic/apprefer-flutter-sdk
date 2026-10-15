@@ -1,6 +1,9 @@
 ## 0.5.0
 
 - AppRefer Support: embeddable help chat, conversations, screenshot uploads, secure sessions, unread counts and push routing.
+- Support chat "Concierge" design, matching the iOS SDK: hero home with presence pill, continue card, quick-help topic tiles and a floating composer; conversation with a floating header, grouped tailed bubbles, quick replies and a full-screen image viewer; light and dark.
+  - Removed `replyTimeText`; added `replyTime` ("under an hour"), `teamNames`, `topics` (`AppReferSupportTopic`, optional `action`) and `appIcon` (defaults to the launcher icon).
+  - `compose(text)` opens the home with the field pre-filled and focused; the separate new-message screen is gone. A picked topic becomes the conversation `subject`.
 
 ## Unreleased
 
