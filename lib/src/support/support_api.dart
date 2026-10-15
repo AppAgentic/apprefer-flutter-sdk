@@ -1,8 +1,14 @@
 import 'dart:convert';
+import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:flutter/services.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
+
+String newSupportMessageId() => List.generate(
+  16,
+  (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0'),
+).join();
 
 const supportChannel = MethodChannel('com.apprefer.sdk/support');
 
@@ -144,19 +150,23 @@ class SupportAPI {
   Future<Map<String, dynamic>> start(
     String text,
     List<String> ids,
-    Map<String, dynamic> context,
-  ) => call('POST', '/conversations', {
+    Map<String, dynamic> context, {
+    required String clientMessageId,
+  }) => call('POST', '/conversations', {
     'text': text,
     if (ids.isNotEmpty) 'attachmentIds': ids,
     'context': context,
+    'clientMessageId': clientMessageId,
   });
   Future<Map<String, dynamic>> send(
     String id,
     String text,
-    List<String> ids,
-  ) async => Map<String, dynamic>.from(
+    List<String> ids, {
+    required String clientMessageId,
+  }) async => Map<String, dynamic>.from(
     (await call('POST', '/conversations/${Uri.encodeComponent(id)}/messages', {
       'text': text,
+      'clientMessageId': clientMessageId,
       if (ids.isNotEmpty) 'attachmentIds': ids,
     }))['message'],
   );

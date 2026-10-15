@@ -92,6 +92,7 @@ class AppReferSupportView extends StatefulWidget {
 
 class _Pending {
   _Pending(this.text, this.images, this.conversation);
+  final String clientMessageId = newSupportMessageId();
   final String text;
   final String? conversation;
   bool inFlight = false;
@@ -106,7 +107,9 @@ class _SupportViewState extends State<AppReferSupportView>
   final scroll = ScrollController();
   final config = AppReferSupport.instance;
   late final SupportAPI api = widget.api ?? config.api;
-  String? id;
+  String? id, pollCursor;
+  int generation = 0;
+  _Pending? firstSend;
   String subject = '', appName = 'App', error = '';
   late final Future<void> metadataReady;
   Map<String, dynamic> metadata = {
@@ -203,6 +206,7 @@ class _SupportViewState extends State<AppReferSupportView>
     if (refreshing) return;
     refreshing = true;
     final current = id;
+    final currentGeneration = generation;
     try {
       if (current == null) {
         final result = await api.conversations();
@@ -214,21 +218,21 @@ class _SupportViewState extends State<AppReferSupportView>
               ? x
               : '${b['lastMessageAt']}'.compareTo('${a['lastMessageAt']}');
         });
-        if (mounted && id == current) setState(() => conversations = result);
+        if (mounted && id == current && generation == currentGeneration)
+          setState(() => conversations = result);
       } else {
-        final result = await api.thread(
-          current,
-          after: messages.isEmpty
-              ? null
-              : messages.last['createdAt'] as String?,
-        );
-        if (mounted && id == current) {
+        final result = await api.thread(current, after: pollCursor);
+        if (mounted && id == current && generation == currentGeneration) {
           final count = messages.length;
           setState(() {
             subject = '${result['conversation']['subject']}';
             for (final m in List<Map<String, dynamic>>.from(
               result['messages'],
             )) {
+              final timestamp = m['createdAt'] as String?;
+              if (timestamp != null &&
+                  (pollCursor == null || timestamp.compareTo(pollCursor!) > 0))
+                pollCursor = timestamp;
               if (!messages.any((old) => old['id'] == m['id'])) messages.add(m);
             }
             messages.sort(
@@ -264,6 +268,10 @@ class _SupportViewState extends State<AppReferSupportView>
   void _back() {
     if (id != null || composing) {
       setState(() {
+        generation++;
+        sending = false;
+        firstSend = null;
+        pollCursor = null;
         id = null;
         composing = false;
         messages = [];
@@ -294,17 +302,41 @@ class _SupportViewState extends State<AppReferSupportView>
 
   Future<void> _send() async {
     if (sending || (text.text.trim().isEmpty && images.isEmpty)) return;
-    final p = _Pending(text.text.trim(), List.of(images), id);
+    final currentGeneration = generation;
+    final p =
+        id == null &&
+            firstSend != null &&
+            firstSend!.text == text.text.trim() &&
+            firstSend!.images.length == images.length &&
+            List.generate(
+              images.length,
+              (i) => identical(firstSend!.images[i], images[i]),
+            ).every((same) => same)
+        ? firstSend!
+        : _Pending(text.text.trim(), List.of(images), id);
     if (id == null) {
+      firstSend = p;
       setState(() => sending = true);
       try {
+        p.ids.clear();
         for (final image in p.images) {
           p.ids.add(await api.upload(image));
         }
-        await metadataReady;
-        final result = await api.start(p.text, p.ids, metadata);
-        if (!mounted) return;
+        // Device details are nice to have; never hold a message back for them.
+        await metadataReady.timeout(
+          const Duration(seconds: 2),
+          onTimeout: () {},
+        );
+        final result = await api.start(
+          p.text,
+          p.ids,
+          metadata,
+          clientMessageId: p.clientMessageId,
+        );
+        if (!mounted || generation != currentGeneration) return;
         setState(() {
+          firstSend = null;
+          pollCursor = null;
           id = result['conversation']['id'] as String;
           subject = '${result['conversation']['subject']}';
           messages = List<Map<String, dynamic>>.from(result['messages']);
@@ -316,9 +348,11 @@ class _SupportViewState extends State<AppReferSupportView>
         _timer();
         _bottom();
       } catch (e) {
-        if (mounted) setState(() => error = '$e');
+        if (mounted && generation == currentGeneration)
+          setState(() => error = '$e');
       } finally {
-        if (mounted) setState(() => sending = false);
+        if (mounted && generation == currentGeneration)
+          setState(() => sending = false);
       }
     } else {
       setState(() {
@@ -336,10 +370,16 @@ class _SupportViewState extends State<AppReferSupportView>
     p.inFlight = true;
     setState(() => p.failed = false);
     try {
+      p.ids.clear();
       while (p.ids.length < p.images.length) {
         p.ids.add(await api.upload(p.images[p.ids.length]));
       }
-      final m = await api.send(conversation, p.text, p.ids);
+      final m = await api.send(
+        conversation,
+        p.text,
+        p.ids,
+        clientMessageId: p.clientMessageId,
+      );
       if (mounted)
         setState(() {
           pending.remove(p);
@@ -595,6 +635,9 @@ class _SupportViewState extends State<AppReferSupportView>
                             ),
                       onTap: () {
                         setState(() {
+                          generation++;
+                          pollCursor = null;
+                          messages = [];
                           id = c['id'] as String;
                           subject = '${c['subject']}';
                           loading = true;
@@ -619,7 +662,10 @@ class _SupportViewState extends State<AppReferSupportView>
                 borderRadius: BorderRadius.circular(22),
               ),
             ),
-            onPressed: () => setState(() => composing = true),
+            onPressed: () => setState(() {
+              generation++;
+              composing = true;
+            }),
             child: const Row(
               children: [
                 Icon(Icons.forum),

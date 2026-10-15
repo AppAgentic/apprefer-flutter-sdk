@@ -69,6 +69,27 @@ void main() {
       expect(jsonDecode(update.body)['name'], 'Maria');
     },
   );
+  test('failed profile refresh retries and uses replacement token', () async {
+    var fail = false;
+    final api = make((r) async {
+      if (r.url.path.endsWith('/session')) {
+        if (fail) return http.Response('{"error":"offline"}', 503);
+        return session(r);
+      }
+      return http.Response('{"conversations":[]}', 200);
+    });
+    await api.conversations();
+    final previous = store['support_sdk-key.profile'];
+    api.email = 'new@example.com';
+    fail = true;
+    await expectLater(api.conversations(), throwsA(isA<SupportException>()));
+    expect(store['support_sdk-key.profile'], previous);
+    fail = false;
+    await api.conversations();
+    expect(requests.last.headers['X-AppRefer-Support-Session'], 'token2');
+    expect(store['support_sdk-key.token'], 'token2');
+    expect(store['support_sdk-key.profile'], contains('new@example.com'));
+  });
   test('401 support session drops token and retries exactly once', () async {
     var calls = 0;
     final api = make((r) async {
@@ -130,19 +151,26 @@ void main() {
                 200,
               ),
       );
-      await api.start('hello', ['a'], {'platform': 'android'});
+      await api.start(
+        'hello',
+        ['a'],
+        {'platform': 'android'},
+        clientMessageId: 'start-123',
+      );
       expect(jsonDecode(requests.last.body), {
         'text': 'hello',
         'attachmentIds': ['a'],
         'context': {'platform': 'android'},
+        'clientMessageId': 'start-123',
       });
-      await api.send('a/b', '', ['a']);
+      await api.send('a/b', '', ['a'], clientMessageId: 'send-123');
       expect(
         requests.last.url.toString(),
         contains('/api/support/v1/conversations/a%2Fb/messages'),
       );
       expect(jsonDecode(requests.last.body), {
         'text': '',
+        'clientMessageId': 'send-123',
         'attachmentIds': ['a'],
       });
       await api.thread('c', after: '2026-10-15T10:00:00+01:00');
