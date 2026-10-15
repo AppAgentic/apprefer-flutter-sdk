@@ -1,3 +1,4 @@
+import '../services/tracking_consent.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show HttpDate;
@@ -171,7 +172,10 @@ class BillingApiClient {
     // that merely could not be reached must not lose that.
     AppReferBillingException? pause;
 
-    for (final baseUrl in baseUrls) {
+    for (final baseUrl in TrackingConsent.hosts(
+      await TrackingConsent.current(),
+      baseUrls,
+    )) {
       final request = makeRequest(endpoint, baseUrl, key);
       final http.Response response;
       try {

@@ -1,3 +1,4 @@
+import 'tracking_consent.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -26,23 +27,32 @@ class AppReferHttpClient {
   }) : _logger = logger;
 
   Map<String, String> get _headers => {
-        'Content-Type': 'application/json',
-        'X-SDK-Version': _sdkVersion,
-        'X-AppRefer-Key': apiKey,
-      };
+    'Content-Type': 'application/json',
+    'X-SDK-Version': _sdkVersion,
+    'X-AppRefer-Key': apiKey,
+  };
 
   Future<Map<String, dynamic>?> post(
     String path,
-    Map<String, dynamic> body,
-  ) async {
-    // Try primary URL with retries
-    final result = await _postWithRetries(baseUrl, path, body);
+    Map<String, dynamic> body, {
+    String? consent,
+    bool consentSnapshot = false,
+  }) async {
+    final current = consentSnapshot ? consent : await TrackingConsent.current();
+    if (body['event_name'] == '_advanced_matching' &&
+        !TrackingConsent.allowed(current))
+      return null;
+    final hosts = TrackingConsent.hosts(current, [
+      baseUrl,
+      if (fallbackUrl != null) fallbackUrl!,
+    ]);
+    final result = await _postWithRetries(hosts.first, path, body);
     if (result != null) return result;
 
     // Fallback: single attempt on fallback URL
-    if (fallbackUrl != null) {
+    if (hosts.length > 1) {
       _logger.debug('Falling back to $fallbackUrl for POST $path');
-      return _postOnce(fallbackUrl!, path, body);
+      return _postOnce(hosts[1], path, body);
     }
 
     return null;
@@ -131,23 +141,23 @@ class AppReferHttpClient {
   }
 
   Future<Map<String, dynamic>?> get(String path) async {
-    // Try primary URL with retries
-    final result = await _getWithRetries(baseUrl, path);
+    final hosts = TrackingConsent.hosts(await TrackingConsent.current(), [
+      baseUrl,
+      if (fallbackUrl != null) fallbackUrl!,
+    ]);
+    final result = await _getWithRetries(hosts.first, path);
     if (result != null) return result;
 
     // Fallback: single attempt on fallback URL
-    if (fallbackUrl != null) {
+    if (hosts.length > 1) {
       _logger.debug('Falling back to $fallbackUrl for GET $path');
-      return _getOnce(fallbackUrl!, path);
+      return _getOnce(hosts[1], path);
     }
 
     return null;
   }
 
-  Future<Map<String, dynamic>?> _getWithRetries(
-    String url,
-    String path,
-  ) async {
+  Future<Map<String, dynamic>?> _getWithRetries(String url, String path) async {
     final target = Uri.parse('$url$path');
     for (int attempt = 0; attempt < _maxRetries; attempt++) {
       try {
@@ -193,10 +203,7 @@ class AppReferHttpClient {
     return null;
   }
 
-  Future<Map<String, dynamic>?> _getOnce(
-    String url,
-    String path,
-  ) async {
+  Future<Map<String, dynamic>?> _getOnce(String url, String path) async {
     final target = Uri.parse('$url$path');
     try {
       _logger.debug('GET $target (fallback)');

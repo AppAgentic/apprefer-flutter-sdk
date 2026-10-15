@@ -18,6 +18,15 @@ public class AppReferPlugin: NSObject, FlutterPlugin {
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
+        case "getTrackingConsent":
+            if #available(iOS 14, *) {
+                switch ATTrackingManager.trackingAuthorizationStatus {
+                case .authorized: result("granted")
+                case .denied, .restricted: result("denied")
+                case .notDetermined: result("undetermined")
+                @unknown default: result("undetermined")
+                }
+            } else { result("granted") }
         case "getAdServicesToken":
             getAdServicesToken(result: result)
         case "billingCurrentEntitlements":

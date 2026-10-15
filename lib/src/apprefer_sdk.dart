@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'package:flutter/widgets.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'services/tracking_consent.dart';
 import 'support/apprefer_support.dart';
 import 'dart:io';
 
@@ -13,7 +17,8 @@ import 'services/registry.dart';
 import 'services/storage.dart';
 import 'version.dart';
 
-class AppReferSDK {
+class AppReferSDK with WidgetsBindingObserver {
+  Future<void>? _consentSync;
   static AppReferSupport get support => AppReferSupport.instance;
   static AppReferSDK? _instance;
 
@@ -30,7 +35,7 @@ class AppReferSDK {
   /// Configure + resolve attribution in ONE call.
   /// On first open: sends device signals + AdServices token to backend,
   /// resolves attribution, caches locally, returns result.
-  /// On subsequent opens: returns cached attribution (no network call).
+  /// On subsequent opens: reports changed consent, then returns cached attribution.
   static Future<Attribution?> configure(AppReferConfig config) async {
     final sdk = AppReferSDK._();
     sdk._config = config;
@@ -51,7 +56,9 @@ class AppReferSDK {
     sdk._adServices = AppReferAdServices(logger: sdk._logger);
     sdk._installReferrer = AppReferInstallReferrer(logger: sdk._logger);
 
+    if (_instance != null) WidgetsBinding.instance.removeObserver(_instance!);
     _instance = sdk;
+    WidgetsBinding.instance.addObserver(sdk);
 
     sdk._logger.info('AppReferSDK initialized');
 
@@ -62,6 +69,11 @@ class AppReferSDK {
 
     // Record first run date
     await sdk._storage.getFirstRunDate();
+
+    if (sdk._storage.isMatchRequestAttempted() ||
+        !sdk._storage.isSdkEnabled()) {
+      await trackingConsentDidChange();
+    }
 
     // Check kill switch from local cache
     if (!sdk._storage.isSdkEnabled()) {
@@ -85,6 +97,7 @@ class AppReferSDK {
   }
 
   Future<Attribution?> _resolveAttribution() async {
+    final consent = await TrackingConsent.current();
     final deviceId = await _storage.getDeviceId();
     final deviceInfoMap = await _deviceInfo.getDeviceInfo();
 
@@ -93,7 +106,7 @@ class AppReferSDK {
     String? idfa;
     if (Platform.isIOS) {
       asaToken = await _adServices.getAdServicesToken();
-      idfa = await _adServices.getIdfa();
+      if (consent == 'granted') idfa = await _adServices.getIdfa();
     }
 
     // Get Install Referrer + GAID (Android only)
@@ -107,15 +120,16 @@ class AppReferSDK {
           referrerData['installReferrer'] as String?,
         );
       }
-      gaid = await _adServices.getGaid();
+      if (TrackingConsent.allowed(consent)) gaid = await _adServices.getGaid();
     }
 
     final body = <String, dynamic>{
       'device_id': deviceId,
       'device_info': deviceInfoMap,
       'asa_token': asaToken,
-      'idfa': idfa,
-      'gaid': gaid,
+      if (idfa != null && consent == 'granted') 'idfa': idfa,
+      if (gaid != null && TrackingConsent.allowed(consent)) 'gaid': gaid,
+      if (consent != null) 'tracking_consent': consent,
       'install_referrer': referrerData?['installReferrer'],
       'ar_click_id': arClickId,
       'referrer_click_ts': referrerData?['referrerClickTimestampSeconds'],
@@ -126,7 +140,12 @@ class AppReferSDK {
     };
 
     _logger.info('Sending configure request...');
-    final response = await _httpClient.post('/api/track/configure', body);
+    final response = await _httpClient.post(
+      '/api/track/configure',
+      body,
+      consent: consent,
+      consentSnapshot: true,
+    );
 
     if (response == null) {
       _logger.error('Configure request failed — will retry on next launch');
@@ -134,6 +153,10 @@ class AppReferSDK {
       return null;
     }
 
+    if (consent != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(TrackingConsent.reportedKey, consent);
+    }
     // Update kill switch from server
     final sdkEnabled = response['sdkEnabled'] as bool? ?? true;
     await _storage.setSdkEnabled(sdkEnabled);
@@ -172,7 +195,10 @@ class AppReferSDK {
   }) async {
     final sdk = _instance;
     if (sdk == null) {
-      assert(() { print('[AppRefer] trackEvent called before configure() — ignoring'); return true; }());
+      assert(() {
+        print('[AppRefer] trackEvent called before configure() — ignoring');
+        return true;
+      }());
       return;
     }
     if (!sdk._storage.isSdkEnabled()) return;
@@ -201,11 +227,17 @@ class AppReferSDK {
   }) async {
     final sdk = _instance;
     if (sdk == null) {
-      assert(() { print('[AppRefer] setAdvancedMatching called before configure() — ignoring'); return true; }());
+      assert(() {
+        print(
+          '[AppRefer] setAdvancedMatching called before configure() — ignoring',
+        );
+        return true;
+      }());
       return;
     }
     if (!sdk._storage.isSdkEnabled()) return;
 
+    if (!TrackingConsent.allowed(await TrackingConsent.current())) return;
     final hashedData = <String, String>{};
     if (email != null) hashedData['em'] = AppReferHashing.hashEmail(email);
     if (phoneNumber != null) {
@@ -239,7 +271,10 @@ class AppReferSDK {
   static Future<void> setUserId(String userId) async {
     final sdk = _instance;
     if (sdk == null) {
-      assert(() { print('[AppRefer] setUserId called before configure() — ignoring'); return true; }());
+      assert(() {
+        print('[AppRefer] setUserId called before configure() — ignoring');
+        return true;
+      }());
       return;
     }
     await sdk._storage.setUserId(userId);
@@ -257,6 +292,75 @@ class AppReferSDK {
       sdk._logger.error('Failed to sync userId to server: $e');
       return null;
     });
+  }
+
+  /// Android app permission; iOS always reads ATT without prompting.
+  static Future<void> setTrackingConsent(bool? granted) async {
+    await TrackingConsent.set(granted);
+    await trackingConsentDidChange();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(
+        trackingConsentDidChange().catchError((Object e) {
+          _logger.error('Consent sync failed: $e');
+        }),
+      );
+    }
+  }
+
+  /// Call after the app's own ATT prompt. Failed reports retry on the next trigger.
+  static Future<void> trackingConsentDidChange() async {
+    final sdk = _instance;
+    if (sdk == null) return;
+    if (sdk._consentSync != null) {
+      await sdk._consentSync;
+      return trackingConsentDidChange();
+    }
+    sdk._consentSync = sdk._reportConsent();
+    try {
+      await sdk._consentSync;
+    } finally {
+      sdk._consentSync = null;
+    }
+  }
+
+  Future<void> _reportConsent() async {
+    final consent = await TrackingConsent.current();
+    final prefs = await SharedPreferences.getInstance();
+    if (consent == null ||
+        consent == prefs.getString(TrackingConsent.reportedKey))
+      return;
+    final body = <String, dynamic>{
+      'device_id': await _storage.getDeviceId(),
+      'tracking_consent': consent,
+      'device_info': await _deviceInfo.getDeviceInfo(),
+      'sdk_version': appReferVersion,
+      if (_storage.getUserId() != null)
+        'customer_user_id': _storage.getUserId(),
+    };
+    if (consent == 'granted') {
+      final idfa = await _adServices.getIdfa();
+      if (idfa != null) body['idfa'] = idfa;
+    }
+    final response = await _httpClient.post(
+      '/api/track/configure',
+      body,
+      consent: consent,
+      consentSnapshot: true,
+    );
+    if (response == null) return;
+    final raw = response['attribution'] as Map<String, dynamic>?;
+    if (raw != null) {
+      await _storage.setAttributionCache(
+        Attribution.fromJson(raw).toJsonString(),
+      );
+    } else {
+      await _storage.clearAttributionCache();
+    }
+    await prefs.setString(TrackingConsent.reportedKey, consent);
   }
 
   /// Get cached attribution result (instant, no network call).
