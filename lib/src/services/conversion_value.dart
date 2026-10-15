@@ -1,0 +1,125 @@
+import 'package:flutter/foundation.dart';
+import 'dart:math';
+import 'dart:async';
+import 'package:flutter/services.dart';
+import 'http_client.dart';
+import 'storage.dart';
+
+/// First-party conversion values. Android deliberately does nothing.
+class ConversionValue {
+  final AppReferStorage storage;
+  final AppReferHttpClient client;
+  final bool Function() isIOS;
+  final DateTime Function() now;
+  final Future<void> Function(int, String) update;
+  bool _inFlight = false;
+  bool _rerunForced = false;
+  bool _recheckScheduled = false;
+  static const trialEvents = {
+    'startTrial',
+    'trial_started',
+    'StartTrial',
+    'start_trial',
+  };
+  static const _coarse = ['low', 'medium', 'high'];
+
+  ConversionValue({
+    required this.storage,
+    required this.client,
+    bool Function()? isIOS,
+    DateTime Function()? now,
+    Future<void> Function(int, String)? update,
+  }) : isIOS = isIOS ?? (() => defaultTargetPlatform == TargetPlatform.iOS),
+       now = now ?? DateTime.now,
+       update = update ?? _nativeUpdate;
+
+  static Future<void> _nativeUpdate(int fine, String coarse) async {
+    try {
+      await const MethodChannel(
+        'com.apprefer.sdk/adservices',
+      ).invokeMethod<void>('updateConversionValue', {
+        'fine': fine,
+        'coarse': coarse,
+      });
+    } catch (_) {
+      /* Attribution must never interrupt the app. */
+    }
+  }
+
+  Future<void> refresh({bool force = false, bool allowRecheck = true}) async {
+    if (!isIOS() || !storage.isSdkEnabled()) return;
+    if (_inFlight) {
+      if (force) _rerunForced = true;
+      return;
+    }
+    _inFlight = true;
+    try {
+      final firstRun = DateTime.tryParse(await storage.getFirstRunDate());
+      if (firstRun != null &&
+          now().difference(firstRun) > const Duration(days: 35))
+        return;
+      force = force || _rerunForced;
+      do {
+        _rerunForced = false;
+        final raised = await _refreshOnce(force: force);
+        if (force && !raised && allowRecheck && !_recheckScheduled) {
+          _recheckScheduled = true;
+          Timer(const Duration(seconds: 90), () {
+            _recheckScheduled = false;
+            // Through the guarded path (enabled, window, one check at a time), without another recheck.
+            unawaited(refresh(force: true, allowRecheck: false));
+          });
+        }
+        force = true;
+      } while (_rerunForced);
+    } catch (_) {
+      /* Best effort, including storage failures. */
+    } finally {
+      _inFlight = false;
+    }
+  }
+
+  Future<bool> _refreshOnce({required bool force}) async {
+    try {
+      var value = storage.conversionValue();
+      if (value == null) {
+        await update(0, 'low');
+        await storage.setConversionValue(0, 'low');
+        value = (fine: 0, coarse: 'low');
+      }
+      final checked = storage.conversionCheckedAt();
+      if (!force &&
+          checked != null &&
+          now().difference(checked) < const Duration(minutes: 10))
+        return false;
+      final response = await client.post('/api/track/conversion-value', {
+        'device_id': await storage.getDeviceId(),
+        // UTC with an offset, like iOS: the stored first-run date is local time without one.
+        'installed_at': _utcIso(await storage.getFirstRunDate()),
+      });
+      final fine = response?['fine'];
+      final coarse = response?['coarse'];
+      if (fine is! int || fine < 0 || fine > 63 || !_coarse.contains(coarse))
+        return false;
+      if (!storage.isSdkEnabled()) return false;
+      await storage.setConversionCheckedAt(now());
+      // Compare with what is stored now, not before the request.
+      value = storage.conversionValue() ?? value;
+      final nextFine = max(value.fine, fine);
+      final nextCoarse =
+          _coarse[max(
+            _coarse.indexOf(value.coarse),
+            _coarse.indexOf(coarse as String),
+          )];
+      if (nextFine == value.fine && nextCoarse == value.coarse) return false;
+      await update(nextFine, nextCoarse);
+      await storage.setConversionValue(nextFine, nextCoarse);
+      return true;
+    } catch (_) {
+      return false; /* Best effort; retry on a later trigger. */
+    }
+  }
+
+  static String _utcIso(String stored) =>
+      DateTime.tryParse(stored)?.toUtc().toIso8601String() ?? stored;
+}

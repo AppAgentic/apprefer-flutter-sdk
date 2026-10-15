@@ -117,6 +117,30 @@ class AppReferStorage {
     await _prefs.setString(_keyUserId, userId);
   }
 
+  ({int fine, String coarse})? conversionValue() {
+    final fine = _prefs.getInt('apprefer_conversion_fine');
+    if (fine == null) return null;
+    return (
+      fine: fine,
+      coarse: _prefs.getString('apprefer_conversion_coarse') ?? 'low',
+    );
+  }
+
+  Future<void> setConversionValue(int fine, String coarse) async {
+    await _prefs.setInt('apprefer_conversion_fine', fine);
+    await _prefs.setString('apprefer_conversion_coarse', coarse);
+  }
+
+  DateTime? conversionCheckedAt() => DateTime.tryParse(
+    _prefs.getString('apprefer_conversion_checked_at') ?? '',
+  );
+  Future<void> setConversionCheckedAt(DateTime date) async {
+    await _prefs.setString(
+      'apprefer_conversion_checked_at',
+      date.toIso8601String(),
+    );
+  }
+
   // --- UUID v4 Generator ---
 
   static String _generateUuidV4() {
