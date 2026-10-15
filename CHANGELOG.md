@@ -1,3 +1,28 @@
+## 0.5.0
+
+- AI personas: approved name and portrait, explicit AI tag, and a hand-over pill when a person is needed.
+- AppRefer Support: embeddable help chat, conversations, screenshot uploads, secure sessions, unread counts and push routing.
+- Support chat "Concierge" design, matching the iOS SDK: hero home with presence pill, continue card, quick-help topic tiles and a floating composer; conversation with a floating header, grouped tailed bubbles, quick replies and a full-screen image viewer; light and dark.
+  - Removed `replyTimeText`; added `replyTime` ("under an hour"), `teamNames`, `topics` (`AppReferSupportTopic`, optional `action`) and `appIcon` (defaults to the launcher icon).
+  - `compose(text)` opens the home with the field pre-filled and focused; the separate new-message screen is gone. A picked topic becomes the conversation `subject`.
+
+### Billing and attribution
+
+- Add AppRefer Billing (`AppReferBilling`), an App Store / Google Play purchases and entitlements module that replaces RevenueCat, built on the official `in_app_purchase` plugins (StoreKit 2 on iOS 15+, Play Billing on Android):
+  - `configure(apiKey:, appUserId:, entitlementsByProduct:, defaultEntitlement:, consumableProductIds:)` with an anonymous `$ARAnon:<UUID>` id, and the store purchase listener started at configure
+  - `products()`, `purchase()` (sets Apple `appAccountToken` / Google `obfuscatedAccountId` to the AppRefer account token; promotional, win-back and Google subscription-change options), `restorePurchases()`
+  - Sends the StoreKit 2 signed transaction (iOS) or the purchase token (Android) to AppRefer and only then completes the purchase; Google consumables are consumed after AppRefer accepts them
+  - `customerInfo(fetchPolicy:)`, `customerInfoStream`, `addCustomerInfoUpdateListener`; `entitlements['premium']?.isActive`; `CustomerInfo.source` (server / cache / localFallback)
+  - `logIn()` (merges anonymous purchases via `/identify`), `logOut()`, `setAttributes()`, `setEmail` / `setDisplayName` / `setPhoneNumber`
+  - Outage safety: falls back to every verified store purchase on the device merged with the same user's cached server answer; server answers also include the customer's own verified store purchases (no account token, their token, or still queued); purchases AppRefer can't accept are queued on disk and resent later (50 attempts / 90 days; 401/403/404/409/429 back off without using attempts and honour `Retry-After`); Google purchases are acknowledged on device at once and consumables consumed only after AppRefer records them; failed acknowledge/consume retried on foreground
+  - Only `restorePurchases()` sends `restore: true` (kept on queued retries); purchases are recorded for the user who started them, saved on disk before the purchase sheet opens (the sheet doesn't open if it can't be saved), so Ask to Buy and slow payments completing after a restart, logout or user switch still go to them
+  - Rejected-purchase archive: purchases AppRefer refuses for good (400/413/422), without verifiable store data, or given up by the retry queue are saved with their store data before they are completed (consumables are never consumed then); `restorePurchases()` resends them and `rejectedPurchases()` lists them
+  - Pending logins survive `logOut()` and are sent in order; unreadable billing storage never mints a new anonymous id
+  - iOS restore fails instead of reporting an empty restore when the App Store's restored transactions don't arrive in time
+  - Sends the AppRefer attribution device id as `appreferId` automatically
+  - Uses the attribution SDK key and the `trk.apprefer.com` → `apprefer.com` fallback
+- Requires Flutter 3.41 / Dart 3.11 (minimum of `in_app_purchase_storekit` 0.4.13+1)
+
 ## 0.3.5
 
 - Use `trk.apprefer.com` as primary tracking endpoint for lower latency

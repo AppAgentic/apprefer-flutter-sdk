@@ -1,11 +1,13 @@
 import Flutter
 import UIKit
+import StoreKit
 import AdServices
 import AdSupport
 import AppTrackingTransparency
 
 public class AppReferPlugin: NSObject, FlutterPlugin {
     public static func register(with registrar: FlutterPluginRegistrar) {
+        SupportBridge.register(with: registrar)
         let channel = FlutterMethodChannel(
             name: "com.apprefer.sdk/adservices",
             binaryMessenger: registrar.messenger()
@@ -18,6 +20,27 @@ public class AppReferPlugin: NSObject, FlutterPlugin {
         switch call.method {
         case "getAdServicesToken":
             getAdServicesToken(result: result)
+        case "billingCurrentEntitlements":
+            if #available(iOS 15.0, *) {
+                Task { @MainActor in
+                    var purchases: [[String: Any]] = []
+                    for await verification in Transaction.currentEntitlements {
+                        guard case .verified(let transaction) = verification,
+                              transaction.revocationDate == nil, !transaction.isUpgraded else { continue }
+                        purchases.append([
+                            "id": String(transaction.id),
+                            "productId": transaction.productID,
+                            "originalId": String(transaction.originalID),
+                            "accountToken": transaction.appAccountToken?.uuidString ?? "",
+                            "json": String(data: transaction.jsonRepresentation, encoding: .utf8) ?? "",
+                            "signedTransaction": verification.jwsRepresentation,
+                        ])
+                    }
+                    result(purchases)
+                }
+            } else {
+                result(FlutterError(code: "storekit_unavailable", message: "StoreKit 2 requires iOS 15", details: nil))
+            }
         case "getIdfa":
             getIdfa(result: result)
         default:
