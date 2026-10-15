@@ -3,6 +3,40 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('presence text with and without a persona and team names', () {
+    String line(String? persona, List<String> names) => supportPresenceLine(
+      persona: persona,
+      teamNames: names,
+      replyTime: 'under an hour',
+    );
+    expect(
+      line('Sam', ['Jay', 'Ana']),
+      'Sam replies instantly · Jay and the team in under an hour',
+    );
+    expect(
+      line('Sam', ['Jay']),
+      'Sam replies instantly · Jay and the team in under an hour',
+    );
+    expect(
+      line('Sam', []),
+      'Sam replies instantly · the team in under an hour',
+    );
+    expect(line(null, []), 'We usually reply in under an hour');
+    expect(line(null, ['Jay']), 'Jay · usually replies in under an hour');
+    expect(
+      line(null, ['Jay', 'Ana']),
+      'Jay and the team · usually under an hour',
+    );
+  });
+
+  test('quick replies follow an answer but never a hand-over', () {
+    expect(supportShowsQuickReplies(null), isFalse);
+    expect(supportShowsQuickReplies({'from': 'customer'}), isFalse);
+    expect(supportShowsQuickReplies({'from': 'team'}), isTrue);
+    expect(supportShowsQuickReplies({'from': 'bot'}), isTrue);
+    expect(supportShowsQuickReplies({'from': 'bot', 'handoff': true}), isFalse);
+  });
+
   test('onAccent is dark on a bright yellow and white on purple', () {
     expect(
       SupportPalette(const Color(0xffffd60a)).onAccent,

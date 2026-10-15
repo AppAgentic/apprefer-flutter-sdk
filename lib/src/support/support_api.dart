@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
@@ -19,6 +20,47 @@ class SupportException implements Exception {
   @override
   String toString() => message;
 }
+
+/// The app's AI support assistant, set in AppRefer. Every message from it is tagged "AI".
+@immutable
+class AppReferSupportPersona {
+  const AppReferSupportPersona({
+    required this.name,
+    this.avatarUrl,
+    this.handoffTo,
+  });
+  final String name;
+  final String? avatarUrl;
+
+  /// Who it passes conversations to ("Jay"); null means the team.
+  final String? handoffTo;
+
+  /// Null when the key is missing (older servers), null, or has no name.
+  static AppReferSupportPersona? fromJson(Object? json) {
+    if (json is! Map) return null;
+    final name = json['name'];
+    if (name is! String || name.trim().isEmpty) return null;
+    final avatar = json['avatarUrl'], to = json['handoffTo'];
+    return AppReferSupportPersona(
+      name: name.trim(),
+      avatarUrl: avatar is String && avatar.isNotEmpty ? avatar : null,
+      handoffTo: to is String && to.trim().isNotEmpty ? to.trim() : null,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is AppReferSupportPersona &&
+      other.name == name &&
+      other.avatarUrl == avatarUrl &&
+      other.handoffTo == handoffTo;
+  @override
+  int get hashCode => Object.hash(name, avatarUrl, handoffTo);
+}
+
+/// The AI assistant's note that it passed the conversation to a person.
+bool supportIsHandoff(Map<String, dynamic>? message) =>
+    message?['handoff'] == true;
 
 /// Customer-side API. Transport and token store can be injected in tests.
 class SupportAPI {
@@ -48,6 +90,10 @@ class SupportAPI {
   final String? Function() apiKey;
   String? name, email;
   Future<String>? _session;
+
+  /// The app's AI assistant from the latest list or conversation read (null
+  /// when the app has none). The help screens listen to it.
+  final ValueNotifier<AppReferSupportPersona?> persona = ValueNotifier(null);
   static Future<Map<String, dynamic>> defaultProfile() async {
     final storage = AppReferStorage();
     await storage.init();
@@ -139,14 +185,21 @@ class SupportAPI {
     }
   }
 
-  Future<List<Map<String, dynamic>>> conversations() async =>
-      List<Map<String, dynamic>>.from(
-        (await call('GET', '/conversations'))['conversations'],
-      );
-  Future<Map<String, dynamic>> thread(String id, {String? after}) => call(
-    'GET',
-    '/conversations/${Uri.encodeComponent(id)}${after == null ? '' : '?after=${Uri.encodeQueryComponent(after)}'}',
-  );
+  Future<List<Map<String, dynamic>>> conversations() async {
+    final list = await call('GET', '/conversations');
+    persona.value = AppReferSupportPersona.fromJson(list['persona']);
+    return List<Map<String, dynamic>>.from(list['conversations']);
+  }
+
+  Future<Map<String, dynamic>> thread(String id, {String? after}) async {
+    final thread = await call(
+      'GET',
+      '/conversations/${Uri.encodeComponent(id)}${after == null ? '' : '?after=${Uri.encodeQueryComponent(after)}'}',
+    );
+    persona.value = AppReferSupportPersona.fromJson(thread['persona']);
+    return thread;
+  }
+
   Future<Map<String, dynamic>> start(
     String text,
     List<String> ids,

@@ -143,6 +143,7 @@ class SupportAvatar extends StatelessWidget {
     required this.colors,
     this.icon,
     this.ring = false,
+    this.imageUrl,
   });
   final String? name;
   final double size;
@@ -150,43 +151,117 @@ class SupportAvatar extends StatelessWidget {
   final IconData? icon;
   final bool ring;
 
+  /// A portrait (the AI assistant's); the initial shows until it loads, or if it can't.
+  final String? imageUrl;
+
   @override
   Widget build(BuildContext context) {
     final initial = name?.trim().isNotEmpty == true
         ? name!.trim().characters.first.toUpperCase()
         : '•';
+    final url = imageUrl;
+    final base = _base(initial);
     return ExcludeSemantics(
-      child: Container(
-        width: size,
-        height: size,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: LinearGradient(
-            colors: colors,
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          border: ring
-              ? Border.all(
-                  color: Colors.white.withValues(alpha: 0.9),
-                  width: 2,
-                  strokeAlign: BorderSide.strokeAlignOutside,
-                )
-              : null,
-        ),
-        child: icon != null
-            ? Icon(icon, size: size * 0.45, color: Colors.white)
-            : Text(
-                initial,
-                textScaler: TextScaler.noScaling,
-                style: TextStyle(
-                  fontSize: size * 0.4,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
+      child: url == null || url.isEmpty
+          ? base
+          : Stack(
+              clipBehavior: Clip.none,
+              children: [
+                base,
+                ClipOval(
+                  child: Image.network(
+                    url,
+                    width: size,
+                    height: size,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, e, s) => const SizedBox.shrink(),
+                  ),
                 ),
-              ),
-      ),
+              ],
+            ),
     );
   }
+
+  Widget _base(String initial) => Container(
+    width: size,
+    height: size,
+    alignment: Alignment.center,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      gradient: LinearGradient(
+        colors: colors,
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
+      border: ring
+          ? Border.all(
+              color: Colors.white.withValues(alpha: 0.9),
+              width: 2,
+              strokeAlign: BorderSide.strokeAlignOutside,
+            )
+          : null,
+    ),
+    child: icon != null
+        ? Icon(icon, size: size * 0.45, color: Colors.white)
+        : Text(
+            initial,
+            textScaler: TextScaler.noScaling,
+            style: TextStyle(
+              fontSize: size * 0.4,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
+  );
 }
+
+/// The small "AI" tag on everything the AI assistant says.
+class SupportAITag extends StatelessWidget {
+  const SupportAITag({super.key, required this.palette});
+  final SupportPalette palette;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'AI assistant',
+    excludeSemantics: true,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: palette.accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        'AI',
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 0.4,
+          color: palette.accent,
+        ),
+      ),
+    ),
+  );
+}
+
+/// The presence pill's text on the help home (same wording as iOS).
+String supportPresenceLine({
+  String? persona,
+  required List<String> teamNames,
+  required String replyTime,
+}) {
+  final all = teamNames.where((n) => n.trim().isNotEmpty).toList();
+  if (persona != null) {
+    return all.isEmpty
+        ? '$persona replies instantly · the team in $replyTime'
+        : '$persona replies instantly · ${all.first} and the team in $replyTime';
+  }
+  if (all.isEmpty) return 'We usually reply in $replyTime';
+  return all.length == 1
+      ? '${all.first} · usually replies in $replyTime'
+      : '${all.first} and the team · usually $replyTime';
+}
+
+/// The thank-you / another-question chips: only after an answer, never after
+/// a hand-over (the customer is waiting for a person, not done).
+bool supportShowsQuickReplies(Map<String, dynamic>? last) =>
+    last != null && last['from'] != 'customer' && last['handoff'] != true;

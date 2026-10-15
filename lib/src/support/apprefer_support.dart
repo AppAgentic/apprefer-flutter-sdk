@@ -10,6 +10,8 @@ import '../services/logger.dart';
 import 'support_api.dart';
 import 'support_style.dart';
 
+export 'support_api.dart' show AppReferSupportPersona;
+
 /// Shared support configuration and presentation API.
 class AppReferSupport {
   AppReferSupport._();
@@ -219,6 +221,9 @@ class _SupportViewState extends State<AppReferSupportView>
   Object? _themeKey;
   String get title => config.title ?? '$appName support';
 
+  /// The app's AI assistant, as last seen from AppRefer.
+  AppReferSupportPersona? get _persona => api.persona.value;
+
   @override
   void initState() {
     super.initState();
@@ -227,6 +232,7 @@ class _SupportViewState extends State<AppReferSupportView>
     homeText.text = widget.composing ?? '';
     homeText.addListener(_changed);
     threadText.addListener(_changed);
+    api.persona.addListener(_changed);
     metadataReady = _context();
     config.launcherIcon().then((bytes) {
       if (mounted && bytes != null && bytes.isNotEmpty) {
@@ -294,6 +300,7 @@ class _SupportViewState extends State<AppReferSupportView>
   void dispose() {
     timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
+    api.persona.removeListener(_changed);
     for (final c in [homeText, threadText]) {
       c.removeListener(_changed);
       c.dispose();
@@ -754,7 +761,10 @@ class _SupportViewState extends State<AppReferSupportView>
                             vertical: 11,
                           ),
                           hintText: home
-                              ? topic?.prompt ?? 'Ask us anything…'
+                              ? topic?.prompt ??
+                                    (_persona == null
+                                        ? 'Ask us anything…'
+                                        : 'Message ${_persona!.name}…')
                               : 'Message',
                           hintMaxLines: 1,
                           hintStyle: TextStyle(
@@ -1100,14 +1110,17 @@ class _SupportViewState extends State<AppReferSupportView>
   };
 
   Widget _presence() {
+    final persona = _persona;
     final all = config.teamNames.where((n) => n.trim().isNotEmpty).toList();
-    final names = all.take(3).toList();
-    final reply = config.replyTime;
-    final line = names.isEmpty
-        ? 'We usually reply in $reply'
-        : all.length == 1
-        ? '${names.first} · usually replies in $reply'
-        : '${names.first} and the team · usually $reply';
+    final names = all.take(persona == null ? 3 : 2).toList();
+    final line = supportPresenceLine(
+      persona: persona?.name,
+      teamNames: all,
+      replyTime: config.replyTime,
+    );
+    // The assistant comes first, then the team, overlapping by 8.
+    final offset = persona == null ? 0 : 1;
+    final count = names.length + offset;
     final on = palette.onAccent;
     return Container(
       padding: const EdgeInsets.fromLTRB(8, 7, 14, 7),
@@ -1122,11 +1135,11 @@ class _SupportViewState extends State<AppReferSupportView>
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox(
-            width: 28 + 20.0 * (names.isEmpty ? 0 : names.length - 1),
+            width: 28 + 20.0 * (count == 0 ? 0 : count - 1),
             height: 28,
             child: Stack(
               clipBehavior: Clip.none,
-              children: names.isEmpty
+              children: count == 0
                   ? [
                       SupportAvatar(
                         size: 28,
@@ -1138,11 +1151,22 @@ class _SupportViewState extends State<AppReferSupportView>
                   : [
                       for (var i = names.length - 1; i >= 0; i--)
                         Positioned(
-                          left: 20.0 * i,
+                          left: 20.0 * (i + offset),
                           child: SupportAvatar(
                             name: names[i],
                             size: 28,
                             colors: _avatarColors(i),
+                            ring: true,
+                          ),
+                        ),
+                      if (persona != null)
+                        Positioned(
+                          left: 0,
+                          child: SupportAvatar(
+                            name: persona.name,
+                            size: 28,
+                            colors: [palette.warm, palette.hot],
+                            imageUrl: persona.avatarUrl,
                             ring: true,
                           ),
                         ),
@@ -1169,6 +1193,7 @@ class _SupportViewState extends State<AppReferSupportView>
 
   Widget _continueCard(Map<String, dynamic> c) {
     final firstTeam = config.teamNames.where((n) => n.trim().isNotEmpty);
+    final persona = c['lastFrom'] == 'bot' ? _persona : null;
     return _Pressable(
       onTap: () => _openConversation(c['id'] as String),
       child: Container(
@@ -1185,12 +1210,20 @@ class _SupportViewState extends State<AppReferSupportView>
             const SizedBox(height: 12),
             Row(
               children: [
-                SupportAvatar(
-                  name: firstTeam.firstOrNull,
-                  size: 46,
-                  colors: [palette.warm, palette.hot],
-                  icon: firstTeam.isEmpty ? Icons.forum_rounded : null,
-                ),
+                if (persona != null)
+                  SupportAvatar(
+                    name: persona.name,
+                    size: 46,
+                    colors: [palette.warm, palette.hot],
+                    imageUrl: persona.avatarUrl,
+                  )
+                else
+                  SupportAvatar(
+                    name: firstTeam.firstOrNull,
+                    size: 46,
+                    colors: [palette.warm, palette.hot],
+                    icon: firstTeam.isEmpty ? Icons.forum_rounded : null,
+                  ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -1472,8 +1505,7 @@ class _SupportViewState extends State<AppReferSupportView>
         mine.isEmpty &&
         threadText.text.isEmpty &&
         threadImages.isEmpty &&
-        last != null &&
-        last['from'] != 'customer';
+        supportShowsQuickReplies(last);
     final lastDate = _date(last?['createdAt']);
     final error = sendError.isNotEmpty ? sendError : loadError;
     return Stack(
@@ -1560,6 +1592,7 @@ class _SupportViewState extends State<AppReferSupportView>
 
   Widget _threadHeader() {
     final agent = _agent;
+    final persona = agent == null ? _persona : null;
     return _glass(
       radius: 32,
       shadow: _shadow(0.14, 16, 8),
@@ -1587,11 +1620,15 @@ class _SupportViewState extends State<AppReferSupportView>
                 ),
               ),
               const SizedBox(width: 10),
+              // Nobody on the team has joined yet: the AI assistant is who's answering.
               SupportAvatar(
-                name: agent,
+                name: persona?.name ?? agent,
                 size: 42,
                 colors: [palette.warm, palette.hot],
-                icon: agent == null ? Icons.forum_rounded : null,
+                icon: persona == null && agent == null
+                    ? Icons.forum_rounded
+                    : null,
+                imageUrl: persona?.avatarUrl,
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -1599,19 +1636,31 @@ class _SupportViewState extends State<AppReferSupportView>
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      agent ?? '$appName team',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                        color: colors.primary,
-                      ),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            persona?.name ?? agent ?? '$appName team',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: colors.primary,
+                            ),
+                          ),
+                        ),
+                        if (persona != null) ...[
+                          const SizedBox(width: 6),
+                          SupportAITag(palette: palette),
+                        ],
+                      ],
                     ),
                     const SizedBox(height: 1),
                     Text(
-                      'Usually replies in ${config.replyTime}',
+                      persona != null
+                          ? '$appName team · replies instantly'
+                          : 'Usually replies in ${config.replyTime}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 12.5, color: colors.muted),
@@ -1631,9 +1680,148 @@ class _SupportViewState extends State<AppReferSupportView>
     final lastOfGroup =
         i == messages.length - 1 || !_sameSide(i, i + 1) || _showsTime(i + 1);
     if (m['from'] == 'customer') return _customerBubble(m, lastOfGroup);
+    final botName = m['from'] == 'bot'
+        ? supportFirstName(m['authorName'] as String?)
+        : null;
+    if (botName != null) {
+      final persona = _persona;
+      final handoff = supportIsHandoff(m);
+      final bubble = _personaBubble(
+        m,
+        botName,
+        persona?.name == botName ? persona?.avatarUrl : null,
+        lastOfGroup || handoff,
+      );
+      if (!handoff) return bubble;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          bubble,
+          const SizedBox(height: 10),
+          _handoffPill(persona?.handoffTo),
+        ],
+      );
+    }
     if (m['from'] == 'bot') return _botCard(m);
     return _teamBubble(m, lastOfGroup);
   }
+
+  /// A message from the AI assistant: its portrait, name and "AI" tag, then the text.
+  Widget _personaBubble(
+    Map<String, dynamic> m,
+    String name,
+    String? imageUrl,
+    bool avatar,
+  ) => Padding(
+    padding: const EdgeInsets.only(right: 40),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        SizedBox(
+          width: 30,
+          height: 30,
+          child: avatar
+              ? SupportAvatar(
+                  name: name,
+                  size: 30,
+                  colors: [palette.warm, palette.hot],
+                  imageUrl: imageUrl,
+                )
+              : null,
+        ),
+        const SizedBox(width: 8),
+        Flexible(
+          child: MergeSemantics(
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(15, 10, 15, 12),
+              decoration: BoxDecoration(
+                color: colors.card,
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(22),
+                  topRight: const Radius.circular(22),
+                  bottomRight: const Radius.circular(22),
+                  bottomLeft: Radius.circular(avatar ? 6 : 22),
+                ),
+                boxShadow: _shadow(0.06, 8, 2),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: colors.primary,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      SupportAITag(palette: palette),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${m['text'] ?? ''}',
+                    style: TextStyle(
+                      fontSize: 16,
+                      height: 1.3,
+                      color: colors.primary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  /// Under the hand-over: who has the conversation now.
+  Widget _handoffPill(String? to) => Center(
+    child: MergeSemantics(
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(5, 5, 12, 5),
+        decoration: ShapeDecoration(
+          color: colors.card,
+          shape: StadiumBorder(
+            side: BorderSide(color: colors.muted.withValues(alpha: 0.18)),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SupportAvatar(
+              name: to,
+              size: 22,
+              colors: [palette.warm, palette.hot],
+              icon: to == null ? Icons.people_alt_rounded : null,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                'Passed to ${to ?? 'the team'} · usually replies in ${config.replyTime}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: colors.muted,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 
   List<String> _imageUrls(Map<String, dynamic> m) => [
     for (final a in (m['attachments'] as List? ?? []))

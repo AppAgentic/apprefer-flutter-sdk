@@ -37,6 +37,59 @@ void main() {
     requests = [];
     minted = 0;
   });
+  test('persona and handoff decode when present, null or missing', () async {
+    final persona = {
+      'name': 'Sam',
+      'avatarUrl': 'https://apprefer.com/api/support/avatar/sam-1a2b.png',
+      'handoffTo': 'Jay',
+    };
+    Object? listPersona = persona, threadPersona;
+    var omit = false;
+    final api = make((r) async {
+      if (r.url.path.endsWith('/session')) return session(r);
+      final body = r.url.path.endsWith('/conversations')
+          ? {'conversations': [], 'persona': listPersona}
+          : {
+              'conversation': {'id': 'c'},
+              'messages': [
+                {'id': 'm1', 'from': 'bot', 'authorName': 'Sam', 'text': 'Hi'},
+                {
+                  'id': 'm2',
+                  'from': 'bot',
+                  'authorName': 'Sam',
+                  'text': 'Passing you on',
+                  'handoff': true,
+                },
+              ],
+              if (!omit) 'persona': threadPersona,
+            };
+      return http.Response(jsonEncode(body), 200);
+    });
+    await api.conversations();
+    expect(
+      api.persona.value,
+      const AppReferSupportPersona(
+        name: 'Sam',
+        avatarUrl: 'https://apprefer.com/api/support/avatar/sam-1a2b.png',
+        handoffTo: 'Jay',
+      ),
+    );
+    // Explicit null: the app's AI isn't answering customers.
+    final thread = await api.thread('c');
+    expect(api.persona.value, isNull);
+    final messages = List<Map<String, dynamic>>.from(thread['messages']);
+    expect(supportIsHandoff(messages[0]), isFalse);
+    expect(supportIsHandoff(messages[1]), isTrue);
+    // Older servers omit the key: same as null.
+    listPersona = {'name': 'Sam', 'avatarUrl': null, 'handoffTo': null};
+    await api.conversations();
+    expect(api.persona.value?.avatarUrl, isNull);
+    expect(api.persona.value?.handoffTo, isNull);
+    omit = true;
+    await api.thread('c');
+    expect(api.persona.value, isNull);
+    expect(AppReferSupportPersona.fromJson({'name': ''}), isNull);
+  });
   test(
     'session headers, profile and mint once; changed identity resends only once',
     () async {

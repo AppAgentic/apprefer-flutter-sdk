@@ -492,4 +492,153 @@ void main() {
     await capture(tester, 'thread-dark-large');
     await tester.pumpWidget(const SizedBox());
   });
+
+  group('AI persona', () {
+    const persona = {'name': 'Sam', 'avatarUrl': null, 'handoffTo': 'Jay'};
+    final botConversation = {
+      ...conversation,
+      'lastFrom': 'bot',
+      'preview': 'Open Settings → Restore purchases',
+    };
+    final botMessages = [
+      messages.first,
+      {
+        'id': 'b1',
+        'from': 'bot',
+        'authorName': 'Sam',
+        'text': 'Open Settings → Restore purchases and it should unlock.',
+        'createdAt': '2026-10-15T12:35:30Z',
+        'attachments': [],
+      },
+      message('c2', '2026-10-15T12:36:00Z', 'Can I get a refund?'),
+      {
+        'id': 'b2',
+        'from': 'bot',
+        'authorName': 'Sam',
+        'text': "I'll get Jay to look at the refund for you.",
+        'createdAt': '2026-10-15T12:36:10Z',
+        'attachments': [],
+        'handoff': true,
+      },
+    ];
+    SupportAPI personaApi(List<Map<String, dynamic>> thread) => fake(
+      (r) async => response(
+        r.url.path.endsWith('/conversations')
+            ? {
+                'conversations': [botConversation],
+                'persona': persona,
+              }
+            : {
+                'conversation': botConversation,
+                'messages': thread,
+                'persona': persona,
+              },
+      ),
+    )..name = 'María';
+
+    testWidgets('home names the assistant', (tester) async {
+      tester.view.physicalSize = const Size(400, 840);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        root(
+          MaterialApp(
+            debugShowCheckedModeBanner: false,
+            home: AppReferSupportView(api: personaApi(botMessages)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Sam replies instantly · Jay and the team in under an hour'),
+        findsOneWidget,
+      );
+      expect(find.text('Message Sam…'), findsOneWidget);
+      // Continue card shows Sam's avatar (initial S) for a bot last message.
+      expect(find.text('S'), findsNWidgets(2));
+      expect(tester.takeException(), isNull);
+      await capture(tester, 'home-persona');
+      await tester.tap(find.text('Report a bug'));
+      await tester.pumpAndSettle();
+      expect(find.text('What went wrong? A screenshot helps.'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('thread: header, AI tags, hand-over pill, no quick replies', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 840);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        root(
+          MaterialApp(
+            debugShowCheckedModeBanner: false,
+            home: AppReferSupportView(
+              api: personaApi(botMessages),
+              conversationId: 'c',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Sam'), findsNWidgets(3)); // header + two bubbles
+      expect(find.text('AI'), findsNWidgets(3));
+      expect(find.bySemanticsLabel('AI assistant'), findsWidgets);
+      expect(find.textContaining('team · replies instantly'), findsOneWidget);
+      expect(
+        find.text('Passed to Jay · usually replies in under an hour'),
+        findsOneWidget,
+      );
+      expect(find.text("👍 Thanks, that's sorted"), findsNothing);
+      expect(find.text('✦ INSTANT ANSWER'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await capture(tester, 'thread-persona');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a teammate in the thread takes the header; chips return', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppReferSupportView(
+            api: personaApi([...botMessages.take(2), messages.last]),
+            conversationId: 'c',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Jay'), findsOneWidget);
+      expect(find.text('Usually replies in under an hour'), findsOneWidget);
+      expect(find.text('AI'), findsOneWidget); // only Sam's bubble
+      expect(find.text("👍 Thanks, that's sorted"), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an unnamed bot message keeps the instant-answer card', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AppReferSupportView(
+            api: personaApi([
+              {
+                'id': 'b',
+                'from': 'bot',
+                'text': 'Try restoring purchases.',
+                'createdAt': '2026-10-15T12:35:30Z',
+              },
+            ]),
+            conversationId: 'c',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('✦ INSTANT ANSWER'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
 }
