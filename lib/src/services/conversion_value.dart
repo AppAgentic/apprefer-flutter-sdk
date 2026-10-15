@@ -94,7 +94,8 @@ class ConversionValue {
         return false;
       final response = await client.post('/api/track/conversion-value', {
         'device_id': await storage.getDeviceId(),
-        'installed_at': await storage.getFirstRunDate(),
+        // UTC with an offset, like iOS: the stored first-run date is local time without one.
+        'installed_at': _utcIso(await storage.getFirstRunDate()),
       });
       final fine = response?['fine'];
       final coarse = response?['coarse'];
@@ -118,4 +119,7 @@ class ConversionValue {
       return false; /* Best effort; retry on a later trigger. */
     }
   }
+
+  static String _utcIso(String stored) =>
+      DateTime.tryParse(stored)?.toUtc().toIso8601String() ?? stored;
 }

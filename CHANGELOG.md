@@ -1,9 +1,8 @@
 ## 0.7.0 - 2026-10-16
 
-- Queue forced conversion checks during an active check, recheck once after 90 seconds when no increase is found, and keep event tracking non-blocking. Include the stored install date for reinstall detection and support SKAdNetwork 3 on iOS 15.0–15.3.
-
 - SKAdNetwork and AdAttributionKit conversion values: the SDK registers each install on first launch and raises its conversion value from AppRefer's first-party data (trial started = 10, paid = 20 + whole dollars, capped at 63; coarse low/medium/high), on launch, activation, trial/revenue events and AppReferBilling purchases, for 35 days. Works for every install whatever its ATT status.
 - New `AppReferSDK.updateConversionValue()` to refresh right after a purchase made outside AppReferBilling.
+- Checks after a purchase made elsewhere once more 90 seconds later (webhooks arrive a moment after the purchase); sends the first-run date so a reinstall starts fresh; iOS 15.0–15.3 use SKAdNetwork 3.
 - README: Info.plist keys to receive postback copies in AppRefer (`NSAdvertisingAttributionReportEndpoint`, `AdAttributionKit.AttributionCopyEndpoint`).
 
 ## 0.6.0

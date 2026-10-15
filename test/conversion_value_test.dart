@@ -120,7 +120,7 @@ void main() {
         expect(r.headers['X-AppRefer-Key'], 'pk_test');
         expect(jsonDecode(r.body), {
           'device_id': await storage.getDeviceId(),
-          'installed_at': await storage.getFirstRunDate(),
+          'installed_at': DateTime.parse(await storage.getFirstRunDate()).toUtc().toIso8601String(),
         });
       }
     },
