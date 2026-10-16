@@ -215,6 +215,28 @@ void main() {
       expect(empty.helpCentreArticles, 0);
     });
 
+    test('mixed APNs environments fail closed on iOS only', () {
+      for (final env in [
+        {'production': false, 'sandbox': true},
+        {'production': true, 'sandbox': false},
+      ]) {
+        final json = {
+          'push': {
+            'ios': {'configured': true, 'verified': true, 'environments': env},
+            'android': {'configured': true, 'verified': true},
+          },
+        };
+        expect(
+          AppReferSupportStatus.fromJson(json, isIOS: true).pushReady,
+          isFalse,
+        );
+        expect(
+          AppReferSupportStatus.fromJson(json, isIOS: false).pushReady,
+          isTrue,
+        );
+      }
+    });
+
     test('pushReady truth table', () {
       AppReferSupportStatus status(
         bool configured,

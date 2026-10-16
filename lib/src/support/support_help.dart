@@ -188,7 +188,13 @@ class AppReferSupportStatus {
   /// platform and the store accepted the credentials (`verified == true`).
   bool get pushReady {
     final channel = isIOS ? ios : android;
-    return channel.configured && channel.verified == true;
+    // Dart cannot infer the signed APNs environment; fail closed if either
+    // environment was explicitly rejected.
+    return channel.configured &&
+        channel.verified == true &&
+        (!isIOS ||
+            (ios.environments?['production'] != false &&
+                ios.environments?['sandbox'] != false));
   }
 
   /// Customers can answer reply emails and their answer reaches the conversation.
