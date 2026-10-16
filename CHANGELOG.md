@@ -1,3 +1,8 @@
+## 0.9.2
+
+- Billing sends no install device id (`appreferId`) or device attribute (`$idfa`, `$idfv`, `$fbAnonId`, `$attConsentStatus`, `$deviceVersion`, `$ip`, `$gpsAdId`) with customers/purchases requests while collection is off (saved, unsaved or turned back on but not yet configured), after reset() until configure/configureResult runs again, or in Billing-only apps. It reuses the Support device id gate (now shared, and Support also respects the "waiting for configure" pause); queued purchases are resent without it while the gate is closed, and Billing then uses apprefer.com rather than trk.apprefer.com. Purchases, restore, entitlements and offerings are unchanged. A customer registered without the device id is linked once after configure.
+- Add `AppReferSDK.support.clearIdentity()`: forgets the Support name, email and app user id, revokes the current Support session through the durable revocation path and starts a new anonymous session (push token and its environment carried over). Conversations from the old session are no longer visible in the app; they stay in the team inbox. Support stays anonymous until the user id changes or reset() runs.
+
 ## 0.9.1
 
 - Migration: after reset(), call configure again for the next user; until then events, attribution and consent reports are paused.

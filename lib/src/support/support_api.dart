@@ -143,6 +143,7 @@ class SupportAPI {
           'support_$currentKey.token',
           'support_$currentKey.profile',
           'support_$currentKey.push',
+          'support_$currentKey.pushEnv',
         ]);
       try {
         await clear(await keys());
@@ -153,6 +154,26 @@ class SupportAPI {
       persona.value = null;
       resumeRevocations();
     });
+  }
+
+  /// Consent withdrawn: revokes the current session through the durable
+  /// revocation list, exactly like [reset], and forgets name and email. The
+  /// next request mints a new session from [profile], which then leaves the
+  /// app user id out, so it keeps no link to the old one. Returns the push
+  /// token registered on the old session (and its environment), so it can
+  /// move to the new one.
+  Future<({String token, String environment})?> clearIdentity() async {
+    final key = apiKey();
+    final push = key == null
+        ? null
+        : await _store(() => _safeRead('support_$key.push'));
+    final environment = key == null || push == null
+        ? null
+        : await _store(() => _safeRead('support_$key.pushEnv'));
+    await reset();
+    return push == null
+        ? null
+        : (token: push, environment: environment ?? 'production');
   }
 
   final _deferredRevocations = <Map<String, dynamic>>[];
@@ -282,13 +303,12 @@ class SupportAPI {
     return {
       // Only after configure in this process: never in Support-only apps, after
       // reset() (until configure runs again) or while collection is off.
-      if (AppReferRegistry.apiKey != null &&
-          !AppReferRegistry.stoppedByReset &&
-          !AppReferRegistry.collectionBlocked &&
-          storage.collectionAllowed() &&
+      if (AppReferRegistry.installLinkAllowed(storage) &&
           storage.existingDeviceId() != null)
         'deviceId': storage.existingDeviceId(),
-      if (storage.getUserId() != null) 'appUserId': storage.getUserId(),
+      // Left out after clearIdentity() until the user id changes.
+      if (!storage.supportIdentityCleared && storage.getUserId() != null)
+        'appUserId': storage.getUserId(),
     };
   }
 
@@ -411,9 +431,19 @@ class SupportAPI {
     }
   }
 
-  Future<void> persistPushToken(String? token, int epoch) => _store(() async {
+  Future<void> persistPushToken(
+    String? token,
+    int epoch, {
+    String? environment,
+  }) => _store(() async {
     if (epoch != _generation) throw SupportException(0, 'Support reset');
     await write('support_${apiKey()}.push', token);
+    // Kept so clearIdentity() re-registers the token for the same APNs
+    // environment after a relaunch.
+    await write(
+      'support_${apiKey()}.pushEnv',
+      token == null ? null : environment,
+    );
   });
 
   Future<List<Map<String, dynamic>>> conversations() async {

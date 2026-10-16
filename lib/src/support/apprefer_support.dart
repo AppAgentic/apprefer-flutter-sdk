@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../services/device_info.dart';
 import '../services/registry.dart';
+import '../services/storage.dart';
 import '../services/logger.dart';
 import 'support_api.dart';
 import 'support_style.dart';
@@ -41,6 +42,36 @@ class AppReferSupport with WidgetsBindingObserver {
       _presentingNavigator?.removeRoute(route);
     _presented = null;
     accountGeneration.value++;
+  }
+
+  /// Removes the account from Support without a full reset, e.g. when the
+  /// user withdraws consent: forgets the name, email and app user id, revokes
+  /// the current Support session and starts a new anonymous one. A registered
+  /// push token moves to the new session and an open help screen closes.
+  /// Conversations from the old session stay in your team inbox but are no
+  /// longer shown in the app. The app user id is not sent to Support again
+  /// until it changes (another account signs in) or `AppReferSDK.reset()`
+  /// runs. Attribution, Billing and the stored user id are untouched.
+  Future<void> clearIdentity() async {
+    final storage = AppReferStorage();
+    await storage.init();
+    await storage.setSupportIdentityCleared(true);
+    final push = await api.clearIdentity();
+    final route = _presented;
+    if (route != null && route.isActive)
+      _presentingNavigator?.removeRoute(route);
+    _presented = null;
+    accountGeneration.value++;
+    if (api.apiKey() == null) return;
+    try {
+      if (push != null) {
+        await registerPushToken(push.token, environment: push.environment);
+      } else {
+        await api.ensureSession();
+      }
+    } catch (_) {
+      // Minted on the next request instead.
+    }
   }
 
   /// Set this to the host MaterialApp navigatorKey for context-free push routing.
@@ -109,7 +140,7 @@ class AppReferSupport with WidgetsBindingObserver {
       'token': token,
       'environment': environment,
     }, epoch);
-    await api.persistPushToken(token, epoch);
+    await api.persistPushToken(token, epoch, environment: environment);
   }
 
   Future<void> removePushToken(String token) async {

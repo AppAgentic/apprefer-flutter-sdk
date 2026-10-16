@@ -310,6 +310,7 @@ class Harness {
     },
     String? apiKey = 'pk_test_1',
     SharedPreferences Function(SharedPreferences prefs)? wrapPrefs,
+    Future<String?> Function()? appreferId,
   }) async {
     SharedPreferences.setMockInitialValues(prefs);
     final real = await SharedPreferences.getInstance();
@@ -331,7 +332,7 @@ class Harness {
       store: st,
       options: BillingEngineOptions(productEntitlements: entitlementsByProduct),
       appUserId: appUserId,
-      appreferId: () async => 'device-1',
+      appreferId: appreferId ?? () async => 'device-1',
       now: () => h.time,
       onChange: (info) => h.published.add(info),
     );

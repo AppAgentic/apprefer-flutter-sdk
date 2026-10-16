@@ -75,12 +75,17 @@ class BillingApiClient {
   /// 100 ms polls while waiting for the SDK key.
   final int keyWaitAttempts;
 
+  /// False while the install may not be linked (collection off, after reset
+  /// until configure): requests then never use the tracking host.
+  final Future<bool> Function()? linkAllowed;
+
   BillingApiClient({
     required List<String> baseUrls,
     required this.apiKey,
     http.Client? client,
     this.timeout = const Duration(seconds: 15),
     this.keyWaitAttempts = 30,
+    this.linkAllowed,
   }) : baseUrls = baseUrls.toSet().toList(),
        _client = client ?? http.Client();
 
@@ -212,7 +217,12 @@ class BillingApiClient {
         baseUrls.length == 2 &&
             baseUrls[0] == 'https://trk.apprefer.com' &&
             baseUrls[1] == 'https://apprefer.com'
-        ? TrackingConsent.hosts(await TrackingConsent.current(), baseUrls)
+        ? TrackingConsent.hosts(
+            await (linkAllowed?.call() ?? Future.value(true))
+                ? await TrackingConsent.current()
+                : 'denied',
+            baseUrls,
+          )
         : baseUrls;
     for (final baseUrl in hosts) {
       final request = makeRequest(endpoint, baseUrl, key);

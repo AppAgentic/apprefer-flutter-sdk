@@ -192,6 +192,32 @@ class BillingEngine {
 
   /// Users whose appreferId/attributes were registered (POST customers) this launch.
   final _registeredUsers = <String>{};
+
+  /// Of those, the ones registered without a device id (collection off, after
+  /// reset, before configure): linked once the gate opens again.
+  final _unlinkedUsers = <String>{};
+
+  /// Attribution and device signals among the customer attributes.
+  static const deviceAttributeKeys = {
+    r'$idfa',
+    r'$idfv',
+    r'$fbAnonId',
+    r'$attConsentStatus',
+    r'$deviceVersion',
+    r'$ip',
+    r'$gpsAdId',
+  };
+
+  /// While the install may not be linked, device signals are dropped, never sent later.
+  static Map<String, String> sendableAttributes(
+    Map<String, String> attributes, {
+    required bool linked,
+  }) => linked
+      ? attributes
+      : {
+          for (final e in attributes.entries)
+            if (!deviceAttributeKeys.contains(e.key)) e.key: e.value,
+        };
   StreamSubscription<List<StorePurchase>>? _updates;
   bool _isDraining = false;
 
@@ -483,17 +509,28 @@ class BillingEngine {
   Future<AppReferCustomerInfo> _fetchFromServer(String user) async {
     await _flushPendingIdentifies();
     final attributes = _storage.pendingAttributes;
+    final deviceId = await _safeAppreferId();
     final needsRegister =
         !_registeredUsers.contains(user) ||
         attributes.isNotEmpty ||
-        _storage.accountToken(user) == null;
+        _storage.accountToken(user) == null ||
+        (deviceId != null && _unlinkedUsers.contains(user));
     final response = await _api.send(
       needsRegister
-          ? CreateCustomer(user, await _safeAppreferId(), attributes)
+          ? CreateCustomer(
+              user,
+              deviceId,
+              sendableAttributes(attributes, linked: deviceId != null),
+            )
           : GetCustomer(user),
     );
     if (needsRegister) {
       _registeredUsers.add(user);
+      if (deviceId == null) {
+        _unlinkedUsers.add(user);
+      } else {
+        _unlinkedUsers.remove(user);
+      }
       _storage.clearSentAttributes(attributes);
     }
     final info = await _accept(response, user);
@@ -796,7 +833,7 @@ class BillingEngine {
           user,
           deviceId,
           fields,
-          attributes,
+          sendableAttributes(attributes, linked: deviceId != null),
           presentedOfferingContext: intent?.presentedOfferingContext,
           bucketId: intent?.bucketId,
         ),
@@ -1374,10 +1411,12 @@ class BillingEngine {
     }
     for (final entry in _queue.entries) {
       try {
+        // A queued device id is sent only while linking is allowed now.
+        final linked = await _safeAppreferId() != null;
         final response = await _api.send(
           RecordPurchase(
             entry.appUserId,
-            entry.appreferId,
+            linked ? entry.appreferId : null,
             entry.storeFields,
             const {},
             restore: entry.restore,
