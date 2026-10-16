@@ -280,7 +280,13 @@ class SupportAPI {
     final storage = AppReferStorage();
     await storage.init();
     return {
-      if (AppReferRegistry.apiKey != null && storage.existingDeviceId() != null)
+      // Only after configure in this process: never in Support-only apps, after
+      // reset() (until configure runs again) or while collection is off.
+      if (AppReferRegistry.apiKey != null &&
+          !AppReferRegistry.stoppedByReset &&
+          !AppReferRegistry.collectionBlocked &&
+          storage.collectionAllowed() &&
+          storage.existingDeviceId() != null)
         'deviceId': storage.existingDeviceId(),
       if (storage.getUserId() != null) 'appUserId': storage.getUserId(),
     };

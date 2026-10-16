@@ -15,6 +15,7 @@ const int _maxRetries = 3;
 const Duration _requestTimeout = Duration(seconds: 10);
 
 class AppReferHttpClient {
+  final bool Function() collectionAllowed;
   final String baseUrl;
   final String? fallbackUrl;
   final String apiKey;
@@ -47,6 +48,7 @@ class AppReferHttpClient {
     String? body,
     bool event = false,
   }) async {
+    if (!collectionAllowed()) throw StateError('Collection disabled');
     final client = http.Client();
     final clients = event ? _eventClients : _clients;
     clients.add(client);
@@ -67,7 +69,8 @@ class AppReferHttpClient {
   Future<EventResponse> eventResponse(Map<String, dynamic> body) async {
     final epoch = _eventGeneration;
     final hosts = _hosts(await TrackingConsent.current());
-    if (epoch != _eventGeneration) return const EventResponse(null);
+    if (epoch != _eventGeneration || !collectionAllowed())
+      return const EventResponse(null);
     try {
       final response = await _send(
         'POST',
@@ -113,10 +116,13 @@ class AppReferHttpClient {
 
   AppReferHttpClient({
     required this.baseUrl,
+    this.collectionAllowed = _alwaysEnabled,
     this.fallbackUrl,
     required this.apiKey,
     required AppReferLogger logger,
   }) : _logger = logger;
+
+  static bool _alwaysEnabled() => true;
 
   Map<String, String> get _headers => {
     'Content-Type': 'application/json',
@@ -135,10 +141,10 @@ class AppReferHttpClient {
     if (body['event_name'] == '_advanced_matching' &&
         !TrackingConsent.allowed(current))
       return null;
-    if (epoch != _generation) return null;
+    if (epoch != _generation || !collectionAllowed()) return null;
     final hosts = _hosts(current);
     final result = await _postWithRetries(hosts.first, path, body);
-    if (epoch != _generation) return null;
+    if (epoch != _generation || !collectionAllowed()) return null;
     if (result != null) return result;
 
     // Fallback: single attempt on fallback URL
@@ -164,7 +170,7 @@ class AppReferHttpClient {
           _logger.debug('POST $path retry $attempt after ${delay.inSeconds}s');
           await Future.delayed(delay);
         }
-        if (epoch != _generation) return null;
+        if (epoch != _generation || !collectionAllowed()) return null;
         _logger.debug('POST $target');
         final response = await _send(
           'POST',
@@ -173,7 +179,7 @@ class AppReferHttpClient {
           body: jsonEncode(body),
         ).timeout(_requestTimeout);
 
-        if (epoch != _generation) return null;
+        if (epoch != _generation || !collectionAllowed()) return null;
         if (response.statusCode >= 200 && response.statusCode < 300) {
           if (response.body.isEmpty) return {};
           return jsonDecode(response.body) as Map<String, dynamic>;
@@ -224,7 +230,7 @@ class AppReferHttpClient {
         body: jsonEncode(body),
       ).timeout(_requestTimeout);
 
-      if (epoch != _generation) return null;
+      if (epoch != _generation || !collectionAllowed()) return null;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         if (response.body.isEmpty) return {};
         return jsonDecode(response.body) as Map<String, dynamic>;
@@ -247,7 +253,7 @@ class AppReferHttpClient {
     final epoch = _generation;
     final hosts = _hosts(await TrackingConsent.current());
     final result = await _getWithRetries(hosts.first, path);
-    if (epoch != _generation) return null;
+    if (epoch != _generation || !collectionAllowed()) return null;
     if (result != null) return result;
 
     // Fallback: single attempt on fallback URL
@@ -269,7 +275,7 @@ class AppReferHttpClient {
           _logger.debug('GET $path retry $attempt after ${delay.inSeconds}s');
           await Future.delayed(delay);
         }
-        if (epoch != _generation) return null;
+        if (epoch != _generation || !collectionAllowed()) return null;
         _logger.debug('GET $target');
         final response = await _send(
           'GET',
@@ -277,7 +283,7 @@ class AppReferHttpClient {
           headers: _headers,
         ).timeout(_requestTimeout);
 
-        if (epoch != _generation) return null;
+        if (epoch != _generation || !collectionAllowed()) return null;
         if (response.statusCode >= 200 && response.statusCode < 300) {
           if (response.body.isEmpty) return {};
           return jsonDecode(response.body) as Map<String, dynamic>;
@@ -321,7 +327,7 @@ class AppReferHttpClient {
         headers: _headers,
       ).timeout(_requestTimeout);
 
-      if (epoch != _generation) return null;
+      if (epoch != _generation || !collectionAllowed()) return null;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         if (response.body.isEmpty) return {};
         return jsonDecode(response.body) as Map<String, dynamic>;
