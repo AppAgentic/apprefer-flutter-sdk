@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'services/tracking_consent.dart';
 import 'services/conversion_value.dart';
 import 'support/apprefer_support.dart';
+import 'billing/billing_storage.dart';
 import 'dart:io';
 
 import 'config.dart';
@@ -129,6 +130,8 @@ class AppReferSDK with WidgetsBindingObserver {
   /// Attribution sends nothing, and Support sends no device id, until configure
   /// is called again.
   static Future<void> reset() async {
+    // Billing's user as of this call: a logIn/logOut while reset() runs wins.
+    final billingIdentity = BillingStorage.identityChanges;
     _accountGeneration++;
     AppReferRegistry.accountEpoch++;
     AppReferRegistry.stoppedByReset = true;
@@ -156,6 +159,14 @@ class AppReferSDK with WidgetsBindingObserver {
       await _accountWrite(() async {
         await AppReferStorage.clearUserIn(prefs);
       });
+    });
+    // Billing keeps serving its user until logIn/logOut: remember who that
+    // was, so a relaunch can't link them to the install.
+    await _ignoreStorage(() async {
+      await BillingStorage.markResetUser(
+        await SharedPreferences.getInstance(),
+        since: billingIdentity,
+      );
     });
     await support.reset();
   }

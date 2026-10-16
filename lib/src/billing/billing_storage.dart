@@ -23,6 +23,19 @@ class BillingStorage {
   static const _pendingIdentifies = 'apprefer_billing_pending_identifies';
   static const _customerInfo = 'apprefer_billing_customer_info';
   static const _productKinds = 'apprefer_billing_product_kinds';
+  static const resetUserKey = 'apprefer_billing_reset_user';
+
+  /// Advances on every `AppReferBilling.logIn`/`logOut` in this process, once
+  /// the id is validated and the new user stored; when `configure(appUserId:)`
+  /// is applied with a different user than the current one (never for the
+  /// same id, which resumes the previous user); and when a first anonymous id
+  /// is minted where there was no user. A reset() marker write that started
+  /// before a change is skipped.
+  static int identityChanges = 0;
+
+  /// The anonymous id `logOut()` minted in this process (null after a
+  /// logIn): a user the app just signed out to, never marked by reset().
+  static String? loggedOutAnonymousId;
   static const pendingPurchasesKey = 'apprefer_billing_pending_purchases';
   static const rejectedPurchasesKey = 'apprefer_billing_rejected_purchases';
   static const purchaseIntentsKey = 'apprefer_billing_purchase_intents';
@@ -111,12 +124,17 @@ class BillingStorage {
   String anonymousId() {
     final existing = _readIdentity(_anonymousId);
     if (existing != null && isAnonymous(existing)) return existing;
+    // A first user where there was none: a reset() running now marks nobody.
+    if (existing == null && prefs.getString(_appUserId) == null) {
+      identityChanges++;
+    }
     return resetAnonymousId();
   }
 
   String resetAnonymousId() {
     final id = '$anonymousPrefix${generateUuidV4().toUpperCase()}';
     _write(_anonymousId, () => prefs.setString(_anonymousId, id));
+    _dropStaleResetUser();
     return id;
   }
 
@@ -130,6 +148,56 @@ class BillingStorage {
     } else {
       _write(_appUserId, () => prefs.setString(_appUserId, value));
     }
+    _dropStaleResetUser();
+  }
+
+  // --- reset() marker ---
+
+  /// Saves the Billing app user id current at `AppReferSDK.reset()` (logged in
+  /// or anonymous), so the account gate survives a relaunch: while it is still
+  /// the current Billing user, that user is never linked to the install.
+  /// Nothing is saved when Billing never stored a user on this install.
+  ///
+  /// [since] is [identityChanges] when reset() was called: if Billing's user
+  /// changed meanwhile (a logIn/logOut while reset() was running), the write
+  /// is skipped, so it never marks the user set after the reset. A fresh
+  /// anonymous id minted by logOut() in this process is never marked either
+  /// (an app that signs out with logOut() before reset()).
+  static Future<void> markResetUser(
+    SharedPreferences prefs, {
+    required int since,
+  }) async {
+    if (identityChanges != since) return;
+    final user = prefs.getString(_appUserId) ?? prefs.getString(_anonymousId);
+    if (user == null || user.isEmpty) return;
+    if (user == loggedOutAnonymousId) {
+      // Used once: a later reset() while this user is still current marks it.
+      loggedOutAnonymousId = null;
+      return;
+    }
+    await prefs.setString(resetUserKey, user);
+  }
+
+  /// The user saved by [markResetUser], or null. Throws
+  /// [AppReferBillingErrorCode.storage] when it can't be read.
+  String? get resetUser => _readIdentity(resetUserKey);
+
+  /// The Billing user changed: a marker naming someone else no longer applies.
+  void _dropStaleResetUser() {
+    try {
+      final marker = prefs.getString(resetUserKey);
+      if (marker == null) return;
+      final user = prefs.getString(_appUserId) ?? prefs.getString(_anonymousId);
+      if (marker != user) prefs.remove(resetUserKey);
+    } catch (_) {}
+  }
+
+  /// Forgets the reset marker (an explicit logIn/logOut, or the Billing user
+  /// is no longer the one it names).
+  void clearResetUser() {
+    try {
+      prefs.remove(resetUserKey);
+    } catch (_) {}
   }
 
   Future<String> offeringsBucketId() async {

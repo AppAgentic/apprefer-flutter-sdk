@@ -115,7 +115,7 @@ void main() {
       expect(push.headers['X-AppRefer-Support-Session'], isNot(old));
       final storage = AppReferStorage();
       await storage.init();
-      expect(storage.supportIdentityCleared, isTrue);
+      expect(await storage.isSupportIdentityCleared(), isTrue);
       expect(storage.getUserId(), 'acct_A');
     }, () => MockClient(server));
   });

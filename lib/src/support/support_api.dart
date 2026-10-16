@@ -240,6 +240,42 @@ class SupportAPI {
     }
   }
 
+  /// [token] is being registered while a pending revocation still holds it
+  /// (moving or not, with or without a saved environment): saves it as the
+  /// current key's push token, flags those revocations to move it with
+  /// [environment] and returns true, so the revocation pass posts it to the
+  /// current session once the old one is revoked. False (nothing changed)
+  /// when no pending revocation of the current key holds it: post it now.
+  Future<bool> deferPushRegistration(
+    String token,
+    int epoch, {
+    required String environment,
+  }) => _store(() async {
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    final key = apiKey();
+    if (key == null) return false;
+    bool holds(Map<String, dynamic> v) =>
+        v['push'] == token && (v['key'] as String? ?? key) == key;
+    final List<Map<String, dynamic>> saved;
+    try {
+      saved = _parseRevocations(await read('apprefer_revocations'));
+    } catch (_) {
+      return false;
+    }
+    final deferred = _deferredRevocations.where(holds).toList();
+    if (!saved.any(holds) && deferred.isEmpty) return false;
+    await write('support_$key.push', token);
+    await write('support_$key.pushEnv', environment);
+    for (final v in [...saved.where(holds), ...deferred]) {
+      v['move'] = true;
+      v['environment'] = environment;
+    }
+    if (saved.any(holds)) {
+      await write('apprefer_revocations', jsonEncode(saved));
+    }
+    return true;
+  });
+
   /// Registers a moved push token on the current session, only if it is
   /// still the one saved on the device (a reset since then cleared it, so it
   /// never reaches the next account). Failures are left to the app's next
@@ -328,12 +364,25 @@ class SupportAPI {
       _revokeAgain = true;
       return running;
     }
-    return _revoking = () async {
-      do {
-        _revokeAgain = false;
-        await _runRevocations();
-      } while (_revokeAgain);
-    }().whenComplete(() => _revoking = null);
+    // The handle is set before the loop starts and cleared in the same step
+    // that decides to stop, so a request can never land after the last
+    // re-run check but before the handle is gone (it would be dropped).
+    final pass = Completer<void>();
+    _revoking = pass.future;
+    () async {
+      try {
+        do {
+          _revokeAgain = false;
+          await _runRevocations();
+        } while (_revokeAgain);
+        _revoking = null;
+        pass.complete();
+      } catch (e, s) {
+        _revoking = null;
+        pass.completeError(e, s);
+      }
+    }();
+    return pass.future;
   }
 
   Future<void> _runRevocations() async {
@@ -375,6 +424,16 @@ class SupportAPI {
       item['attempts'] = attempts;
       await _store(() async {
         final current = await _savedRevocations();
+        // A registerPushToken during the attempt may have flagged the entry
+        // to move its token: keep that, and act on it below.
+        for (final v in current) {
+          if (v['token'] == item['token'] &&
+              v['key'] == item['key'] &&
+              v['move'] == true) {
+            item['move'] = true;
+            item['environment'] = v['environment'];
+          }
+        }
         final remaining = current
             .expand(
               (v) => v['token'] == item['token'] && v['key'] == item['key']
@@ -413,7 +472,7 @@ class SupportAPI {
   static Future<Map<String, dynamic>> defaultProfile() async {
     final storage = AppReferStorage();
     await storage.init();
-    final cleared = storage.supportIdentityCleared;
+    final cleared = await storage.isSupportIdentityCleared();
     return {
       // Only after configure in this process: never in Support-only apps, after
       // reset() (until configure runs again) or while collection is off. Never
@@ -429,10 +488,18 @@ class SupportAPI {
     };
   }
 
+  /// Throws a retryable [SupportException] while the secure store can't be
+  /// read (e.g. before first unlock): no session is minted or adopted under
+  /// an unknown flag, so a session is never marked "minted while cleared" by
+  /// mistake and later retired.
   static Future<bool> defaultIdentityCleared() async {
     final storage = AppReferStorage();
     await storage.init();
-    return storage.supportIdentityCleared;
+    final cleared = await storage.supportIdentityClearedState();
+    if (cleared == null) {
+      throw SupportException(0, 'Support storage is unavailable; try again.');
+    }
+    return cleared;
   }
 
   Future<Map<String, dynamic>> _raw(
@@ -550,6 +617,8 @@ class SupportAPI {
         await _revocation(token, prefix.substring(8), move: true),
       );
       await _saveRevocations();
+      // Only the session it retired: a token saved meanwhile stays.
+      if (await _safeRead('$prefix.token') != token) return;
       for (final slot in ['.token', '.profile', '.cleared']) {
         try {
           await write('$prefix$slot', null);
