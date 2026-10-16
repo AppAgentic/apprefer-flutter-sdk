@@ -240,6 +240,42 @@ class SupportAPI {
     }
   }
 
+  /// [token] is being registered while a pending revocation still holds it
+  /// (moving or not, with or without a saved environment): saves it as the
+  /// current key's push token, flags those revocations to move it with
+  /// [environment] and returns true, so the revocation pass posts it to the
+  /// current session once the old one is revoked. False (nothing changed)
+  /// when no pending revocation of the current key holds it: post it now.
+  Future<bool> deferPushRegistration(
+    String token,
+    int epoch, {
+    required String environment,
+  }) => _store(() async {
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    final key = apiKey();
+    if (key == null) return false;
+    bool holds(Map<String, dynamic> v) =>
+        v['push'] == token && (v['key'] as String? ?? key) == key;
+    final List<Map<String, dynamic>> saved;
+    try {
+      saved = _parseRevocations(await read('apprefer_revocations'));
+    } catch (_) {
+      return false;
+    }
+    final deferred = _deferredRevocations.where(holds).toList();
+    if (!saved.any(holds) && deferred.isEmpty) return false;
+    await write('support_$key.push', token);
+    await write('support_$key.pushEnv', environment);
+    for (final v in [...saved.where(holds), ...deferred]) {
+      v['move'] = true;
+      v['environment'] = environment;
+    }
+    if (saved.any(holds)) {
+      await write('apprefer_revocations', jsonEncode(saved));
+    }
+    return true;
+  });
+
   /// Registers a moved push token on the current session, only if it is
   /// still the one saved on the device (a reset since then cleared it, so it
   /// never reaches the next account). Failures are left to the app's next
@@ -375,6 +411,16 @@ class SupportAPI {
       item['attempts'] = attempts;
       await _store(() async {
         final current = await _savedRevocations();
+        // A registerPushToken during the attempt may have flagged the entry
+        // to move its token: keep that, and act on it below.
+        for (final v in current) {
+          if (v['token'] == item['token'] &&
+              v['key'] == item['key'] &&
+              v['move'] == true) {
+            item['move'] = true;
+            item['environment'] = v['environment'];
+          }
+        }
         final remaining = current
             .expand(
               (v) => v['token'] == item['token'] && v['key'] == item['key']

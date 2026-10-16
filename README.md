@@ -21,7 +21,10 @@ The device id also belongs to the account: after `reset()` Billing sends it only
 for the Billing user set after that reset, so the user Billing served before it
 (and purchases or queued entries owned by them, or by anyone other than the current
 Billing user) is never linked to the install. Call `AppReferBilling.logIn(…)` (or
-`logOut()`) for the next account after `reset()`. `logIn` tells the server
+`logOut()`) for the next account after `reset()`. Since 0.9.3 this also holds after
+the app is relaunched: `reset()` saves the Billing user it left behind, and until
+`logIn`/`logOut` runs (or Billing moves to a different user) that user gets no device
+id, no re-link and `link: false` on identify. `logIn` tells the server
 (`link: false` with identify) not to copy the attribution link while the gate is
 closed; the purchases still move to the signed-in user.
 
@@ -38,7 +41,8 @@ anonymous session that carries no link to the old id: it sends neither the app u
 id nor the install device id. A registered push token moves to the new session only
 after the old session's revocation succeeded, so the two never hold it at the same
 time (a token registered before 0.9.2 has no saved environment and is not moved; the
-app's next `registerPushToken` registers it again). An open help screen closes. **Conversations from the old
+app's next `registerPushToken` registers it, and from 0.9.3 that registration also
+waits for the old session's revocation when the old session still holds the token). An open help screen closes. **Conversations from the old
 session are no longer visible in the app**; they stay in your team inbox. The app
 user id is not sent to Support again until it changes (another account is stored
 with `setUserId`/`configure(userId: …)`) or `reset()` runs; configuring with the
@@ -132,7 +136,7 @@ dependencies:
   apprefer:
     git:
       url: https://github.com/AppAgentic/apprefer-flutter-sdk.git
-      ref: 0.9.2
+      ref: 0.9.3
 ```
 
 Then run `flutter pub get`.

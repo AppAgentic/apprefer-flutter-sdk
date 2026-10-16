@@ -1565,6 +1565,8 @@ class BillingEngine {
     }
     _applyPendingConfigure();
     _identityEpoch = _observeEpoch();
+    // The app says who the user is now, even when it is the same id.
+    _storage.clearResetUser();
     if (appUserId != _storage.currentAppUserId) {
       if (_storage.loggedInAppUserId == null) {
         _storage.addPendingIdentify((
@@ -1585,6 +1587,7 @@ class BillingEngine {
   Future<AppReferCustomerInfo> logOut() async {
     _applyPendingConfigure();
     _identityEpoch = _observeEpoch();
+    _storage.clearResetUser();
     _storage.loggedInAppUserId = null;
     _storage.resetAnonymousId();
     _lastServerFetch = null;
@@ -1615,7 +1618,7 @@ class BillingEngine {
             Identify(
               pending.anonymousId,
               pending.appUserId,
-              link: await _safeLinkAllowed(),
+              link: !_servingResetUser() && await _safeLinkAllowed(),
             ),
           );
         } on AppReferBillingException catch (e) {
@@ -1659,15 +1662,36 @@ class BillingEngine {
     return epoch;
   }
 
+  /// True while Billing still serves the user that was current at the last
+  /// `AppReferSDK.reset()`, as saved on disk (so it holds across relaunches).
+  /// A marker naming another user is stale and is removed. An unreadable
+  /// marker or identity counts as true: nothing is linked.
+  bool _servingResetUser() {
+    final String? marker;
+    try {
+      marker = _storage.resetUser;
+    } on AppReferBillingException {
+      return true;
+    }
+    if (marker == null) return false;
+    final current = currentAppUserId;
+    if (current.isEmpty) return true;
+    if (marker == current) return true;
+    _storage.clearResetUser();
+    return false;
+  }
+
   /// The install device id for a request owned by [owner]: only when [owner]
   /// is the current Billing user, given to Billing (creation, logIn or
-  /// logOut) after the last reset(), and the gate is open; otherwise null.
+  /// logOut) after the last reset() in this process and not the user saved
+  /// at a reset() before a relaunch, and the gate is open; otherwise null.
   Future<String?> _linkableDeviceId(String? owner) async {
     final epoch = _observeEpoch();
     if (owner == null ||
         owner.isEmpty ||
         _identityEpoch != epoch ||
-        owner != currentAppUserId) {
+        owner != currentAppUserId ||
+        _servingResetUser()) {
       return null;
     }
     return _safeAppreferId();

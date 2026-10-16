@@ -23,6 +23,7 @@ class BillingStorage {
   static const _pendingIdentifies = 'apprefer_billing_pending_identifies';
   static const _customerInfo = 'apprefer_billing_customer_info';
   static const _productKinds = 'apprefer_billing_product_kinds';
+  static const resetUserKey = 'apprefer_billing_reset_user';
   static const pendingPurchasesKey = 'apprefer_billing_pending_purchases';
   static const rejectedPurchasesKey = 'apprefer_billing_rejected_purchases';
   static const purchaseIntentsKey = 'apprefer_billing_purchase_intents';
@@ -117,6 +118,7 @@ class BillingStorage {
   String resetAnonymousId() {
     final id = '$anonymousPrefix${generateUuidV4().toUpperCase()}';
     _write(_anonymousId, () => prefs.setString(_anonymousId, id));
+    _dropStaleResetUser();
     return id;
   }
 
@@ -130,6 +132,41 @@ class BillingStorage {
     } else {
       _write(_appUserId, () => prefs.setString(_appUserId, value));
     }
+    _dropStaleResetUser();
+  }
+
+  // --- reset() marker ---
+
+  /// Saves the Billing app user id current at `AppReferSDK.reset()` (logged in
+  /// or anonymous), so the account gate survives a relaunch: while it is still
+  /// the current Billing user, that user is never linked to the install.
+  /// Nothing is saved when Billing never stored a user on this install.
+  static Future<void> markResetUser(SharedPreferences prefs) async {
+    final user = prefs.getString(_appUserId) ?? prefs.getString(_anonymousId);
+    if (user == null || user.isEmpty) return;
+    await prefs.setString(resetUserKey, user);
+  }
+
+  /// The user saved by [markResetUser], or null. Throws
+  /// [AppReferBillingErrorCode.storage] when it can't be read.
+  String? get resetUser => _readIdentity(resetUserKey);
+
+  /// The Billing user changed: a marker naming someone else no longer applies.
+  void _dropStaleResetUser() {
+    try {
+      final marker = prefs.getString(resetUserKey);
+      if (marker == null) return;
+      final user = prefs.getString(_appUserId) ?? prefs.getString(_anonymousId);
+      if (marker != user) prefs.remove(resetUserKey);
+    } catch (_) {}
+  }
+
+  /// Forgets the reset marker (an explicit logIn/logOut, or the Billing user
+  /// is no longer the one it names).
+  void clearResetUser() {
+    try {
+      prefs.remove(resetUserKey);
+    } catch (_) {}
   }
 
   Future<String> offeringsBucketId() async {

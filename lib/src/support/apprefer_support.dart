@@ -133,10 +133,14 @@ class AppReferSupport with WidgetsBindingObserver {
   }) async {
     final epoch = api.actionGeneration;
     await supportChannel.invokeMethod<void>('notificationChannel');
-    if (await api.pushMovePending(token)) {
-      // Still on a session being revoked: it moves once that succeeded, so
-      // the old and new sessions never hold it at the same time.
-      await api.persistPushToken(token, epoch, environment: environment);
+    if (await api.deferPushRegistration(
+      token,
+      epoch,
+      environment: environment,
+    )) {
+      // Still on a session being revoked (also a token saved before 0.9.2
+      // without its environment): it moves once that revocation succeeded,
+      // so the old and new sessions never hold it at the same time.
       api.resumeRevocations();
       return;
     }

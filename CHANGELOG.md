@@ -1,3 +1,9 @@
+## 0.9.3
+
+- Billing's account gate now survives a relaunch: reset() saves the Billing app user id that was current then (anonymous or not) as `apprefer_billing_reset_user`, next to Billing's own user id. While Billing still serves that user, customers/purchases requests carry no install device id or device attributes, there is no one-time re-link, and identify sends `link: false`. Any explicit `AppReferBilling.logIn(…)` (even with the same id) or `logOut()`, or a change to a different Billing user, clears it. Nothing is saved when Billing was never configured.
+- registerPushToken with a token that a pending Support session revocation still holds (including tokens saved by 0.9.1 without an environment) no longer posts it at once: the revocation is flagged to move the token with the environment now known, and it is registered on the current session only after the old session is revoked.
+- The Support revocation pass already runs again when a revocation is queued during a pass (clearIdentity(), or a cleared session retired), and the "minted while cleared" marker is already kept in the secure store next to the session token; no change needed in this SDK.
+
 ## 0.9.2
 
 - Billing sends no install device id (`appreferId`) or device attribute (`$idfa`, `$idfv`, `$fbAnonId`, `$attConsentStatus`, `$deviceVersion`, `$ip`, `$gpsAdId`) with customers/purchases requests while collection is off (saved, unsaved or turned back on but not yet configured), after reset() until configure/configureResult runs again, or in Billing-only apps. It reuses the Support device id gate (now shared, and Support also respects the "waiting for configure" pause); queued purchases are resent without it while the gate is closed, and Billing then uses apprefer.com rather than trk.apprefer.com. Purchases, restore, entitlements and offerings are unchanged. A customer registered without the device id is linked once after configure.
