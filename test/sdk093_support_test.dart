@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:apprefer/apprefer.dart';
 import 'package:apprefer/src/services/storage.dart';
+import 'package:apprefer/src/support/support_api.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -184,6 +185,97 @@ void main() {
       final storage = AppReferStorage();
       await storage.init();
       expect(await storage.isSupportIdentityCleared(), isTrue);
+    });
+  });
+
+  group('Round 3 E5/E6', () {
+    const flag = 'apprefer_support_identity_cleared';
+    var flagReadFails = false;
+    var flagClearFails = false;
+    setUp(() {
+      flagReadFails = false;
+      flagClearFails = false;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            switch (call.method) {
+              case 'read':
+                if (call.arguments == flag && flagReadFails) {
+                  throw PlatformException(code: 'secure_storage');
+                }
+                return secure[call.arguments as String];
+              case 'write':
+                final args = Map<String, dynamic>.from(call.arguments as Map);
+                final value = args['value'] as String?;
+                if (args['key'] == flag && value == null && flagClearFails) {
+                  throw PlatformException(code: 'secure_storage');
+                }
+                if (value == null) {
+                  secure.remove(args['key']);
+                } else {
+                  secure[args['key'] as String] = value;
+                }
+                return null;
+              case 'keys':
+                return secure.keys.toList();
+            }
+            return null;
+          });
+    });
+
+    test('E5: an unreadable cleared flag mints or adopts no session, so the '
+        'real session is never marked cleared or retired', () async {
+      await http.runWithClient(() async {
+        final support = AppReferSDK.support;
+        support.configure(apiKey: 'pk_support');
+        support.api.name = null;
+        support.api.email = null;
+        secure['support_pk_support.token'] = 'ars_real';
+        secure['support_pk_support.profile'] = '{"appUserId":"acct_A"}';
+        flagReadFails = true;
+        await expectLater(
+          support.api.conversations(),
+          throwsA(isA<SupportException>()),
+        );
+        expect(requests.where((r) => r.url.path.endsWith('/session')), isEmpty);
+        expect(secure.containsKey('support_pk_support.cleared'), isFalse);
+        expect(secure['support_pk_support.token'], 'ars_real');
+
+        flagReadFails = false; // unlocked
+        await support.api.conversations();
+        await settle();
+        expect(deleteOf('ars_real'), -1);
+        expect(
+          requests
+              .lastWhere((r) => r.method == 'GET')
+              .headers['X-AppRefer-Support-Session'],
+          'ars_real',
+        );
+      }, () => MockClient(server));
+    });
+
+    test('E6: setUserId and configure(userId:) never throw when the flag '
+        'cannot be removed; Support stays anonymous', () async {
+      secure[flag] = '1';
+      flagClearFails = true;
+      await AppReferSDK.setUserId('acct_B');
+      final storage = AppReferStorage();
+      await storage.init();
+      expect(storage.getUserId(), isNull, reason: 'not stored for Support');
+      expect(secure[flag], '1', reason: 'still cleared');
+      expect(
+        (await SupportAPI.defaultProfile()).containsKey('appUserId'),
+        isFalse,
+      );
+      final attribution = http.runWithClient(
+        () => AppReferSDK.configure(
+          const AppReferConfig(apiKey: 'pk_test', userId: 'acct_C'),
+        ),
+        () =>
+            MockClient((r) async => http.Response('{"attribution":null}', 200)),
+      );
+      await expectLater(attribution, completes);
+      expect(storage.getUserId(), isNull);
+      await AppReferSDK.disposeForTesting();
     });
   });
 }

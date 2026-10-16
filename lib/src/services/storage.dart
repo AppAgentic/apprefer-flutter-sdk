@@ -140,6 +140,10 @@ class AppReferStorage {
   /// store next to the session token (see [SupportIdentityFlag]).
   static const keySupportIdentityCleared = SupportIdentityFlag.key;
   Future<bool> isSupportIdentityCleared() => SupportIdentityFlag.read(_prefs);
+
+  /// Null when the secure store can't be read (see [SupportIdentityFlag]).
+  Future<bool?> supportIdentityClearedState() =>
+      SupportIdentityFlag.readState(_prefs);
   Future<void> setSupportIdentityCleared(bool value) => value
       ? SupportIdentityFlag.set(_prefs)
       : SupportIdentityFlag.clear(_prefs);
@@ -157,9 +161,16 @@ class AppReferStorage {
     String userId,
   ) async {
     if (prefs.getString(_keyUserId) != userId) {
-      // Throws if the flag can't be removed: the new id is then not stored,
-      // so a cleared session is never handed to it.
-      await SupportIdentityFlag.clear(prefs);
+      try {
+        await SupportIdentityFlag.clear(prefs);
+      } catch (_) {
+        // The clear can't be ended: the new id is not stored (and the old
+        // one is dropped), so Support stays anonymous on the cleared session
+        // and it is never handed to the new account. Never thrown to the
+        // app: configure and attribution go on; the next write tries again.
+        await prefs.remove(_keyUserId);
+        return;
+      }
     }
     await prefs.setString(_keyUserId, userId);
   }

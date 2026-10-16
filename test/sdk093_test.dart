@@ -234,6 +234,68 @@ void main() {
     },
   );
 
+  group('Round 3. the identity counter and the logOut exemption', () {
+    test('E1: a logIn that fails on storage does not cancel the marker of a '
+        'running reset()', () async {
+      late FlakyPrefs flaky;
+      final h = await Harness.create(
+        appUserId: 'alice',
+        server: FakeServer()..online(),
+        wrapPrefs: (p) => flaky = FlakyPrefs(p),
+      );
+      expect(h.engine.currentAppUserId, 'alice');
+      final resetting = AppReferSDK.reset();
+      flaky.unreadable.add('apprefer_billing_app_user_id');
+      await expectLater(
+        h.engine.logIn('bob'),
+        throwsA(isA<AppReferBillingException>()),
+      );
+      await expectLater(
+        h.engine.logIn(''),
+        throwsA(isA<AppReferBillingException>()),
+      );
+      await resetting;
+      expect((await disk())[marker], 'alice');
+    });
+
+    test('E3: configure(appUserId:) applied during reset() with the same id '
+        'leaves the user marked; a different id is not marked', () async {
+      for (final (configured, expected) in [
+        ('alice', 'alice'),
+        ('bob', null),
+      ]) {
+        late FlakyPrefs flaky;
+        final h = await Harness.create(
+          prefs: {'apprefer_billing_app_user_id': 'alice'},
+          appUserId: configured,
+          server: FakeServer()..online(),
+          wrapPrefs: (p) =>
+              flaky = FlakyPrefs(p)
+                ..unreadable.add('apprefer_billing_app_user_id'),
+        );
+        final resetting = AppReferSDK.reset();
+        flaky.unreadable.clear();
+        expect(h.engine.currentAppUserId, configured); // applied now
+        await resetting;
+        expect((await disk())[marker], expected, reason: configured);
+      }
+    });
+
+    test('E4: the logOut exemption is used once; a second reset() with that '
+        'user still current marks it', () async {
+      final h = await Harness.create(
+        appUserId: 'alice',
+        server: FakeServer()..online(),
+      );
+      await h.engine.logOut();
+      final fresh = h.engine.currentAppUserId;
+      await AppReferSDK.reset();
+      expect((await disk()).containsKey(marker), isFalse);
+      await AppReferSDK.reset();
+      expect((await disk())[marker], fresh);
+    });
+  });
+
   group('Fix 3. a re-registered push token held by a pending revocation', () {
     late Map<String, String> secure;
     late List<http.Request> requests;

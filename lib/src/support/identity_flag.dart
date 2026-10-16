@@ -15,7 +15,13 @@ class SupportIdentityFlag {
 
   /// Whether the identity is cleared. A secure store that can't be read (e.g.
   /// before first unlock) reads as cleared: nothing linking is sent.
-  static Future<bool> read(SharedPreferences prefs) async {
+  static Future<bool> read(SharedPreferences prefs) async =>
+      await readState(prefs) ?? true;
+
+  /// Like [read], but null when the secure store can't be read (or the 0.9.2
+  /// copy can't be moved): unknown, so no Support session is minted or
+  /// adopted on it.
+  static Future<bool?> readState(SharedPreferences prefs) async {
     bool legacy;
     try {
       legacy = prefs.getBool(key) ?? false;
@@ -28,7 +34,7 @@ class SupportIdentityFlag {
     } on MissingPluginException {
       return legacy;
     } catch (_) {
-      return true;
+      return null;
     }
     if (!legacy) return stored == '1';
     if (stored != '1') {

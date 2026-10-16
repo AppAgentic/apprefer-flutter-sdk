@@ -339,9 +339,13 @@ class BillingEngine {
           appUserId: appUserId,
         ));
       }
-      storage.loggedInAppUserId = BillingStorage.isAnonymous(appUserId)
-          ? null
-          : appUserId;
+      final next = BillingStorage.isAnonymous(appUserId) ? null : appUserId;
+      if (next != storage.loggedInAppUserId) {
+        storage.loggedInAppUserId = next;
+        // A different user than the current one (the one a running reset()
+        // would mark): that reset() marks nobody. The same id never counts.
+        BillingStorage.identityChanges++;
+      }
     }
     _pendingConfigure = null;
   }
@@ -1565,10 +1569,6 @@ class BillingEngine {
     }
     _applyPendingConfigure();
     _identityEpoch = _observeEpoch();
-    // The app says who the user is now, even when it is the same id.
-    _storage.clearResetUser();
-    BillingStorage.identityChanges++;
-    BillingStorage.loggedOutAnonymousId = null;
     if (appUserId != _storage.currentAppUserId) {
       if (_storage.loggedInAppUserId == null) {
         _storage.addPendingIdentify((
@@ -1580,6 +1580,12 @@ class BillingEngine {
       _lastServerFetch = null;
       _invalidateOfferings();
     }
+    // Only once the id was validated and stored (a logIn that throws above
+    // changes nothing, so a running reset() still marks the current user).
+    // The app says who the user is now, even when it is the same id.
+    _storage.clearResetUser();
+    BillingStorage.identityChanges++;
+    BillingStorage.loggedOutAnonymousId = null;
     final info = await customerInfo(FetchPolicy.fetchCurrent);
     Timer.run(() => unawaited(migrationSync(appUserId)));
     return info;
@@ -1589,10 +1595,12 @@ class BillingEngine {
   Future<AppReferCustomerInfo> logOut() async {
     _applyPendingConfigure();
     _identityEpoch = _observeEpoch();
+    _storage.loggedInAppUserId = null;
+    final minted = _storage.resetAnonymousId();
+    // Counted only after the new user is stored.
     _storage.clearResetUser();
     BillingStorage.identityChanges++;
-    _storage.loggedInAppUserId = null;
-    BillingStorage.loggedOutAnonymousId = _storage.resetAnonymousId();
+    BillingStorage.loggedOutAnonymousId = minted;
     _lastServerFetch = null;
     _invalidateOfferings();
     return customerInfo(FetchPolicy.fetchCurrent);

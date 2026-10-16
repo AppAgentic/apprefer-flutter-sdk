@@ -488,10 +488,18 @@ class SupportAPI {
     };
   }
 
+  /// Throws a retryable [SupportException] while the secure store can't be
+  /// read (e.g. before first unlock): no session is minted or adopted under
+  /// an unknown flag, so a session is never marked "minted while cleared" by
+  /// mistake and later retired.
   static Future<bool> defaultIdentityCleared() async {
     final storage = AppReferStorage();
     await storage.init();
-    return storage.isSupportIdentityCleared();
+    final cleared = await storage.supportIdentityClearedState();
+    if (cleared == null) {
+      throw SupportException(0, 'Support storage is unavailable; try again.');
+    }
+    return cleared;
   }
 
   Future<Map<String, dynamic>> _raw(
@@ -609,6 +617,8 @@ class SupportAPI {
         await _revocation(token, prefix.substring(8), move: true),
       );
       await _saveRevocations();
+      // Only the session it retired: a token saved meanwhile stays.
+      if (await _safeRead('$prefix.token') != token) return;
       for (final slot in ['.token', '.profile', '.cleared']) {
         try {
           await write('$prefix$slot', null);

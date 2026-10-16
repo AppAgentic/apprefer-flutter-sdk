@@ -25,9 +25,12 @@ class BillingStorage {
   static const _productKinds = 'apprefer_billing_product_kinds';
   static const resetUserKey = 'apprefer_billing_reset_user';
 
-  /// Advances whenever the Billing user changes in this process (logIn,
-  /// logOut, a different stored user). A reset() marker write that started
-  /// before such a change is skipped.
+  /// Advances on every `AppReferBilling.logIn`/`logOut` in this process, once
+  /// the id is validated and the new user stored; when `configure(appUserId:)`
+  /// is applied with a different user than the current one (never for the
+  /// same id, which resumes the previous user); and when a first anonymous id
+  /// is minted where there was no user. A reset() marker write that started
+  /// before a change is skipped.
   static int identityChanges = 0;
 
   /// The anonymous id `logOut()` minted in this process (null after a
@@ -121,12 +124,15 @@ class BillingStorage {
   String anonymousId() {
     final existing = _readIdentity(_anonymousId);
     if (existing != null && isAnonymous(existing)) return existing;
+    // A first user where there was none: a reset() running now marks nobody.
+    if (existing == null && prefs.getString(_appUserId) == null) {
+      identityChanges++;
+    }
     return resetAnonymousId();
   }
 
   String resetAnonymousId() {
     final id = '$anonymousPrefix${generateUuidV4().toUpperCase()}';
-    identityChanges++;
     _write(_anonymousId, () => prefs.setString(_anonymousId, id));
     _dropStaleResetUser();
     return id;
@@ -137,11 +143,6 @@ class BillingStorage {
   String? get loggedInAppUserId => _readIdentity(_appUserId);
 
   set loggedInAppUserId(String? value) {
-    try {
-      if (prefs.getString(_appUserId) != value) identityChanges++;
-    } catch (_) {
-      identityChanges++;
-    }
     if (value == null) {
       _write(_appUserId, () => prefs.remove(_appUserId));
     } else {
@@ -168,7 +169,12 @@ class BillingStorage {
   }) async {
     if (identityChanges != since) return;
     final user = prefs.getString(_appUserId) ?? prefs.getString(_anonymousId);
-    if (user == null || user.isEmpty || user == loggedOutAnonymousId) return;
+    if (user == null || user.isEmpty) return;
+    if (user == loggedOutAnonymousId) {
+      // Used once: a later reset() while this user is still current marks it.
+      loggedOutAnonymousId = null;
+      return;
+    }
     await prefs.setString(resetUserKey, user);
   }
 
