@@ -21,6 +21,14 @@ class AppReferStorage {
     _collectionPaused = true;
   }
 
+  /// The app saved "off".
+  bool collectionSavedOff() =>
+      _prefs.getBool('apprefer_collection_enabled') == false;
+
+  /// Only a saved "off" or the server kill switch clears queued events, never a pause alone.
+  bool shouldDiscardEvents() =>
+      collectionSavedOff() || (_prefs.getBool(_keySdkEnabled) ?? true) == false;
+
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
   }

@@ -199,6 +199,16 @@ class AppReferSDK with WidgetsBindingObserver {
         epoch != _collectionGeneration ||
         prefs.getBool('apprefer_collection_enabled') == false) {
       AppReferRegistry.apiKey = config.apiKey;
+      // Stored even while collection is off, so Support uses this account, not the last one.
+      final userId = config.userId;
+      if (userId != null) {
+        await _ignoreStorage(
+          () => _accountWrite(() async {
+            if (accountEpoch == _accountGeneration)
+              await prefs.setString('apprefer_user_id', userId);
+          }),
+        );
+      }
       return Attribution.fromJsonString(
         prefs.getString('apprefer_attribution_cache'),
       );
@@ -214,7 +224,20 @@ class AppReferSDK with WidgetsBindingObserver {
 
   /// Persistently pause attribution and analytics. Support and Billing stay available.
   /// Enabling takes effect on the next configure.
+  ///
+  /// Calling it with `true` while collection is already on changes nothing. It
+  /// never throws: if the choice can't be saved, collection still stops for
+  /// this session.
   static Future<void> setCollectionEnabled(bool enabled) async {
+    if (enabled && !_collectionBlocked && !_needsCollectionConfigure) {
+      // Already on (unless an earlier launch saved "off"): a consent tool
+      // reporting "granted" on every launch changes nothing.
+      try {
+        await _collectionWrites;
+        final prefs = await SharedPreferences.getInstance();
+        if (prefs.getBool('apprefer_collection_enabled') != false) return;
+      } catch (_) {}
+    }
     _collectionGeneration++;
     _collectionBlocked = !enabled;
     _needsCollectionConfigure = true;
@@ -233,8 +256,9 @@ class AppReferSDK with WidgetsBindingObserver {
         throw StateError('Cannot persist collection setting');
     });
     _collectionWrites = write.then<void>((_) {}, onError: (Object _) {});
-    if (!enabled) await clearPendingEvents();
-    await write;
+    // Applied in memory above even when saving fails: err on not collecting.
+    if (!enabled) await _ignoreStorage(clearPendingEvents);
+    await _ignoreStorage(() => write);
   }
 
   static Future<Attribution?> _configureEnabled(AppReferConfig config) {
@@ -297,11 +321,13 @@ class AppReferSDK with WidgetsBindingObserver {
         sdk._httpClient.eventResponse,
         sdk._storage.isSdkEnabled,
         held: () => AppReferRegistry.stoppedByReset,
+        discard: sdk._storage.shouldDiscardEvents,
       );
     } else {
       _eventQueue!.replace(
         sdk._httpClient.eventResponse,
         sdk._storage.isSdkEnabled,
+        discard: sdk._storage.shouldDiscardEvents,
       );
     }
     sdk._events = _eventQueue!;
@@ -511,7 +537,7 @@ class AppReferSDK with WidgetsBindingObserver {
       if (AppReferRegistry.stoppedByReset) return AppReferEventResult.dropped;
       final epoch = sdk._generation;
       if (!sdk._storage.isSdkEnabled()) {
-        await sdk._events.clear();
+        if (sdk._storage.shouldDiscardEvents()) await sdk._events.clear();
         return AppReferEventResult.dropped;
       }
 
@@ -763,13 +789,26 @@ class AppReferSDK with WidgetsBindingObserver {
 
   /// Get cached attribution result (instant, no network call).
   static Future<Attribution?> getAttribution() async {
+    if (_instance == null && AppReferRegistry.apiKey != null) {
+      // Configured while collection is off: the stored result, like iOS/Android.
+      final prefs = await SharedPreferences.getInstance();
+      return Attribution.fromJsonString(
+        prefs.getString('apprefer_attribution_cache'),
+      );
+    }
     return _getCachedAttribution();
   }
 
   /// Get the AppRefer device ID (for setting as RC subscriber attribute).
   static Future<String?> getDeviceId() async {
     final sdk = _instance;
-    if (sdk == null) return null;
+    if (sdk == null) {
+      if (AppReferRegistry.apiKey == null) return null;
+      // Configured while collection is off: the stored id, like iOS/Android.
+      final storage = AppReferStorage();
+      await storage.init();
+      return storage.existingDeviceId();
+    }
     return sdk._storage.getDeviceId();
   }
 

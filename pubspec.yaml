@@ -26,6 +26,8 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   fake_async: ^1.3.3
+  # Test-only: a preferences store whose writes fail (setCollectionEnabled never throws).
+  shared_preferences_platform_interface: ^2.4.0
   flutter_lints: ^4.0.0
 
 flutter:

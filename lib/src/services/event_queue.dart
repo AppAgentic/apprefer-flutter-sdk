@@ -13,8 +13,17 @@ enum AppReferEventResult { sent, queued, dropped }
 
 /// Durable, at-least-once product delivery. Transport must make one attempt.
 class EventQueue {
-  EventQueue(this.send, this.enabled, {bool Function()? held})
-    : held = held ?? (() => false);
+  EventQueue(
+    this.send,
+    this.enabled, {
+    bool Function()? held,
+    bool Function()? discard,
+  }) : held = held ?? (() => false),
+       discard = discard ?? (() => true);
+
+  /// When sending is not allowed, whether the queue is wiped (saved "off", kill
+  /// switch) or kept (a pause waiting for configure).
+  bool Function() discard;
   Future<dynamic> Function(Map<String, dynamic>) send;
   bool Function() enabled;
 
@@ -22,13 +31,15 @@ class EventQueue {
   final bool Function() held;
   void replace(
     Future<dynamic> Function(Map<String, dynamic>) send,
-    bool Function() enabled,
-  ) {
+    bool Function() enabled, {
+    bool Function()? discard,
+  }) {
     _generation++;
     _running = false;
     _timer?.cancel();
     this.send = send;
     this.enabled = enabled;
+    this.discard = discard ?? (() => true);
   }
 
   static const key = 'apprefer_pending_events';
@@ -95,7 +106,7 @@ class EventQueue {
   Future<AppReferEventResult> enqueue(Map<String, dynamic> body) async {
     try {
       if (!enabled()) {
-        await clear();
+        if (discard()) await clear();
         return AppReferEventResult.dropped;
       }
       final epoch = _generation;
@@ -146,7 +157,7 @@ class EventQueue {
   Future<Map<String, int>> flush({String? only}) async {
     final results = <String, int>{};
     if (!enabled()) {
-      await clear();
+      if (discard()) await clear();
       return results;
     }
     if (held() || _running) return results;

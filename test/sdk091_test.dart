@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 class ClosingClient091 extends http.BaseClient {
   ClosingClient091(this.handler);
@@ -40,6 +41,14 @@ class ClosingClient091 extends http.BaseClient {
   void close() {
     closed = true;
   }
+}
+
+/// A preferences store whose writes fail, like a full disk.
+class FailingWrites091 extends InMemorySharedPreferencesStore {
+  FailingWrites091() : super.empty();
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async =>
+      false;
 }
 
 void main() {
@@ -472,5 +481,139 @@ void main() {
       await supportApi(sessions).conversations();
       expect(sessions.single, isNot(contains('deviceId')));
     });
+  });
+
+  group('review fixes', () {
+    test('enabling while already on is a no-op and keeps the queue', () async {
+      await http.runWithClient(
+        () async {
+          await AppReferSDK.configure(config);
+          expect(
+            await AppReferSDK.trackEventResult('kept'),
+            AppReferEventResult.queued,
+          );
+          // e.g. a consent tool reporting "granted" on every launch
+          await AppReferSDK.setCollectionEnabled(true);
+          expect(
+            await AppReferSDK.trackEventResult('still-collecting'),
+            AppReferEventResult.queued,
+          );
+          final prefs = await SharedPreferences.getInstance();
+          expect(
+            jsonDecode(prefs.getString(EventQueue.key)!) as List,
+            hasLength(2),
+          );
+        },
+        () => MockClient(
+          (r) async => r.url.path.endsWith('/event')
+              ? http.Response('{}', 503)
+              : http.Response('{"attribution":null}', 200),
+        ),
+      );
+    });
+
+    test('a pause waiting for configure never clears the queue', () async {
+      var status = 503;
+      final events = <String>[];
+      await http.runWithClient(
+        () async {
+          await AppReferSDK.configure(config);
+          await AppReferSDK.trackEventResult('saved');
+          final prefs = await SharedPreferences.getInstance();
+          final saved = prefs.getString(EventQueue.key);
+          // An earlier launch saved "off"; now turned back on: paused until configure.
+          await prefs.setBool('apprefer_collection_enabled', false);
+          await AppReferSDK.setCollectionEnabled(true);
+          expect(
+            await AppReferSDK.trackEventResult('paused'),
+            AppReferEventResult.dropped,
+          );
+          expect(prefs.getString(EventQueue.key), saved);
+          status = 200;
+          final queued = jsonDecode(saved!) as List;
+          queued.single['next'] = 0;
+          await prefs.setString(EventQueue.key, jsonEncode(queued));
+          await AppReferSDK.configure(config);
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          expect(events, contains('saved'));
+        },
+        () => MockClient((r) async {
+          if (r.url.path.endsWith('/event')) {
+            events.add((jsonDecode(r.body) as Map)['event_name'] as String);
+            return http.Response('{}', status);
+          }
+          return http.Response('{"attribution":null}', 200);
+        }),
+      );
+    });
+
+    test(
+      'configure with a user id while collection is off stores the new user',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('apprefer_user_id', 'A');
+        await prefs.setString('apprefer_device_id', 'install');
+        await AppReferSDK.setCollectionEnabled(false);
+        var calls = 0;
+        await http.runWithClient(
+          () => AppReferSDK.configure(
+            const AppReferConfig(apiKey: 'pk_test', userId: 'B'),
+          ),
+          () => MockClient((r) async {
+            calls++;
+            return http.Response('{}', 200);
+          }),
+        );
+        expect(prefs.getString('apprefer_user_id'), 'B');
+        expect((await SupportAPI.defaultProfile())['appUserId'], 'B');
+        expect(calls, 0);
+      },
+    );
+
+    test(
+      'collection off at launch still returns stored device id and attribution',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'apprefer_collection_enabled': false,
+          'apprefer_device_id': 'install',
+          'apprefer_attribution_cache':
+              '{"network":"meta","matchType":"click"}',
+        });
+        AppReferRegistry.apiKey = null; // a fresh process
+      expect(await AppReferSDK.getDeviceId(), isNull); // before configure
+        await AppReferSDK.configure(config);
+        expect(await AppReferSDK.getDeviceId(), 'install');
+        expect((await AppReferSDK.getAttribution())?.network, 'meta');
+      },
+    );
+
+    test(
+      'setCollectionEnabled never throws and disables even if saving fails',
+      () async {
+        await http.runWithClient(
+          () async {
+            await AppReferSDK.configure(config);
+            expect(
+              await AppReferSDK.trackEventResult('queued'),
+              AppReferEventResult.queued,
+            );
+            SharedPreferencesStorePlatform.instance = FailingWrites091();
+            SharedPreferences.resetStatic();
+            await AppReferSDK.setCollectionEnabled(false);
+            expect(
+              await AppReferSDK.trackEventResult('blocked'),
+              AppReferEventResult.dropped,
+            );
+            final prefs = await SharedPreferences.getInstance();
+            expect(prefs.getString(EventQueue.key), isNull);
+          },
+          () => MockClient(
+            (r) async => r.url.path.endsWith('/event')
+                ? http.Response('{}', 503)
+                : http.Response('{"attribution":null}', 200),
+          ),
+        );
+      },
+    );
   });
 }
