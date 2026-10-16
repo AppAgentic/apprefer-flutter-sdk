@@ -125,6 +125,8 @@ class SupportAPI {
               _deferredRevocations.add({
                 'token': token,
                 'key': prefix.substring(8),
+                'createdAt': DateTime.now().millisecondsSinceEpoch,
+                'attempts': 0,
                 if (push != null) 'push': push,
               });
             await _saveRevocations();
@@ -194,10 +196,10 @@ class SupportAPI {
 
   Future<void> _saveRevocations() async {
     try {
-      await write(
-        'apprefer_revocations',
-        jsonEncode(await _savedRevocations()),
-      );
+      final encoded = jsonEncode(await _savedRevocations());
+      if (encoded != (await read('apprefer_revocations') ?? '[]')) {
+        await write('apprefer_revocations', encoded);
+      }
     } catch (_) {}
   }
 
@@ -209,39 +211,53 @@ class SupportAPI {
   Future<void> _revokePending() =>
       _revoking ??= _runRevocations().whenComplete(() => _revoking = null);
   Future<void> _runRevocations() async {
-    final pending = await _store(() async {
-      final items = await _savedRevocations();
-      await write('apprefer_revocations', jsonEncode(items));
-      return items;
-    });
-    for (final item in pending) {
+    final pending = await _store(_savedRevocations);
+    for (final original in pending) {
+      final item = Map<String, dynamic>.from(original);
+      final created =
+          (item['createdAt'] as num?)?.toInt() ??
+          DateTime.now().millisecondsSinceEpoch;
+      var attempts = (item['attempts'] as num?)?.toInt() ?? 0;
+      item['createdAt'] = created;
       final key = item['key'] as String? ?? apiKey();
-      if (key == null) continue;
-      var succeeded = true;
-      for (final path in [
-        if (item['push'] != null) '/push-token',
-        '/session',
-      ]) {
+      var remove =
+          DateTime.now().millisecondsSinceEpoch - created > 400 * 86400000 ||
+          attempts >= 20;
+      if (!remove && key != null) {
         try {
           await _raw(
             'DELETE',
-            path,
-            path == '/push-token' ? {'token': item['push']} : null,
+            '/session',
+            null,
             item['token'] as String,
             keyOverride: key,
             timeout: const Duration(seconds: 5),
           );
+          remove = true;
+        } on SupportException catch (e) {
+          remove = [401, 403, 404].contains(e.status);
         } catch (_) {
-          succeeded = false;
+          /* Retry at the next lifecycle pass. */
+        }
+        if (!remove) {
+          attempts++;
+          remove = attempts >= 20;
         }
       }
-      if (!succeeded) continue;
+      item['attempts'] = attempts;
       await _store(() async {
         final current = await _savedRevocations();
-        current.removeWhere(
-          (v) => v['token'] == item['token'] && v['key'] == item['key'],
-        );
-        await write('apprefer_revocations', jsonEncode(current));
+        final remaining = current
+            .expand(
+              (v) => v['token'] == item['token'] && v['key'] == item['key']
+                  ? (remove ? <Map<String, dynamic>>[] : [item])
+                  : [v],
+            )
+            .toList();
+        final encoded = jsonEncode(remaining);
+        if (encoded != (await read('apprefer_revocations') ?? '[]')) {
+          await write('apprefer_revocations', encoded);
+        }
         _deferredRevocations.removeWhere(
           (v) => v['token'] == item['token'] && v['key'] == item['key'],
         );
@@ -373,7 +389,6 @@ class SupportAPI {
     if (epoch != _generation) throw SupportException(0, 'Support reset');
     await _resetting;
     if (epoch != _generation) throw SupportException(0, 'Support reset');
-    unawaited(_revokePending().catchError((Object _) {}));
     for (var attempt = 0; ; attempt++) {
       try {
         final token = await _token();

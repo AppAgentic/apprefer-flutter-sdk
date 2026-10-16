@@ -25,7 +25,7 @@ void main() {
   }
 
   test(
-    'failed revocations stay saved across restart until both DELETEs succeed',
+    'failed revocations stay saved across restart until session DELETE succeeds',
     () async {
       final slots = <String, String>{
         'support_pk.token': 'A',
@@ -55,7 +55,7 @@ void main() {
       final paths = <String>[];
       api(true, paths).resumeRevocations();
       await settle();
-      expect(paths.map((p) => p.split('/').last), ['push-token', 'session']);
+      expect(paths.map((p) => p.split('/').last), ['session']);
       expect(jsonDecode(slots['apprefer_revocations']!), isEmpty);
     },
   );
@@ -232,6 +232,100 @@ void main() {
           ),
         ),
       );
+    },
+  );
+  test(
+    'gone sessions clear, caps drop and chat polling does not retry',
+    () async {
+      for (final status in [200, 204, 299, 401, 403, 404]) {
+        final slots = <String, String>{
+          'apprefer_revocations': jsonEncode([
+            {'token': 'old', 'key': 'pk_old', 'push': 'old-push'},
+            {
+              'token': 'expired',
+              'createdAt':
+                  DateTime.now().millisecondsSinceEpoch - 401 * 86400000,
+            },
+            {'token': 'capped', 'attempts': 20},
+            {'token': 'last', 'attempts': 19},
+          ]),
+        };
+        var deletes = 0;
+        final api = SupportAPI(
+          apiKey: () => 'pk',
+          profile: () async => {},
+          read: (key) async => slots[key],
+          write: (key, value) async {
+            if (value == null) {
+              slots.remove(key);
+            } else {
+              slots[key] = value;
+            }
+          },
+          client: MockClient((r) async {
+            if (r.method == 'DELETE') {
+              deletes++;
+              expect(r.url.path, '/api/support/v1/session');
+              if (r.headers['X-AppRefer-Support-Session'] == 'last')
+                return http.Response('{}', 503);
+              expect(r.headers['X-AppRefer-Key'], 'pk_old');
+              return http.Response('{}', status);
+            }
+            return http.Response(
+              r.method == 'POST' ? '{"session":"B"}' : '{"conversations":[]}',
+              200,
+            );
+          }),
+        );
+        for (var i = 0; i < 3; i++) {
+          await api.conversations();
+          await api.thread('chat');
+        }
+        expect(deletes, 0);
+        api.resumeRevocations();
+        await settle();
+        expect(deletes, 2);
+        expect(jsonDecode(slots['apprefer_revocations']!), isEmpty);
+        api.resumeRevocations();
+        await settle();
+        expect(deletes, 2);
+      }
+    },
+  );
+  test(
+    'overlapping revocations share a pass and empty passes do not write',
+    () async {
+      final slots = <String, String>{
+        'apprefer_revocations': '[{"token":"old"}]',
+      };
+      final entered = Completer<void>(), release = Completer<void>();
+      var calls = 0, writes = 0;
+      final api = SupportAPI(
+        apiKey: () => 'pk',
+        read: (k) async => slots[k],
+        write: (k, v) async {
+          writes++;
+          if (v != null) slots[k] = v;
+        },
+        client: MockClient((_) async {
+          calls++;
+          entered.complete();
+          await release.future;
+          return http.Response('{}', 200);
+        }),
+      );
+      api.resumeRevocations();
+      await entered.future;
+      for (var i = 0; i < 10; i++) {
+        api.resumeRevocations();
+      }
+      release.complete();
+      await settle();
+      expect(calls, 1);
+      expect(writes, 1);
+      api.resumeRevocations();
+      await settle();
+      expect(writes, 1);
     },
   );
 }
