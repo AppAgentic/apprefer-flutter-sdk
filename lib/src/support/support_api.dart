@@ -284,6 +284,7 @@ class SupportAPI {
       // reset() (until configure runs again) or while collection is off.
       if (AppReferRegistry.apiKey != null &&
           !AppReferRegistry.stoppedByReset &&
+          !AppReferRegistry.collectionBlocked &&
           storage.collectionAllowed() &&
           storage.existingDeviceId() != null)
         'deviceId': storage.existingDeviceId(),

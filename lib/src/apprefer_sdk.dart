@@ -40,7 +40,10 @@ class AppReferSDK with WidgetsBindingObserver {
   static EventQueue? _eventQueue;
   static int _accountGeneration = 0;
   static int _collectionGeneration = 0;
-  static bool _collectionBlocked = false;
+  // Kept in the registry so Support sees an "off" even when saving it failed.
+  static bool get _collectionBlocked => AppReferRegistry.collectionBlocked;
+  static set _collectionBlocked(bool value) =>
+      AppReferRegistry.collectionBlocked = value;
   static bool _needsCollectionConfigure = false;
   static Future<void> _collectionWrites = Future.value();
   static Future<void> _accountWrites = Future.value();
@@ -268,9 +271,17 @@ class AppReferSDK with WidgetsBindingObserver {
         _configuring != null)
       return _configuring!;
     if (_instance != null && _sameConfig(_instance!._config, config)) {
-      // Events tracked since reset() were held until now.
-      unawaited(_instance!._events.flush());
-      return trackingConsentDidChange().then((_) => _getCachedAttribution());
+      final sdk = _instance!;
+      // reset() cleared the stored user: store it again (under the account
+      // epoch, and tell the server) so events and Support carry it.
+      final userId = config.userId;
+      final restore = userId != null && sdk._storage.getUserId() != userId
+          ? setUserId(userId)
+          : Future<void>.value();
+      unawaited(sdk._events.flush());
+      return restore
+          .then((_) => trackingConsentDidChange())
+          .then((_) => _getCachedAttribution());
     }
     _requestedConfig = config;
     final task = _configureNew(config);

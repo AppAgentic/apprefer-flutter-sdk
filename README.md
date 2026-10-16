@@ -25,6 +25,8 @@ until configure is called again, so the next account's Support session is never
 linked to the previous account's install. Support also omits the device id while
 collection is off.
 
+Migration: after reset(), call configure again for the next user; until then events, attribution and consent reports are paused.
+
 ```dart
 AppReferSDK.support.configure(apiKey: 'pk_...'); // Support only
 await AppReferSDK.setUserId('account-A');

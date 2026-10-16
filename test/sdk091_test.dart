@@ -580,7 +580,7 @@ void main() {
               '{"network":"meta","matchType":"click"}',
         });
         AppReferRegistry.apiKey = null; // a fresh process
-      expect(await AppReferSDK.getDeviceId(), isNull); // before configure
+        expect(await AppReferSDK.getDeviceId(), isNull); // before configure
         await AppReferSDK.configure(config);
         expect(await AppReferSDK.getDeviceId(), 'install');
         expect((await AppReferSDK.getAttribution())?.network, 'meta');
@@ -615,5 +615,52 @@ void main() {
         );
       },
     );
+  });
+
+  group('final check', () {
+    test('same config again after reset stores the user id again', () async {
+      final events = <Map<String, dynamic>>[];
+      await http.runWithClient(
+        () async {
+          const a = AppReferConfig(apiKey: 'pk_test', userId: 'A');
+          await AppReferSDK.configure(a);
+          await AppReferSDK.reset();
+          await AppReferSDK.configure(a); // A signs back in
+          final prefs = await SharedPreferences.getInstance();
+          expect(prefs.getString('apprefer_user_id'), 'A');
+          expect(
+            await AppReferSDK.trackEventResult('signed_in'),
+            AppReferEventResult.sent,
+          );
+          expect(
+            events.firstWhere(
+              (e) => e['event_name'] == 'signed_in',
+            )['app_user_id'],
+            'A',
+          );
+          expect(events.map((e) => e['event_name']), contains('_set_user_id'));
+          expect((await SupportAPI.defaultProfile())['appUserId'], 'A');
+        },
+        () => MockClient((r) async {
+          if (r.url.path.endsWith('/event')) {
+            events.add(jsonDecode(r.body) as Map<String, dynamic>);
+          }
+          return http.Response('{"attribution":null}', 200);
+        }),
+      );
+    });
+
+    test('Support sends no device id when saving "off" failed', () async {
+      await http.runWithClient(
+        () => AppReferSDK.configure(config),
+        () =>
+            MockClient((r) async => http.Response('{"attribution":null}', 200)),
+      );
+      expect(await SupportAPI.defaultProfile(), contains('deviceId'));
+      SharedPreferencesStorePlatform.instance = FailingWrites091();
+      SharedPreferences.resetStatic();
+      await AppReferSDK.setCollectionEnabled(false);
+      expect(await SupportAPI.defaultProfile(), isNot(contains('deviceId')));
+    });
   });
 }
