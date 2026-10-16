@@ -82,8 +82,19 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
                     check(edit.commit()) { "Unable to save support session" }; result.success(null)
                 }
                 "notificationChannel" -> {
-                    if (Build.VERSION.SDK_INT >= 26) (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(NotificationChannel("apprefer_support", "Support replies", NotificationManager.IMPORTANCE_DEFAULT))
+                    // The channel name in the chat's language (sent by the Dart side since 0.10.0).
+                    val name = (call.arguments as? String)?.takeIf { it.isNotBlank() } ?: "Support replies"
+                    if (Build.VERSION.SDK_INT >= 26) (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(NotificationChannel("apprefer_support", name, NotificationManager.IMPORTANCE_DEFAULT))
                     result.success(null)
+                }
+                "openUrl" -> {
+                    // Help article links: only http(s) and mailto, opened outside the app.
+                    val url = call.arguments as? String
+                    val scheme = url?.let { android.net.Uri.parse(it).scheme?.lowercase() }
+                    if (url == null || scheme !in setOf("http", "https", "mailto")) result.success(false) else {
+                        val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        result.success(runCatching { (activity ?: context).startActivity(intent) }.isSuccess)
+                    }
                 }
                 "appIcon" -> {
                     // The launcher icon for the help home, full-bleed like iOS (the SDK rounds it).

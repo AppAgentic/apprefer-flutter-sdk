@@ -45,6 +45,11 @@ final class SupportBridge: NSObject, FlutterPlugin, PHPickerViewControllerDelega
                 result(status == errSecSuccess ? nil : FlutterError(code: "secure_storage", message: "Unable to save support session", details: status))
             } else { SecItemDelete(query as CFDictionary); result(nil) }
         case "notificationChannel": result(nil)
+        case "openUrl":
+            // Help article links: only http(s) and mailto, opened outside the app.
+            guard let string = call.arguments as? String, let url = URL(string: string),
+                  let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else { result(false); return }
+            UIApplication.shared.open(url, options: [:]) { result($0) }
         case "appIcon":
             // The launcher icon for the help home; nil falls back to initials.
             guard let icons = Bundle.main.infoDictionary?["CFBundleIcons"] as? [String: Any],

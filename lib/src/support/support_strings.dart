@@ -304,6 +304,16 @@ abstract final class SupportStrings {
     }
   }
 
+  /// A date without the time ("16 Oct 2026") in the chat's language.
+  static String day(DateTime date) {
+    try {
+      return DateFormat.yMMMd(_dateLocale(language)).format(date);
+    } catch (_) {
+      return '${date.year}-${date.month.toString().padLeft(2, '0')}-'
+          '${date.day.toString().padLeft(2, '0')}';
+    }
+  }
+
   /// Uppercase in the chat's language (section labels): Turkish keeps the
   /// dotted İ and Greek drops its accents, as iOS's locale-aware uppercasing.
   static String upper(String value) {

@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
+import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -10,10 +12,18 @@ import '../services/registry.dart';
 import '../services/storage.dart';
 import '../services/logger.dart';
 import 'support_api.dart';
+import 'support_help.dart';
 import 'support_strings.dart';
 import 'support_style.dart';
 
-export 'support_api.dart' show AppReferSupportPersona;
+export 'support_api.dart'
+    show AppReferSupportPersona, SupportException, SupportErrorReason;
+export 'support_help.dart'
+    show
+        AppReferHelpArticle,
+        AppReferHelpArticleDetail,
+        AppReferSupportStatus,
+        AppReferSupportPushChannel;
 
 /// Shared support configuration and presentation API.
 class AppReferSupport with WidgetsBindingObserver {
@@ -138,6 +148,42 @@ class AppReferSupport with WidgetsBindingObserver {
   /// Opens the help home with the message field pre-filled and focused.
   Future<void> compose(String prefill, {BuildContext? context}) =>
       _present(context, AppReferSupportView(composing: prefill));
+
+  /// Opens the help chat on one help article (e.g. from a "How does this
+  /// work?" link). Back leads to the help home; "Message us" starts a
+  /// conversation about the article.
+  Future<void> openArticle(String slug, {BuildContext? context}) => _present(
+    context,
+    AppReferSupportView(opening: AppReferSupportDestination.article(slug)),
+  );
+
+  /// Opens the help chat on the help centre: every article, with search.
+  Future<void> openHelpCentre({BuildContext? context}) => _present(
+    context,
+    const AppReferSupportView(opening: AppReferSupportDestination.helpCentre),
+  );
+
+  /// The app's published help articles in the chat's language ([language],
+  /// else the app's language), best first; with [query], search results
+  /// (titles, summaries and bodies, up to 20). Test SDK keys (`pk_test_`) also
+  /// get drafts (`isDraft`). Lists are kept in memory for five minutes; if a
+  /// request fails, the last list for the same query is returned, and only
+  /// without one is the error thrown.
+  Future<List<AppReferHelpArticle>> articles({String? query}) =>
+      api.help.list(query, SupportStrings.language);
+
+  /// One help article with its markdown body, in the chat's language. Throws
+  /// a [SupportException] with `status` 404 when the article doesn't exist or
+  /// isn't published.
+  Future<AppReferHelpArticleDetail> article(String slug) =>
+      api.help.article(slug, SupportStrings.language);
+
+  /// What Support can do for this app: whether reply notifications work on
+  /// this platform (`pushReady`), whether customers can answer by email
+  /// (`emailReplies`) and how many help articles are published. Register push
+  /// tokens only when `pushReady` is true. Cached as long as the server allows
+  /// (5 minutes once everything is verified, else 30 s).
+  Future<AppReferSupportStatus> status() => api.help.status();
   Future<void> _present(BuildContext? context, Widget view) async {
     final nav = context == null
         ? navigatorKey?.currentState
@@ -160,7 +206,10 @@ class AppReferSupport with WidgetsBindingObserver {
     String environment = 'production',
   }) async {
     final epoch = api.actionGeneration;
-    await supportChannel.invokeMethod<void>('notificationChannel');
+    await supportChannel.invokeMethod<void>(
+      'notificationChannel',
+      SupportStrings.text('support.notification.channel'),
+    );
     if (await api.deferPushRegistration(
       token,
       epoch,
@@ -277,15 +326,42 @@ class AppReferSupportTopic {
   static const defaults = [billing, restore, bug, idea];
 }
 
-/// Embeddable help chat: the home and conversations.
+/// The screen the help chat opens on. Back always leads to the help home.
+@immutable
+class AppReferSupportDestination {
+  const AppReferSupportDestination._(this.kind, [this.value]);
+  static const home = AppReferSupportDestination._('home');
+
+  /// Every help article, with search.
+  static const helpCentre = AppReferSupportDestination._('helpCentre');
+
+  /// One help article by slug (any translation's slug works).
+  const AppReferSupportDestination.article(String slug)
+    : this._('article', slug);
+  const AppReferSupportDestination.conversation(String id)
+    : this._('conversation', id);
+
+  /// `home`, `helpCentre`, `article` or `conversation`.
+  final String kind;
+
+  /// The article slug or conversation id.
+  final String? value;
+}
+
+/// Embeddable help chat: the home (with help articles), the help centre,
+/// articles and conversations.
 class AppReferSupportView extends StatefulWidget {
   const AppReferSupportView({
     super.key,
     this.conversationId,
     this.composing,
+    this.opening,
     this.api,
   });
   final String? conversationId;
+
+  /// Where to open; overrides [conversationId] when set.
+  final AppReferSupportDestination? opening;
 
   /// Opens the home with the message field pre-filled and focused.
   final String? composing;
@@ -303,6 +379,16 @@ class _Pending {
   final List<Uint8List> images;
   bool failed = false;
   final List<String> ids = [];
+}
+
+/// A help screen over the home: the help centre, or one article.
+class _HelpPage {
+  const _HelpPage.centre({this.focusSearch = false}) : slug = null, title = '';
+  const _HelpPage.article(String this.slug, this.title) : focusSearch = false;
+  final String? slug;
+  final String title;
+  final bool focusSearch;
+  bool get isArticle => slug != null;
 }
 
 bool _sameImages(List<Uint8List> a, List<Uint8List> b) =>
@@ -348,14 +434,45 @@ class _SupportViewState extends State<AppReferSupportView>
   /// The app's AI assistant, as last seen from AppRefer.
   AppReferSupportPersona? get _persona => api.persona.value;
 
+  // Help centre: the home section, the help centre screen and the reader.
+  List<AppReferHelpArticle> articles = [];
+  bool _articlesLoading = false;
+  final List<_HelpPage> helpStack = [];
+  List<AppReferHelpArticle> helpAll = [];
+  List<AppReferHelpArticle>? helpResults;
+  bool helpLoaded = false, helpFailed = false, helpSearching = false;
+  final helpSearch = TextEditingController();
+  final helpSearchFocus = FocusNode();
+  final helpScroll = ScrollController();
+  Timer? _helpDebounce;
+  AppReferHelpArticleDetail? articleDetail;
+  List<SupportMarkdownBlock> articleBlocks = [];
+  bool articleFailed = false;
+  final Map<String, TapGestureRecognizer> _linkTaps = {};
+
+  /// How the team's reply will reach the customer.
+  SupportReplyNotice notice = SupportReplyNotice.push;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    id = widget.conversationId;
+    final opening = widget.opening;
+    id = opening == null
+        ? widget.conversationId
+        : (opening.kind == 'conversation' ? opening.value : null);
+    if (opening?.kind == 'helpCentre') {
+      helpStack.add(const _HelpPage.centre());
+      _loadHelp();
+    } else if (opening?.kind == 'article' && opening?.value != null) {
+      helpStack.add(_HelpPage.article(opening!.value!, ''));
+      _loadArticle(opening.value!);
+    }
+    _loadNotice();
     homeText.text = widget.composing ?? '';
     homeText.addListener(_changed);
     threadText.addListener(_changed);
+    helpSearchFocus.addListener(_changed);
     api.persona.addListener(_changed);
     config.accountGeneration.addListener(_accountReset);
     metadataReady = _context();
@@ -394,6 +511,12 @@ class _SupportViewState extends State<AppReferSupportView>
       refreshing = false;
       sendError = '';
       loadError = '';
+      helpStack.clear();
+      helpSearch.clear();
+      helpResults = null;
+      articleDetail = null;
+      articleBlocks = [];
+      notice = SupportReplyNotice.push;
     });
   }
 
@@ -459,10 +582,18 @@ class _SupportViewState extends State<AppReferSupportView>
     threadFocus.dispose();
     homeScroll.dispose();
     scroll.dispose();
+    _helpDebounce?.cancel();
+    helpSearch.dispose();
+    helpSearchFocus.dispose();
+    helpScroll.dispose();
+    for (final tap in _linkTaps.values) {
+      tap.dispose();
+    }
     super.dispose();
   }
 
   Future<void> _refresh() async {
+    if (id == null) unawaited(_refreshArticles());
     if (refreshing) return;
     refreshing = true;
     final current = id;
@@ -550,9 +681,19 @@ class _SupportViewState extends State<AppReferSupportView>
     });
     _timer();
     _refresh();
+    _loadNotice();
   }
 
   void _back() {
+    if (id == null && helpStack.isNotEmpty) {
+      FocusScope.of(context).unfocus();
+      setState(() {
+        helpStack.removeLast();
+        if (helpStack.isEmpty) helpSearch.clear();
+        helpResults = helpSearch.text.trim().isEmpty ? null : helpResults;
+      });
+      return;
+    }
     if (id == null) {
       Navigator.maybePop(context);
       return;
@@ -1122,8 +1263,14 @@ class _SupportViewState extends State<AppReferSupportView>
                       children: [
                         for (final section in [
                           if (current != null) _continueCard(current),
+                          // Hidden entirely when the app has no published articles.
+                          if (articles.isNotEmpty)
+                            _helpSection(prominent: current == null),
                           if (topics.isNotEmpty)
-                            _quickHelp(topics, labelled: current != null),
+                            _quickHelp(
+                              topics,
+                              labelled: current != null || articles.isNotEmpty,
+                            ),
                           if (selection.others.isNotEmpty)
                             _pastConversations(selection.others),
                           if (loading && conversations.isEmpty)
@@ -1670,6 +1817,1128 @@ class _SupportViewState extends State<AppReferSupportView>
     ),
   );
 
+  // MARK: Help centre
+
+  /// The home's article list: memory cache first (five minutes); offline
+  /// keeps what was shown, or nothing, never an error.
+  Future<void> _refreshArticles() async {
+    if (_articlesLoading) return;
+    _articlesLoading = true;
+    final language = SupportStrings.language;
+    final before = articles;
+    // A cached list shows at once (this can run from initState, so no setState here).
+    if (articles.isEmpty) articles = api.help.cachedList(language) ?? const [];
+    List<AppReferHelpArticle>? fresh;
+    try {
+      fresh = await api.help.list(null, language);
+    } catch (_) {
+      // Offline or unavailable: the section keeps what it showed.
+    } finally {
+      _articlesLoading = false;
+    }
+    final next = fresh ?? articles;
+    if (mounted && !listEquals(next, before)) setState(() => articles = next);
+  }
+
+  /// How the team's reply will reach the customer: notification, email or
+  /// only in the chat.
+  Future<void> _loadNotice() async {
+    AppReferSupportStatus? status;
+    try {
+      status = await api.help.status();
+    } catch (_) {
+      // Unknown: keep the notification line, as before 0.10.0.
+    }
+    final hasPush = await api.hasPushToken();
+    final next = SupportReplyNotice.choose(
+      status,
+      hasPushToken: hasPush,
+      hasEmail: api.email != null,
+    );
+    if (mounted && next != notice) setState(() => notice = next);
+  }
+
+  void _openHelp({bool search = false}) {
+    if (sending) return;
+    FocusScope.of(context).unfocus();
+    setState(() => helpStack.add(_HelpPage.centre(focusSearch: search)));
+    _loadHelp();
+    if (search) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) helpSearchFocus.requestFocus();
+      });
+    }
+  }
+
+  void _openArticle(AppReferHelpArticle article) {
+    if (sending) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      helpStack.add(_HelpPage.article(article.slug, article.title));
+      articleDetail = null;
+      articleBlocks = [];
+      articleFailed = false;
+    });
+    _loadArticle(article.slug);
+  }
+
+  /// Back to the home's message field; from an article its title becomes the
+  /// conversation subject.
+  void _messageUs(String? subject) {
+    setState(() {
+      helpStack.clear();
+      helpSearch.clear();
+      helpResults = null;
+      topic = subject == null || subject.trim().isEmpty
+          ? null
+          : AppReferSupportTopic(
+              title: subject,
+              subtitle: '',
+              icon: Icons.description_rounded,
+              tint: palette.accent,
+              prompt: SupportStrings.text('support.help.prompt'),
+            );
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) homeFocus.requestFocus();
+    });
+  }
+
+  Future<void> _loadHelp() async {
+    final language = SupportStrings.language;
+    // Shown with the next frame (this can run from initState, so no setState here).
+    if (helpAll.isEmpty) helpAll = api.help.cachedList(language) ?? const [];
+    try {
+      final all = await api.help.list(null, language);
+      if (mounted) {
+        setState(() {
+          helpAll = all;
+          helpFailed = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => helpFailed = helpAll.isEmpty);
+    } finally {
+      if (mounted) setState(() => helpLoaded = true);
+    }
+  }
+
+  /// Filters what's on screen at once, then asks the server (which also
+  /// searches bodies) 300 ms after the last keystroke.
+  void _searchHelp(String text) {
+    _helpDebounce?.cancel();
+    final q = SupportHelpClient.normalizedQuery(text);
+    if (q == null) {
+      setState(() {
+        helpResults = null;
+        helpSearching = false;
+      });
+      return;
+    }
+    setState(() {
+      helpResults = supportHelpLocalMatches(helpAll, q);
+      helpSearching = true;
+    });
+    final language = SupportStrings.language;
+    _helpDebounce = Timer(const Duration(milliseconds: 300), () async {
+      List<AppReferHelpArticle>? found;
+      try {
+        found = await api.help.list(q, language);
+      } catch (_) {
+        // Offline: the local matches stay.
+      }
+      if (!mounted || SupportHelpClient.normalizedQuery(helpSearch.text) != q) {
+        return;
+      }
+      setState(() {
+        if (found != null) helpResults = found;
+        helpSearching = false;
+      });
+    });
+  }
+
+  Future<void> _loadArticle(String slug) async {
+    articleFailed = false; // can run from initState
+    try {
+      final detail = await api.help.article(slug, SupportStrings.language);
+      final blocks = SupportMarkdown.blocks(detail.body);
+      if (!mounted || helpStack.lastOrNull?.slug != slug) return;
+      setState(() {
+        for (final tap in _linkTaps.values) {
+          tap.dispose();
+        }
+        _linkTaps.clear();
+        articleDetail = detail;
+        articleBlocks = blocks;
+      });
+    } catch (_) {
+      if (mounted && helpStack.lastOrNull?.slug == slug) {
+        setState(() => articleFailed = articleDetail == null);
+      }
+    }
+  }
+
+  /// Opens an http(s) or mailto link outside the app; anything else is ignored.
+  void _openLink(String url) {
+    final safe = SupportMarkdown.safeUrl(url);
+    if (safe == null) return;
+    unawaited(
+      supportChannel
+          .invokeMethod<bool>('openUrl', safe)
+          .then<void>((_) {}, onError: (_) {}),
+    );
+  }
+
+  /// "Help articles" on the help home: a search entry and the first three articles.
+  Widget _helpSection({required bool prominent}) {
+    final top = articles.take(3).toList();
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      decoration: BoxDecoration(
+        color: colors.card,
+        borderRadius: BorderRadius.circular(26),
+        boxShadow: prominent ? _shadow(0.22, 22, 14) : _shadow(0.07, 10, 2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: _label(SupportStrings.text('support.help.title')),
+              ),
+              if (articles.length > 3)
+                _button(
+                  SupportStrings.text('support.help.seeAll'),
+                  () => _openHelp(),
+                  Padding(
+                    padding: const EdgeInsetsDirectional.fromSTEB(8, 4, 2, 4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          SupportStrings.text('support.help.seeAll'),
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                            color: palette.accent,
+                          ),
+                        ),
+                        const SizedBox(width: 2),
+                        Icon(
+                          Icons.chevron_right_rounded,
+                          size: 18,
+                          color: palette.accent,
+                        ),
+                      ],
+                    ),
+                  ),
+                  shape: const StadiumBorder(),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Semantics(
+            button: true,
+            textField: true,
+            label: SupportStrings.text('support.help.search.placeholder'),
+            excludeSemantics: true,
+            child: _Pressable(
+              onTap: () => _openHelp(search: true),
+              child: Container(
+                height: 44,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(
+                  color: colors.background,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.search_rounded, size: 20, color: colors.muted),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Text(
+                        SupportStrings.text('support.help.search.placeholder'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 15.5, color: colors.muted),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          for (final article in top) ...[
+            _articleRow(article, summaryLines: 1, horizontal: 0),
+            if (!identical(article, top.last))
+              Divider(
+                height: 1,
+                thickness: 0.5,
+                indent: 48,
+                color: colors.muted.withValues(alpha: 0.3),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// One article in a list: a document tile, the title and its summary.
+  Widget _articleRow(
+    AppReferHelpArticle article, {
+    int summaryLines = 2,
+    double horizontal = 14,
+  }) => Semantics(
+    button: true,
+    label: SupportStrings.text('support.help.a11y.article', {
+      'title': article.title,
+    }),
+    hint: article.summary.isEmpty ? null : article.summary,
+    excludeSemantics: true,
+    child: InkWell(
+      onTap: () => _openArticle(article),
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: horizontal, vertical: 10),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: palette.accent.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(11),
+              ),
+              child: Icon(
+                Icons.description_rounded,
+                size: 18,
+                color: palette.accent,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    article.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: colors.primary,
+                    ),
+                  ),
+                  if (article.isDraft) ...[
+                    const SizedBox(height: 3),
+                    _draftBadge(),
+                  ],
+                  if (article.summary.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      article.summary,
+                      maxLines: summaryLines,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 13.5, color: colors.muted),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            Icon(
+              Icons.chevron_right_rounded,
+              size: 20,
+              color: colors.muted.withValues(alpha: 0.7),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  Widget _draftBadge() => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color: const Color(0xffff9500).withValues(alpha: 0.14),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Text(
+      SupportStrings.upper(SupportStrings.text('support.help.draft')),
+      style: const TextStyle(
+        fontSize: 9.5,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 0.4,
+        color: Color(0xffe07b00),
+      ),
+    ),
+  );
+
+  /// The floating glass bar at the top of the help screens (same as a
+  /// conversation's).
+  Widget _helpHeader({Widget? trailing}) => _glass(
+    radius: 32,
+    shadow: _shadow(0.14, 16, 8),
+    child: SizedBox(
+      height: 64,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        child: Row(
+          children: [
+            _button(
+              SupportStrings.text('support.a11y.back'),
+              _back,
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: colors.primary.withValues(alpha: 0.05),
+                ),
+                child: Icon(
+                  Icons.chevron_left_rounded,
+                  size: 30,
+                  color: palette.accent,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Semantics(
+                header: true,
+                child: Text(
+                  SupportStrings.text('support.help.title'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                    color: colors.primary,
+                  ),
+                ),
+              ),
+            ),
+            ?trailing,
+          ],
+        ),
+      ),
+    ),
+  );
+
+  /// A help screen: the scrolling content under the floating header.
+  Widget _helpFrame({required List<Widget> children, Widget? trailing}) {
+    final top = MediaQuery.paddingOf(context).top;
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: ListView(
+            controller: helpScroll,
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            padding: EdgeInsets.fromLTRB(
+              16,
+              top + 86,
+              16,
+              MediaQuery.paddingOf(context).bottom + 32,
+            ),
+            children: children,
+          ),
+        ),
+        Positioned(
+          top: top + 10,
+          left: 12,
+          right: 12,
+          child: _helpHeader(trailing: trailing),
+        ),
+      ],
+    );
+  }
+
+  /// "Still need help?" with the team's reply time and a "Message us" button.
+  Widget _stillNeedHelp(String? subject) {
+    final persona = _persona;
+    final first = config.teamNames.where((n) => n.trim().isNotEmpty);
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: colors.card,
+        borderRadius: BorderRadius.circular(26),
+        boxShadow: _shadow(0.07, 10, 2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              if (persona != null)
+                SupportAvatar(
+                  name: persona.name,
+                  size: 44,
+                  colors: [palette.warm, palette.hot],
+                  imageUrl: persona.avatarUrl,
+                )
+              else
+                SupportAvatar(
+                  name: first.firstOrNull,
+                  size: 44,
+                  colors: [palette.warm, palette.hot],
+                  icon: first.isEmpty ? Icons.forum_rounded : null,
+                ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Semantics(
+                      header: true,
+                      child: Text(
+                        SupportStrings.text('support.help.stillNeedHelp'),
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                          color: colors.primary,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      persona != null
+                          ? SupportStrings.text('support.presence.persona', {
+                              'persona': persona.name,
+                              'time': config.replyTime,
+                            })
+                          : SupportStrings.text('support.presence.team', {
+                              'time': config.replyTime,
+                            }),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 13.5, color: colors.muted),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Semantics(
+            button: true,
+            label: SupportStrings.text('support.help.messageUs'),
+            excludeSemantics: true,
+            child: _Pressable(
+              onTap: () => _messageUs(subject),
+              child: Container(
+                height: 50,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  gradient: palette.bubble,
+                  borderRadius: BorderRadius.circular(25),
+                  boxShadow: [
+                    BoxShadow(
+                      color: palette.accent.withValues(alpha: 0.3),
+                      blurRadius: 12,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.chat_bubble_rounded,
+                      size: 17,
+                      color: palette.onAccent,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      SupportStrings.text('support.help.messageUs'),
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: palette.onAccent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _helpSpinner(String? message) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 24),
+    child: Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2.4),
+        ),
+        if (message != null) ...[
+          const SizedBox(width: 10),
+          Text(message, style: TextStyle(fontSize: 14, color: colors.muted)),
+        ],
+      ],
+    ),
+  );
+
+  /// A centred message with an icon tile and, optionally, a Try again button.
+  Widget _helpMessage(
+    IconData icon,
+    String title, {
+    String? hint,
+    VoidCallback? retry,
+  }) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 12),
+    child: Column(
+      children: [
+        Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: palette.accent.withValues(alpha: 0.12),
+          ),
+          child: Icon(icon, size: 24, color: palette.accent),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: colors.primary,
+          ),
+        ),
+        if (hint != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            hint,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 14, color: colors.muted),
+          ),
+        ],
+        if (retry != null) ...[
+          const SizedBox(height: 12),
+          TextButton(
+            onPressed: retry,
+            child: Text(
+              SupportStrings.text('support.action.tryAgain'),
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ],
+    ),
+  );
+
+  Widget _articleList(List<AppReferHelpArticle> list) => DecoratedBox(
+    decoration: BoxDecoration(
+      borderRadius: BorderRadius.circular(22),
+      boxShadow: _shadow(0.07, 10, 2),
+    ),
+    child: Material(
+      color: colors.card,
+      borderRadius: BorderRadius.circular(22),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Column(
+          children: [
+            for (final article in list) ...[
+              _articleRow(article),
+              if (!identical(article, list.last))
+                Divider(
+                  height: 1,
+                  thickness: 0.5,
+                  indent: 62,
+                  color: colors.muted.withValues(alpha: 0.3),
+                ),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
+
+  /// The help centre: every article grouped by category, and search.
+  Widget _helpCentre() {
+    final results = helpResults;
+    final query = SupportHelpClient.normalizedQuery(helpSearch.text) ?? '';
+    final content = <Widget>[
+      if (results != null)
+        if (results.isNotEmpty)
+          _articleList(results)
+        else if (helpSearching)
+          _helpSpinner(SupportStrings.text('support.help.searching'))
+        else
+          _helpMessage(
+            Icons.search_rounded,
+            SupportStrings.text('support.help.search.noResults', {
+              'query': query,
+            }),
+            hint: SupportStrings.text('support.help.search.noResultsHint'),
+          )
+      else if (helpAll.isEmpty)
+        if (helpLoaded && helpFailed)
+          _helpMessage(
+            Icons.description_rounded,
+            SupportStrings.text('support.help.listFailed'),
+            retry: () {
+              setState(() => helpLoaded = false);
+              _loadHelp();
+            },
+          )
+        else if (!helpLoaded)
+          _helpSpinner(null)
+        else
+          const SizedBox.shrink()
+      else
+        for (final (title, list) in supportHelpGroups(helpAll))
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (title != null) ...[
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(start: 6),
+                  child: _label(title),
+                ),
+                const SizedBox(height: 10),
+              ],
+              _articleList(list),
+            ],
+          ),
+      if (helpLoaded || helpAll.isNotEmpty) _stillNeedHelp(null),
+    ];
+    return _helpFrame(
+      children: [
+        Container(
+          height: 50,
+          padding: const EdgeInsetsDirectional.fromSTEB(14, 0, 4, 0),
+          decoration: BoxDecoration(
+            color: colors.card,
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: _shadow(0.07, 10, 2),
+            border: Border.all(
+              color: palette.accent.withValues(
+                alpha: helpSearchFocus.hasFocus ? 0.45 : 0,
+              ),
+              width: 1.5,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.search_rounded, size: 20, color: colors.muted),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: helpSearch,
+                  focusNode: helpSearchFocus,
+                  onChanged: _searchHelp,
+                  textInputAction: TextInputAction.search,
+                  autocorrect: false,
+                  cursorColor: palette.accent,
+                  style: TextStyle(fontSize: 16, color: colors.primary),
+                  decoration: InputDecoration(
+                    isCollapsed: true,
+                    border: InputBorder.none,
+                    hintText: SupportStrings.text(
+                      'support.help.search.placeholder',
+                    ),
+                    hintMaxLines: 1,
+                    hintStyle: TextStyle(
+                      fontSize: 16,
+                      color: colors.muted.withValues(alpha: 0.8),
+                    ),
+                  ),
+                ),
+              ),
+              if (helpSearch.text.isNotEmpty)
+                _button(
+                  SupportStrings.text('support.help.a11y.clearSearch'),
+                  () {
+                    helpSearch.clear();
+                    _searchHelp('');
+                  },
+                  Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Icon(
+                      Icons.cancel_rounded,
+                      size: 18,
+                      color: colors.muted.withValues(alpha: 0.8),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        for (final w in content) ...[const SizedBox(height: 22), w],
+      ],
+    );
+  }
+
+  /// One article: its title, when it was updated, the rendered body and
+  /// "Still need help?".
+  Widget _articleScreen(_HelpPage page) {
+    final detail = articleDetail?.slug == page.slug ? articleDetail : null;
+    final title = detail?.title ?? page.title;
+    final web = detail?.article.webUrl;
+    final updated = detail?.article.updatedDate;
+    return _helpFrame(
+      trailing: web == null
+          ? null
+          : _button(
+              SupportStrings.text('support.help.openInBrowser'),
+              () => _openLink(web),
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: colors.primary.withValues(alpha: 0.05),
+                ),
+                child: Icon(
+                  Icons.open_in_new_rounded,
+                  size: 20,
+                  color: colors.primary,
+                ),
+              ),
+            ),
+      children: [
+        if (detail?.category != null) ...[
+          Text(
+            SupportStrings.upper(detail!.category!),
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
+              color: palette.accent,
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+        if (title.isNotEmpty)
+          Semantics(
+            header: true,
+            child: Text(
+              title,
+              style: TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.6,
+                height: 1.15,
+                color: colors.primary,
+              ),
+            ),
+          ),
+        if (detail != null && (updated != null || detail.isDraft)) ...[
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              if (updated != null) ...[
+                Text(
+                  SupportStrings.text('support.help.updated', {
+                    'date': SupportStrings.day(updated),
+                  }),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: colors.muted,
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+              if (detail.isDraft) _draftBadge(),
+            ],
+          ),
+        ],
+        const SizedBox(height: 20),
+        if (detail != null)
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: colors.card,
+              borderRadius: BorderRadius.circular(26),
+              boxShadow: _shadow(0.07, 10, 2),
+            ),
+            child: _markdown(articleBlocks),
+          )
+        else if (articleFailed)
+          Container(
+            decoration: BoxDecoration(
+              color: colors.card,
+              borderRadius: BorderRadius.circular(26),
+            ),
+            child: _helpMessage(
+              Icons.find_in_page_rounded,
+              SupportStrings.text('support.help.loadFailed'),
+              retry: () {
+                setState(() => articleFailed = false);
+                _loadArticle(page.slug!);
+              },
+            ),
+          )
+        else
+          _helpSpinner(SupportStrings.text('support.help.loading')),
+        const SizedBox(height: 24),
+        _stillNeedHelp(title.isEmpty ? null : title),
+      ],
+    );
+  }
+
+  // MARK: Markdown
+
+  /// Renders parsed article blocks. Links open in the browser (only http(s)
+  /// and mailto survive parsing); nothing in an article can run code.
+  Widget _markdown(List<SupportMarkdownBlock> blocks) {
+    final children = <Widget>[];
+    for (var i = 0; i < blocks.length; i++) {
+      final block = blocks[i];
+      final previous = i == 0 ? null : blocks[i - 1];
+      final gap = previous == null
+          ? 0.0
+          : previous is SupportListItemBlock && block is SupportListItemBlock
+          ? 7.0
+          : previous is SupportHeadingBlock
+          ? 8.0
+          : block is SupportHeadingBlock
+          ? 22.0
+          : 14.0;
+      children.add(
+        Padding(
+          padding: EdgeInsets.only(top: gap),
+          child: _markdownBlock(block, i),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: children,
+    );
+  }
+
+  TextSpan _rich(SupportRichText value, TextStyle style, int block) {
+    // Boundaries where any style starts or ends; each piece gets every style covering it.
+    final length = value.text.length;
+    int bound(int v) => v < 0 ? 0 : (v > length ? length : v);
+    final cuts = <int>{0, length};
+    for (final s in value.spans) {
+      cuts
+        ..add(bound(s.start))
+        ..add(bound(s.end));
+    }
+    final points = cuts.toList()..sort();
+    final pieces = <InlineSpan>[];
+    for (var p = 0; p + 1 < points.length; p++) {
+      final from = points[p], to = points[p + 1];
+      if (from >= to) continue;
+      var piece = const TextStyle();
+      String? link;
+      for (var k = 0; k < value.spans.length; k++) {
+        final s = value.spans[k];
+        if (s.start > from || s.end < to) continue;
+        switch (s.style) {
+          case SupportInlineStyle.bold:
+            piece = piece.copyWith(fontWeight: FontWeight.w700);
+          case SupportInlineStyle.italic:
+            piece = piece.copyWith(fontStyle: FontStyle.italic);
+          case SupportInlineStyle.strike:
+            piece = piece.copyWith(decoration: TextDecoration.lineThrough);
+          case SupportInlineStyle.code:
+            piece = piece.copyWith(
+              fontFamily: 'monospace',
+              fontFamilyFallback: const ['Menlo', 'Courier'],
+              backgroundColor: colors.primary.withValues(alpha: 0.07),
+            );
+          case SupportInlineStyle.link:
+            link = s.url;
+            piece = piece.copyWith(
+              color: palette.accent,
+              decoration: TextDecoration.underline,
+              decorationColor: palette.accent,
+            );
+        }
+      }
+      final url = link;
+      pieces.add(
+        TextSpan(
+          text: value.text.substring(from, to),
+          style: piece,
+          recognizer: url == null
+              ? null
+              : ((_linkTaps['$block:$from'] ??= TapGestureRecognizer())
+                  ..onTap = () => _openLink(url)),
+        ),
+      );
+    }
+    return TextSpan(style: style, children: pieces);
+  }
+
+  Widget _markdownBlock(SupportMarkdownBlock block, int index) {
+    final body = TextStyle(fontSize: 16, height: 1.4, color: colors.primary);
+    switch (block) {
+      case SupportHeadingBlock(:final level, :final text):
+        return Semantics(
+          header: true,
+          child: Text.rich(
+            _rich(
+              text,
+              TextStyle(
+                fontSize: switch (level) {
+                  1 => 23.0,
+                  2 => 20.0,
+                  3 => 17.0,
+                  _ => 15.5,
+                },
+                fontWeight: level <= 2 ? FontWeight.w700 : FontWeight.w600,
+                height: 1.25,
+                color: colors.primary,
+              ),
+              index,
+            ),
+          ),
+        );
+      case SupportParagraphBlock(:final text):
+        return Text.rich(_rich(text, body, index));
+      case SupportListItemBlock(:final number, :final depth, :final text):
+        return Padding(
+          padding: EdgeInsetsDirectional.only(start: depth * 20.0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: number == null ? 12 : 24,
+                child: number == null
+                    ? Padding(
+                        padding: const EdgeInsets.only(top: 9),
+                        child: Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: palette.accent.withValues(
+                                alpha: depth == 0 ? 1 : 0.5,
+                              ),
+                            ),
+                          ),
+                        ),
+                      )
+                    : Text(
+                        '$number.',
+                        textAlign: TextAlign.end,
+                        textDirection: TextDirection.ltr,
+                        style: TextStyle(
+                          fontSize: 15,
+                          height: 1.5,
+                          fontWeight: FontWeight.w600,
+                          color: palette.accent,
+                        ),
+                      ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(child: Text.rich(_rich(text, body, index))),
+            ],
+          ),
+        );
+      case SupportQuoteBlock(:final text):
+        return IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Container(
+                width: 4,
+                decoration: BoxDecoration(
+                  color: palette.accent.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text.rich(
+                  _rich(
+                    text,
+                    TextStyle(
+                      fontSize: 15.5,
+                      height: 1.4,
+                      fontStyle: FontStyle.italic,
+                      color: colors.muted,
+                    ),
+                    index,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      case SupportCodeBlock(:final code):
+        return Directionality(
+          textDirection: TextDirection.ltr,
+          child: Container(
+            decoration: BoxDecoration(
+              color: colors.primary.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.all(14),
+              child: SelectableText(
+                code,
+                style: TextStyle(
+                  fontSize: 13.5,
+                  height: 1.35,
+                  fontFamily: 'monospace',
+                  fontFamilyFallback: const ['Menlo', 'Courier'],
+                  color: colors.primary,
+                ),
+              ),
+            ),
+          ),
+        );
+      case SupportRuleBlock():
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Divider(
+            height: 1,
+            thickness: 0.5,
+            color: colors.muted.withValues(alpha: 0.3),
+          ),
+        );
+      case SupportImageBlock(:final url, :final alt):
+        return Semantics(
+          image: true,
+          label: alt.isEmpty
+              ? SupportStrings.text('support.a11y.screenshot')
+              : alt,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 360),
+              child: Image.network(
+                url,
+                fit: BoxFit.contain,
+                excludeFromSemantics: true,
+                loadingBuilder: (_, child, progress) => progress == null
+                    ? child
+                    : Container(
+                        height: 160,
+                        color: colors.primary.withValues(alpha: 0.05),
+                      ),
+                errorBuilder: (_, _, _) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        );
+    }
+  }
+
   // MARK: Conversation
 
   /// The person answering: the newest team reply's author (never an email).
@@ -1754,11 +3023,7 @@ class _SupportViewState extends State<AppReferSupportView>
                 Padding(
                   padding: const EdgeInsetsDirectional.only(top: 5, end: 4),
                   child: Text(
-                    lastDate == null
-                        ? SupportStrings.text('support.thread.sentNoticeNoTime')
-                        : SupportStrings.text('support.thread.sentNotice', {
-                            'time': _clock(lastDate),
-                          }),
+                    notice.text(lastDate == null ? null : _clock(lastDate)),
                     textAlign: TextAlign.end,
                     style: TextStyle(
                       fontSize: 11.5,
@@ -2344,7 +3609,7 @@ class _SupportViewState extends State<AppReferSupportView>
     final brightness = dark ? Brightness.dark : Brightness.light;
     palette = SupportPalette(accent);
     colors = SupportColors(dark);
-    final overlay = id == null
+    final overlay = id == null && helpStack.isEmpty
         ? (palette.darkOnAccent
               ? SystemUiOverlayStyle.dark
               : SystemUiOverlayStyle.light)
@@ -2379,13 +3644,19 @@ class _SupportViewState extends State<AppReferSupportView>
         child: AnnotatedRegion<SystemUiOverlayStyle>(
           value: overlay,
           child: PopScope(
-            canPop: id == null,
+            canPop: id == null && helpStack.isEmpty,
             onPopInvokedWithResult: (popped, result) {
               if (!popped) _back();
             },
             child: Scaffold(
               backgroundColor: colors.background,
-              body: id == null ? _home() : _thread(),
+              body: id != null
+                  ? _thread()
+                  : helpStack.isEmpty
+                  ? _home()
+                  : helpStack.last.isArticle
+                  ? _articleScreen(helpStack.last)
+                  : _helpCentre(),
             ),
           ),
         ),

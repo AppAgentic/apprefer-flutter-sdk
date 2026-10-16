@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
+import 'support_help.dart';
 
 String newSupportMessageId() => List.generate(
   16,
@@ -744,6 +745,18 @@ class SupportAPI {
       token == null ? null : environment,
     );
   });
+
+  /// Whether this install has registered for reply notifications.
+  Future<bool> hasPushToken() async =>
+      apiKey() != null && await _safeRead('support_${apiKey()}.push') != null;
+
+  /// Help centre and status: SDK key only, no session (support_help.dart).
+  late final SupportHelpClient help = SupportHelpClient(
+    client: () => client,
+    apiKey: apiKey,
+    baseUrl: baseUrl,
+    isIOS: Platform.isIOS,
+  );
 
   Future<List<Map<String, dynamic>>> conversations() async {
     final epoch = _generation;

@@ -1,6 +1,14 @@
 # AppRefer Flutter SDK
 
-## 0.10.0 (unreleased): the help chat speaks 35 languages
+## 0.10.0 (unreleased): help centre in the chat; the help chat speaks 35 languages
+
+**Help centre.** When your app has published help articles in AppRefer, the help home
+shows a "Help articles" card (search plus the top articles), with a help centre screen
+(every article by category, search) and an article reader. "Still need help? Message
+us" starts a conversation about the article. Nothing changes for apps without
+articles. Read them in code too: `AppReferSDK.support.articles(query:)`,
+`article(slug)`, and `AppReferSDK.support.status()` to decide whether to register
+push tokens. See [Help centre and status](#help-centre-and-status-0100).
 
 **AppRefer Support is localized.** Every label, placeholder, error and accessibility
 label in the help chat ships in 35 languages and follows the locale your app is
@@ -432,7 +440,9 @@ final unread = await AppReferSDK.support.unreadCount();
 
 // For context-free notification handling, assign your MaterialApp navigatorKey:
 AppReferSDK.support.navigatorKey = navigatorKey;
-await AppReferSDK.support.registerPushToken(fcmToken);
+// Register only once AppRefer has verified your APNs key / FCM service account:
+final status = await AppReferSDK.support.status();
+if (status.pushReady) await AppReferSDK.support.registerPushToken(fcmToken);
 // From a notification tap (not every foreground notification):
 if (AppReferSDK.support.handleNotification(message.data)) return;
 // On sign-out / token removal:
@@ -495,6 +505,35 @@ if (Localizations.localeOf(context).languageCode == 'de') {
 `title`, `replyTime` and topic texts you set are shown as written. The defaults are translated, and `replyTime` is inserted into a translated sentence: in most languages that sentence already carries its own "in", so give the whole phrase (German `'innerhalb weniger Stunden'`, French `'en quelques heures'`). The built-in tiles translate themselves; their title becomes the conversation subject in the customer's language. Errors (offline, rate limit, message too long, upload failed, couldn't load, not sent, image unreadable, device locked) are shown in the customer's language, never as the server's English message.
 
 Every key, its English text, a note for translators and all translations are in [`Localization/support-strings.json`](Localization/support-strings.json), the table all four AppRefer SDKs share; `dart run tool/generate_support_strings.dart` compiles it into `lib/src/support/support_strings_table.g.dart`. Messages your team writes and the AI assistant's answers and hand-over line come from AppRefer, not from this table.
+
+### Help centre and status (0.10.0)
+
+Publish help articles in AppRefer (dashboard, API or MCP) and they appear in the chat with no code: a "Help articles" card on the help home (search and the first three; "See all" with more), a help centre screen (articles by category, search that filters as you type and then asks the server, which also searches article bodies) and a reader. The reader renders markdown (headings, lists, bold and italic, code, quotes, links and https images) with a small built-in parser: no new package. HTML is never run and only http(s) and mailto links are kept; they open outside the app through the SDK's own platform channel. "Still need help? Message us" goes back to the message field with the article's title as the conversation subject. Apps without published articles see no help section at all. Articles come in the chat's language (the best translation the server has); lists are kept in memory for five minutes, and offline the chat shows what it had, never an error screen. Test keys (`pk_test_`) also show drafts, marked "Draft". Back (and the system back gesture) returns from an article to the help centre, then to the home.
+
+```dart
+// Open straight on the help centre or one article (any translation's slug works)
+await AppReferSDK.support.openHelpCentre(context: context);
+await AppReferSDK.support.openArticle('restore-purchases', context: context);
+const AppReferSupportView(opening: AppReferSupportDestination.helpCentre);
+const AppReferSupportView(opening: AppReferSupportDestination.article('restore-purchases'));
+
+// Your own help screens
+final articles = await AppReferSDK.support.articles(); // List<AppReferHelpArticle>: slug, title, summary, category, url, updatedAt, isDraft
+final results = await AppReferSDK.support.articles(query: 'refund'); // server search (titles, summaries, bodies), up to 20
+try {
+  final article = await AppReferSDK.support.article('refunds'); // AppReferHelpArticleDetail: + body (markdown)
+} on SupportException catch (e) {
+  if (e.status == 404) {/* removed or unpublished */}
+}
+
+// Is Support ready?
+final status = await AppReferSDK.support.status();
+status.pushReady; // this platform's push configured and accepted by Apple / Google
+status.emailReplies; // customers can answer reply emails
+status.helpCentreArticles; // published articles
+```
+
+`status()` follows the server's caching (5 minutes once every configured channel is verified, else 30 seconds), so calling it on every launch is cheap. Register push tokens only when `pushReady` is true. The line under a customer's last message follows the same status: "we'll notify you" when push is ready and the app registered, "we'll email you" when replies are emailed and the customer gave an email in `identify`, otherwise "the team's reply will appear here". On Android the `apprefer_support` notification channel is now named in the chat's language.
 
 ## Tracking consent (0.6.0)
 

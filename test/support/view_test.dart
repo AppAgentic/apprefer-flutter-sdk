@@ -89,6 +89,10 @@ void main() {
         client: MockClient((r) async {
           if (r.url.path.endsWith('/session'))
             return http.Response('{"session":"s"}', 200);
+          // Help centre and status (0.10.0) are not what these tests count.
+          if (r.url.path.endsWith('/status') ||
+              r.url.path.startsWith('/api/support/v1/articles'))
+            return http.Response('{"error":"not here"}', 404);
           return handler(r);
         }),
         apiKey: () => 'key',
