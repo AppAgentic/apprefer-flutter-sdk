@@ -162,7 +162,12 @@ Future<AppReferOfferings> resolveOfferings(
         ids.add((p['productId'] as String).split(':').first);
     }
   }
-  final loaded = await products(ids.toList());
+  List<ProductDetails> loaded;
+  try {
+    loaded = await products(ids.toList());
+  } catch (_) {
+    loaded = [];
+  }
   final context = OfferingContext.fromJson(
     Map<String, dynamic>.from(json['context'] as Map? ?? {}),
   );
@@ -177,6 +182,7 @@ Future<AppReferOfferings> resolveOfferings(
       final candidates = loaded.where((v) => v.id == parts.first).toList();
       ProductDetails? product;
       String? token;
+      var hasBasePlan = false;
       final period = {
         PackageType.weekly: 'P1W',
         PackageType.monthly: 'P1M',
@@ -192,8 +198,11 @@ Future<AppReferOfferings> resolveOfferings(
               .productDetails
               .subscriptionOfferDetails![candidate.subscriptionIndex!];
           if (parts.length > 1 && offer.basePlanId != parts[1]) continue;
-          product ??= candidate;
-          token ??= offer.offerIdToken;
+          if (product == null || (offer.offerId == null && !hasBasePlan)) {
+            product = candidate;
+            token = offer.offerIdToken;
+            hasBasePlan = offer.offerId == null;
+          }
           if (offer.pricingPhases.last.billingPeriod == period &&
               offer.offerId == null) {
             product = candidate;

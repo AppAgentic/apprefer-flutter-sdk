@@ -64,17 +64,23 @@ class BillingEngineOptions {
 class BillingEngine {
   final _offeringsCache = <String, Map<String, dynamic>>{};
   Future<AppReferOfferings>? _offeringsRequest;
+  FetchPolicy? _offeringsPolicy;
   int _offeringsGeneration = 0;
   bool _offeringsInvalidated = false;
   Future<AppReferOfferings> offerings([
     FetchPolicy policy = FetchPolicy.cachedOrFetched,
   ]) {
-    if (_offeringsRequest != null) return _offeringsRequest!;
+    if (_offeringsRequest != null &&
+        (_offeringsPolicy == policy ||
+            _offeringsPolicy == FetchPolicy.fetchCurrent))
+      return _offeringsRequest!;
     final generation = _offeringsGeneration;
-    final request = _loadOfferings(policy, generation).whenComplete(() {
-      if (generation == _offeringsGeneration) _offeringsRequest = null;
+    late final Future<AppReferOfferings> request;
+    request = _loadOfferings(policy, generation).whenComplete(() {
+      if (identical(_offeringsRequest, request)) _offeringsRequest = null;
     });
     _offeringsRequest = request;
+    _offeringsPolicy = policy;
     return request;
   }
 
@@ -82,7 +88,9 @@ class BillingEngine {
     FetchPolicy policy,
     int generation,
   ) async {
-    final user = currentAppUserId;
+    final user = await _activeUser();
+    if (user == null || user.isEmpty)
+      throw const AppReferBillingException(AppReferBillingErrorCode.storage);
     final bucket = await _storage.offeringsBucketId();
     final key = 'apprefer_billing_offerings:$user';
     var cached = _offeringsCache[user];
@@ -331,7 +339,12 @@ class BillingEngine {
   /// App came to the foreground: retries failed store completions (Google
   /// acknowledge/consume), refreshes entitlements and drains the queue.
   Future<void> resume() async {
-    unawaited(offerings().then<void>((_) {}, onError: (Object _) {}));
+    final user = await _activeUser();
+    if (user != null &&
+        (_offeringsCache.containsKey(user) ||
+            _storage.prefs.containsKey('apprefer_billing_offerings:$user'))) {
+      unawaited(offerings().then<void>((_) {}, onError: (Object _) {}));
+    }
     await retryUnfinished();
     await customerInfo(FetchPolicy.cachedOrFetched);
     await migrationSync();
