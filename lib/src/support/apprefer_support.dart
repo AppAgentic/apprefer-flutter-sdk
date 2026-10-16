@@ -14,8 +14,16 @@ import 'support_style.dart';
 export 'support_api.dart' show AppReferSupportPersona;
 
 /// Shared support configuration and presentation API.
-class AppReferSupport {
-  AppReferSupport._();
+class AppReferSupport with WidgetsBindingObserver {
+  AppReferSupport._() {
+    WidgetsFlutterBinding.ensureInitialized().addObserver(this);
+    api.resumeRevocations();
+  }
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) api.resumeRevocations();
+  }
+
   static final instance = AppReferSupport._();
   final SupportAPI api = SupportAPI();
   final ValueNotifier<int> accountGeneration = ValueNotifier(0);
@@ -23,6 +31,7 @@ class AppReferSupport {
   NavigatorState? _presentingNavigator;
   void configure({required String apiKey}) {
     AppReferRegistry.explicitSupportKey = apiKey;
+    api.resumeRevocations();
   }
 
   Future<void> reset() async {

@@ -115,9 +115,19 @@ class EventQueue {
         });
         await _save(values);
       });
-      if (epoch != _generation) return AppReferEventResult.dropped;
+      if (epoch != _generation)
+        return _serial(
+          () async => (await _load()).any((e) => e['id'] == id)
+              ? AppReferEventResult.queued
+              : AppReferEventResult.dropped,
+        );
       final results = await flush(only: id);
-      if (epoch != _generation) return AppReferEventResult.dropped;
+      if (epoch != _generation)
+        return _serial(
+          () async => (await _load()).any((e) => e['id'] == id)
+              ? AppReferEventResult.queued
+              : AppReferEventResult.dropped,
+        );
       final status = results[id];
       return status == null
           ? AppReferEventResult.queued

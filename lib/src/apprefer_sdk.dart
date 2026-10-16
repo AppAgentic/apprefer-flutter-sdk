@@ -58,12 +58,29 @@ class AppReferSDK with WidgetsBindingObserver {
 
   AppReferSDK._();
 
+  /// Disposes process state between isolated SDK tests; persisted install state is retained.
+  @visibleForTesting
+  static Future<void> disposeForTesting() async {
+    final sdk = _instance;
+    if (sdk != null) {
+      sdk._httpClient.cancel();
+      sdk._conversion.cancel();
+      WidgetsBinding.instance.removeObserver(sdk);
+    }
+    await _eventQueue?.clear();
+    _instance = null;
+    _configuring = null;
+    _requestedConfig = null;
+    _eventQueue = null;
+  }
+
   static Future<AppReferAttributionResult> configureResult(
     AppReferConfig config,
   ) async {
     try {
       final attribution = await configure(config);
-      if (attribution?.trackingDecisionPending == true)
+      if (attribution?.trackingDecisionPending == true &&
+          attribution?.matchType != 'adservices')
         return AppReferAttributionResult(
           AttributionStatus.pending,
           attribution: attribution,
@@ -96,22 +113,34 @@ class AppReferSDK with WidgetsBindingObserver {
 
   static Future<void> reset() async {
     _accountGeneration++;
+    _configuring = null;
+    _requestedConfig = null;
     final sdk = _instance;
     if (sdk != null) {
       sdk._generation++;
       sdk._consentRecheck = false;
       sdk._httpClient.cancel();
       sdk._conversion.cancel();
-      await sdk._events.clear();
-      await _accountWrite(sdk._storage.clearUser);
+      await _ignoreStorage(sdk._events.clear);
+      await _ignoreStorage(() => _accountWrite(sdk._storage.clearUser));
     }
-    final prefs = await SharedPreferences.getInstance();
-    await _accountWrite(() async {
-      await prefs.remove('apprefer_user_id');
+    if (sdk == null) {
+      _eventQueue ??= EventQueue((_) async => null, () => true);
+      await _ignoreStorage(_eventQueue!.clear);
+    }
+    await _ignoreStorage(() async {
+      final prefs = await SharedPreferences.getInstance();
+      await _accountWrite(() async {
+        await prefs.remove('apprefer_user_id');
+      });
     });
-    await prefs.remove(EventQueue.key);
-    await prefs.remove('${EventQueue.key}.corrupt');
     await support.reset();
+  }
+
+  static Future<void> _ignoreStorage(Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (_) {}
   }
 
   static Future<void> clearPendingEvents() async {
@@ -135,7 +164,39 @@ class AppReferSDK with WidgetsBindingObserver {
   /// On first open: sends device signals + AdServices token to backend,
   /// resolves attribution, caches locally, returns result.
   /// On subsequent opens: reports changed consent, then returns cached attribution.
-  static Future<Attribution?> configure(AppReferConfig config) async {
+  static Future<Attribution?>? _configuring;
+  static AppReferConfig? _requestedConfig;
+  static bool _sameConfig(AppReferConfig a, AppReferConfig b) =>
+      a.apiKey == b.apiKey &&
+      a.userId == b.userId &&
+      a.debug == b.debug &&
+      a.logLevel == b.logLevel;
+  static Future<Attribution?> configure(AppReferConfig config) {
+    support.api.resumeRevocations();
+    if (_requestedConfig != null &&
+        _sameConfig(_requestedConfig!, config) &&
+        _configuring != null)
+      return _configuring!;
+    if (_instance != null && _sameConfig(_instance!._config, config)) {
+      return trackingConsentDidChange().then((_) => _getCachedAttribution());
+    }
+    _requestedConfig = config;
+    final task = _configureNew(config);
+    _configuring = task;
+    unawaited(
+      task.then<void>(
+        (_) {
+          if (identical(_configuring, task)) _configuring = null;
+        },
+        onError: (Object _) {
+          if (identical(_configuring, task)) _configuring = null;
+        },
+      ),
+    );
+    return task;
+  }
+
+  static Future<Attribution?> _configureNew(AppReferConfig config) async {
     final accountEpoch = _accountGeneration;
     _instance?._httpClient.cancel();
     _instance?._conversion.cancel();
@@ -488,6 +549,7 @@ class AppReferSDK with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) support.api.resumeRevocations();
     if (state == AppLifecycleState.resumed) {
       unawaited(_conversion.refresh());
       unawaited(_events.flush());
@@ -533,8 +595,11 @@ class AppReferSDK with WidgetsBindingObserver {
     if (!_storage.isSdkEnabled() || !_storage.isMatchRequestAttempted()) return;
     final consent = await TrackingConsent.current();
     final prefs = await SharedPreferences.getInstance();
-    if (consent == null ||
-        consent == prefs.getString(TrackingConsent.reportedKey))
+    final cached = _getCachedAttribution();
+    if ((consent == null ||
+            consent == prefs.getString(TrackingConsent.reportedKey)) &&
+        !(cached?.trackingDecisionPending == true &&
+            cached?.matchType != 'adservices'))
       return;
     final body = <String, dynamic>{
       'device_id': await _storage.getDeviceId(),
@@ -600,7 +665,8 @@ class AppReferSDK with WidgetsBindingObserver {
     } else {
       await _storage.clearAttributionCache();
     }
-    await prefs.setString(TrackingConsent.reportedKey, consent);
+    if (consent != null)
+      await prefs.setString(TrackingConsent.reportedKey, consent);
   }
 
   /// Get cached attribution result (instant, no network call).

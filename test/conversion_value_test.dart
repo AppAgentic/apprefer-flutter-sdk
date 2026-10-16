@@ -25,6 +25,7 @@ void main() {
   late Map<String, dynamic> response;
   late MockClient client;
   setUp(() async {
+    await AppReferSDK.disposeForTesting();
     SharedPreferences.setMockInitialValues({});
     storage = AppReferStorage();
     await storage.init();
@@ -120,7 +121,9 @@ void main() {
         expect(r.headers['X-AppRefer-Key'], 'pk_test');
         expect(jsonDecode(r.body), {
           'device_id': await storage.getDeviceId(),
-          'installed_at': DateTime.parse(await storage.getFirstRunDate()).toUtc().toIso8601String(),
+          'installed_at': DateTime.parse(
+            await storage.getFirstRunDate(),
+          ).toUtc().toIso8601String(),
         });
       }
     },

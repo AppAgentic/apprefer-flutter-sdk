@@ -96,6 +96,7 @@ class SupportAPI {
   final Future<List<String>> Function() keys;
   Future<void> _storageWork = Future.value();
   Future<void> _resetting = Future.value();
+  final _invalidatedSlots = <String>{};
   Future<T> _store<T>(Future<T> Function() action) {
     final result = _storageWork.then((_) => action());
     _storageWork = result.then<void>((_) {}, onError: (Object _) {});
@@ -109,44 +110,99 @@ class SupportAPI {
     _session = null;
     name = null;
     email = null;
+    final currentKey = apiKey();
     _resetting = _store(() async {
-      final all = <String>{...await keys()};
-      final key = apiKey();
-      if (key != null)
-        all.addAll([
-          'support_$key.token',
-          'support_$key.profile',
-          'support_$key.push',
-        ]);
-      final revocations = <Map<String, dynamic>>[];
-      for (final slot in all) {
-        if (!slot.startsWith('support_')) continue;
-        if (slot.endsWith('.token')) {
-          final old = await read(slot);
-          final prefix = slot.substring(0, slot.length - 6);
-          final push = await read('$prefix.push');
-          if (old != null)
-            revocations.add({
-              'token': old,
-              'key': prefix.substring(8),
-              if (push != null) 'push': push,
-            });
+      final cleared = <String>{};
+      Future<void> clear(List<String> slots) async {
+        for (final slot in slots) {
+          if (!slot.startsWith('support_') || cleared.contains(slot)) continue;
+          if (slot.endsWith('.token')) {
+            _invalidatedSlots.add(slot);
+            final token = await _safeRead(slot);
+            final prefix = slot.substring(0, slot.length - 6);
+            final push = await _safeRead('$prefix.push');
+            if (token != null)
+              _deferredRevocations.add({
+                'token': token,
+                'key': prefix.substring(8),
+                if (push != null) 'push': push,
+              });
+            await _saveRevocations();
+          }
+          try {
+            await write(slot, null);
+          } catch (_) {}
+          cleared.add(slot);
         }
       }
-      for (final slot in all) {
-        if (slot.startsWith('support_')) await write(slot, null);
-      }
-      final old = await read('apprefer_revocations');
-      final pending = old == null ? <dynamic>[] : jsonDecode(old) as List;
-      await write(
-        'apprefer_revocations',
-        jsonEncode([...pending, ...revocations]),
-      );
-    });
+
+      if (currentKey != null)
+        await clear([
+          'support_$currentKey.token',
+          'support_$currentKey.profile',
+          'support_$currentKey.push',
+        ]);
+      try {
+        await clear(await keys());
+      } catch (_) {}
+      await _saveRevocations();
+    }).catchError((Object _) {});
     return _resetting.then((_) {
       persona.value = null;
-      unawaited(_revokePending().catchError((Object _) {}));
+      resumeRevocations();
     });
+  }
+
+  final _deferredRevocations = <Map<String, dynamic>>[];
+  Future<String?> _safeRead(String slot) async {
+    try {
+      return await read(slot);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  List<Map<String, dynamic>> _parseRevocations(String? raw) {
+    try {
+      final value = jsonDecode(raw ?? '[]');
+      if (value is! List) return [];
+      return value
+          .whereType<Map>()
+          .where(
+            (v) =>
+                v['token'] is String &&
+                (v['key'] == null || v['key'] is String) &&
+                (v['push'] == null || v['push'] is String),
+          )
+          .map((v) => Map<String, dynamic>.from(v))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _savedRevocations() async {
+    final result = _parseRevocations(await read('apprefer_revocations'));
+    for (final item in _deferredRevocations) {
+      if (!result.any(
+        (v) => v['token'] == item['token'] && v['key'] == item['key'],
+      ))
+        result.add(item);
+    }
+    return result;
+  }
+
+  Future<void> _saveRevocations() async {
+    try {
+      await write(
+        'apprefer_revocations',
+        jsonEncode(await _savedRevocations()),
+      );
+    } catch (_) {}
+  }
+
+  void resumeRevocations() {
+    unawaited(_revokePending().catchError((Object _) {}));
   }
 
   Future<void>? _revoking;
@@ -154,12 +210,14 @@ class SupportAPI {
       _revoking ??= _runRevocations().whenComplete(() => _revoking = null);
   Future<void> _runRevocations() async {
     final pending = await _store(() async {
-      final raw = await read('apprefer_revocations');
-      return raw == null ? <dynamic>[] : jsonDecode(raw) as List;
+      final items = await _savedRevocations();
+      await write('apprefer_revocations', jsonEncode(items));
+      return items;
     });
     for (final item in pending) {
       final key = item['key'] as String? ?? apiKey();
       if (key == null) continue;
+      var succeeded = true;
       for (final path in [
         if (item['push'] != null) '/push-token',
         '/session',
@@ -174,22 +232,21 @@ class SupportAPI {
             timeout: const Duration(seconds: 5),
           );
         } catch (_) {
-          /* Local logout is already complete. */
+          succeeded = false;
         }
       }
+      if (!succeeded) continue;
+      await _store(() async {
+        final current = await _savedRevocations();
+        current.removeWhere(
+          (v) => v['token'] == item['token'] && v['key'] == item['key'],
+        );
+        await write('apprefer_revocations', jsonEncode(current));
+        _deferredRevocations.removeWhere(
+          (v) => v['token'] == item['token'] && v['key'] == item['key'],
+        );
+      });
     }
-    await _store(() async {
-      final raw = await read('apprefer_revocations');
-      final current = raw == null ? <dynamic>[] : jsonDecode(raw) as List;
-      current.removeWhere(
-        (item) => pending.any(
-          (old) =>
-              old['token'] == item['token'] &&
-              (old['key'] != null || apiKey() != null),
-        ),
-      );
-      await write('apprefer_revocations', jsonEncode(current));
-    });
   }
 
   final String baseUrl;
@@ -279,6 +336,10 @@ class SupportAPI {
     final fingerprint = jsonEncode(p);
     await _resetting;
     var token = await _store(() => read('$prefix.token'));
+    final pending = await _savedRevocations();
+    if (_invalidatedSlots.contains('$prefix.token') ||
+        pending.any((item) => item['token'] == token))
+      token = null;
     if (epoch != _generation) throw SupportException(0, 'Support reset');
     if (token == null || await read('$prefix.profile') != fingerprint) {
       final response = await _raw(
@@ -295,6 +356,7 @@ class SupportAPI {
       await _store(() async {
         if (epoch != _generation) throw SupportException(0, 'Support reset');
         await write('$prefix.token', token);
+        _invalidatedSlots.remove('$prefix.token');
         await write('$prefix.profile', fingerprint);
       });
     }
