@@ -8,10 +8,16 @@ import 'package:http/http.dart' as http;
 import '../version.dart';
 import 'billing_error.dart';
 import 'customer_info.dart';
+import 'offerings.dart';
 
 /// One `/api/billing/v1/*` call.
 sealed class BillingEndpoint {
   const BillingEndpoint();
+}
+
+class GetOfferings extends BillingEndpoint {
+  final Map<String, dynamic> body;
+  const GetOfferings(this.body);
 }
 
 class CreateCustomer extends BillingEndpoint {
@@ -39,12 +45,16 @@ class RecordPurchase extends BillingEndpoint {
   /// already belongs to another app user to this one. Purchases and store
   /// updates (renewals included) never set it.
   final bool restore;
+  final PresentedOfferingContext? presentedOfferingContext;
+  final String? bucketId;
   const RecordPurchase(
     this.appUserId,
     this.appreferId,
     this.storeFields,
     this.attributes, {
     this.restore = false,
+    this.presentedOfferingContext,
+    this.bucketId,
   });
 }
 
@@ -85,6 +95,10 @@ class BillingApiClient {
     Map<String, dynamic>? body;
 
     switch (endpoint) {
+      case GetOfferings(:final body):
+        path = '/api/billing/v1/offerings';
+        // Assigned below using the outer request body.
+        return _offeringsRequest(baseUrl, apiKey, body);
       case CreateCustomer(
         :final appUserId,
         :final appreferId,
@@ -106,6 +120,8 @@ class BillingApiClient {
         :final storeFields,
         :final attributes,
         :final restore,
+        :final presentedOfferingContext,
+        :final bucketId,
       ):
         path = '/api/billing/v1/purchases';
         body = {
@@ -114,6 +130,9 @@ class BillingApiClient {
           if (appreferId != null) 'appreferId': appreferId,
           if (attributes.isNotEmpty) 'attributes': attributes,
           if (restore) 'restore': true,
+          if (presentedOfferingContext != null)
+            'presentedOfferingContext': presentedOfferingContext.toJson(),
+          if (bucketId != null) 'bucketId': bucketId,
         };
       case Identify(:final anonymousId, :final appUserId):
         path = '/api/billing/v1/identify';
@@ -157,7 +176,24 @@ class BillingApiClient {
   }
 
   /// Sends the request. 5xx and network errors fail over to the next host; 4xx are final.
-  Future<BillingCustomerResponse> send(BillingEndpoint endpoint) async {
+  static http.Request _offeringsRequest(
+    String baseUrl,
+    String apiKey,
+    Map<String, dynamic> body,
+  ) {
+    return http.Request('POST', Uri.parse('$baseUrl/api/billing/v1/offerings'))
+      ..headers.addAll({
+        'X-AppRefer-Key': apiKey,
+        'X-SDK-Version': appReferVersion,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      })
+      ..body = jsonEncode(body);
+  }
+
+  Future<BillingCustomerResponse> send(BillingEndpoint endpoint) async =>
+      BillingCustomerResponse.fromJson(await sendRaw(endpoint));
+  Future<Map<String, dynamic>> sendRaw(BillingEndpoint endpoint) async {
     final key = await _resolveApiKey();
     if (key == null) {
       throw const AppReferBillingException(
@@ -214,7 +250,7 @@ class BillingApiClient {
           );
         }
         try {
-          return BillingCustomerResponse.fromJson(json);
+          return json;
         } catch (_) {
           throw const AppReferBillingException(
             AppReferBillingErrorCode.invalidResponse,

@@ -15,7 +15,7 @@ dependencies:
   apprefer:
     git:
       url: https://github.com/AppAgentic/apprefer-flutter-sdk.git
-      ref: 0.7.0
+      ref: 0.8.0
 ```
 
 Then run `flutter pub get`.
@@ -400,3 +400,24 @@ To receive copies of the winning postbacks in AppRefer, add to your app's Info.p
 Also add the `SKAdNetworkItems` identifiers your ad networks publish.
 
 On Android, the public conversion-value API is a no-op.
+
+## Offerings (0.8.0)
+
+Configure named offerings, packages, placements, targeting and experiments in AppRefer. Your paywall reads the store products without hard-coding product ids.
+
+```dart
+final offerings = await AppReferBilling.offerings();
+final annual = offerings.currentOffering('onboarding')?.annual;
+if (annual != null) {
+  // Show annual.storeProduct.price in your paywall.
+  final result = await AppReferBilling.purchasePackage(annual);
+}
+```
+
+`current` is the resolved default, and `all` contains offerings by identifier. Each offering has JSON `metadata`, `availablePackages`, a package lookup, and `weekly`, `monthly`, `twoMonth`, `threeMonth`, `sixMonth`, `annual` and `lifetime` shortcuts. `$rc_*` package identifiers are accepted alongside `$ar_*`; unrecognized types become `custom`. Packages missing a product for this platform or unavailable in the store are omitted.
+
+Unknown placements fall back to current; a configured null placement suppresses the paywall. Placement lookups return a copy carrying placement attribution. Purchase the package to send its offering/package, placement, targeting and experiment context, plus the persistent install bucket. Context survives pending purchases and retry-queue restarts.
+
+Offerings use a five-minute memory and disk cache. Foreground refreshes stale data; login/logout invalidates it and refreshes an already-used catalogue. Network/server failures return the last cached response of any age after resolving store products again. No cache means the SDK billing error is thrown; catch it and use your existing paywall product ids. Offerings never gate configuration or purchases. Concurrent callers share one request.
+
+Google Play `subscription:basePlan` selects that base plan; a bare subscription selects the period matching the package type, otherwise the first base plan. The package exposes the selected offer token. Storefront country uses ISO alpha-2 when available; no device locale is substituted. The install bucket stays stable after login/logout.

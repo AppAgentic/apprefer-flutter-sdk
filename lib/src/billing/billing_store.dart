@@ -2,6 +2,7 @@ import 'package:flutter/services.dart' show PlatformException;
 import 'package:in_app_purchase/in_app_purchase.dart';
 
 import 'customer_info.dart';
+import 'offerings.dart';
 
 enum StoreProductKind { autoRenewable, nonRenewable, consumable, nonConsumable }
 
@@ -40,6 +41,7 @@ class StorePurchase {
 
   /// Apple `appAccountToken` / Google `obfuscatedAccountId` the purchase was
   /// made with, when the store reports one.
+  final PresentedOfferingContext? presentedOfferingContext;
   final String? accountToken;
 
   /// Apple `originalTransactionId`, when the store reports one.
@@ -75,6 +77,7 @@ class StorePurchase {
     this.errorMessage,
     this.errorCode,
     this.accountToken,
+    this.presentedOfferingContext,
     this.originalTransactionId,
     this.orderId,
     this.purchasedAt,
@@ -209,6 +212,7 @@ class StoreEntitlement {
   final String? transactionId;
 
   /// Apple `appAccountToken` / Google `obfuscatedAccountId`, when set.
+  final PresentedOfferingContext? presentedOfferingContext;
   final String? accountToken;
 
   const StoreEntitlement({
@@ -222,6 +226,7 @@ class StoreEntitlement {
     this.periodType = BillingPeriodType.normal,
     this.transactionId,
     this.accountToken,
+    this.presentedOfferingContext,
   });
 
   /// Not revoked, not upgraded away, not expired, not consumable.
@@ -239,6 +244,7 @@ class StoreEntitlement {
 /// Options for one purchase, passed through to the platform plugin.
 class StorePurchaseOptions {
   /// Apple `appAccountToken` / Google `obfuscatedAccountId`.
+  final PresentedOfferingContext? presentedOfferingContext;
   final String? accountToken;
   final Object? promotionalOffer;
   final String? winBackOfferId;
@@ -246,6 +252,7 @@ class StorePurchaseOptions {
 
   const StorePurchaseOptions({
     this.accountToken,
+    this.presentedOfferingContext,
     this.promotionalOffer,
     this.winBackOfferId,
     this.changeSubscriptionParam,
@@ -254,6 +261,8 @@ class StorePurchaseOptions {
 
 /// The store behind an interface so the engine can be tested with fakes.
 abstract class BillingStoreAdapter {
+  Future<String?> storefrontCountry() async => null;
+  String? get appVersion => null;
   BillingStore get store;
 
   /// Purchase updates (new purchases, renewals, Ask to Buy approvals,
@@ -296,9 +305,9 @@ class LocalEntitlements {
     String? defaultEntitlement,
   }) {
     final c = configured[productId];
-    if (c != null && c.isNotEmpty) return c;
+    if (c != null) return c;
     final l = learned[productId];
-    if (l != null && l.isNotEmpty) return l;
+    if (l != null) return l;
     return [defaultEntitlement ?? 'premium'];
   }
 

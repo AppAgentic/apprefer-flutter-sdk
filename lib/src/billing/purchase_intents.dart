@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'billing_error.dart';
+import 'offerings.dart';
 
 /// Who opened a purchase sheet, saved before it opens, so a purchase that
 /// completes after an app restart, logout or user switch (Ask to Buy, SCA, a
@@ -14,12 +15,16 @@ class PurchaseIntent {
   /// The account token the purchase was tagged with, when there was one.
   final String? accountToken;
   final DateTime startedAt;
+  final PresentedOfferingContext? presentedOfferingContext;
+  final String? bucketId;
 
   const PurchaseIntent({
     required this.appUserId,
     required this.productId,
     required this.accountToken,
     required this.startedAt,
+    this.presentedOfferingContext,
+    this.bucketId,
   });
 
   bool sameAs(PurchaseIntent other) =>
@@ -32,6 +37,9 @@ class PurchaseIntent {
     'productId': productId,
     'accountToken': accountToken,
     'startedAtMs': startedAt.millisecondsSinceEpoch,
+    if (presentedOfferingContext != null)
+      'presentedOfferingContext': presentedOfferingContext!.toJson(),
+    if (bucketId != null) 'bucketId': bucketId,
   };
 
   static PurchaseIntent? fromJson(Object? json) {
@@ -46,6 +54,14 @@ class PurchaseIntent {
       productId: productId,
       accountToken: token is String && token.isNotEmpty ? token : null,
       startedAt: DateTime.fromMillisecondsSinceEpoch(ms.round()),
+      presentedOfferingContext: json['presentedOfferingContext'] is Map
+          ? PresentedOfferingContext.fromJson(
+              Map<String, dynamic>.from(
+                json['presentedOfferingContext'] as Map,
+              ),
+            )
+          : null,
+      bucketId: json['bucketId'] as String?,
     );
   }
 }

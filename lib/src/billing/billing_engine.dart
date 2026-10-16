@@ -5,6 +5,7 @@ import 'package:in_app_purchase/in_app_purchase.dart';
 
 import '../services/logger.dart';
 import 'billing_api_client.dart';
+import 'offerings.dart';
 import 'billing_error.dart';
 import 'billing_storage.dart';
 import 'billing_store.dart';
@@ -61,6 +62,119 @@ class BillingEngineOptions {
 /// queue and the outage fallback. Everything goes through [BillingStoreAdapter]
 /// and [BillingApiClient] so it can be tested without the store.
 class BillingEngine {
+  final _offeringsCache = <String, Map<String, dynamic>>{};
+  Future<AppReferOfferings>? _offeringsRequest;
+  FetchPolicy? _offeringsPolicy;
+  int _offeringsGeneration = 0;
+  bool _offeringsInvalidated = false;
+  Future<AppReferOfferings> offerings([
+    FetchPolicy policy = FetchPolicy.cachedOrFetched,
+  ]) {
+    if (_offeringsRequest != null &&
+        (_offeringsPolicy == policy ||
+            _offeringsPolicy == FetchPolicy.fetchCurrent))
+      return _offeringsRequest!;
+    final generation = _offeringsGeneration;
+    late final Future<AppReferOfferings> request;
+    request = _loadOfferings(policy, generation).whenComplete(() {
+      if (identical(_offeringsRequest, request)) _offeringsRequest = null;
+    });
+    _offeringsRequest = request;
+    _offeringsPolicy = policy;
+    return request;
+  }
+
+  Future<AppReferOfferings> _loadOfferings(
+    FetchPolicy policy,
+    int generation,
+  ) async {
+    final user = await _activeUser();
+    if (user == null || user.isEmpty)
+      throw const AppReferBillingException(AppReferBillingErrorCode.storage);
+    final bucket = await _storage.offeringsBucketId();
+    final key = 'apprefer_billing_offerings:$user';
+    var cached = _offeringsCache[user];
+    if (cached == null) {
+      try {
+        final raw = _storage.prefs.getString(key);
+        if (raw != null) cached = jsonDecode(raw) as Map<String, dynamic>;
+      } catch (_) {}
+    }
+    if (_offeringsInvalidated ||
+        policy == FetchPolicy.fetchCurrent ||
+        cached == null ||
+        _now().millisecondsSinceEpoch - (cached['atMs'] as num) >= 300000) {
+      try {
+        final context = (cached?['response'] as Map?)?['context'] as Map?;
+        final country = await _store.storefrontCountry();
+        final response = await _api.sendRaw(
+          GetOfferings({
+            'appUserId': user,
+            'bucketId': bucket,
+            'platform': _store.store == BillingStore.appStore
+                ? 'ios'
+                : _store.store == BillingStore.playStore
+                ? 'android'
+                : 'web',
+            if (country != null) 'country': country,
+            if (_store.appVersion != null) 'appVersion': _store.appVersion,
+            if (context?['experimentId'] is String &&
+                context?['variantId'] is String)
+              'known': {
+                'experimentId': context!['experimentId'],
+                'variantId': context['variantId'],
+              },
+          }),
+        );
+        if (response['offerings'] is! List)
+          throw const AppReferBillingException(
+            AppReferBillingErrorCode.invalidResponse,
+          );
+        cached = {'atMs': _now().millisecondsSinceEpoch, 'response': response};
+        if (generation == _offeringsGeneration) {
+          _offeringsInvalidated = false;
+          _offeringsCache[user] = cached;
+          await _storage.prefs.setString(key, jsonEncode(cached));
+        }
+      } catch (e) {
+        if (cached == null)
+          throw e is AppReferBillingException
+              ? e
+              : AppReferBillingException(
+                  AppReferBillingErrorCode.network,
+                  message: e.toString(),
+                );
+      }
+    }
+    if (generation == _offeringsGeneration) _offeringsCache[user] = cached;
+    return resolveOfferings(
+      Map<String, dynamic>.from(cached['response'] as Map),
+      _store.products,
+    );
+  }
+
+  void _invalidateOfferings() {
+    _offeringsGeneration++;
+    _offeringsInvalidated = true;
+    _offeringsRequest = null;
+    for (final value in _offeringsCache.values) {
+      value['atMs'] = 0;
+    }
+    if (_offeringsCache.isNotEmpty)
+      unawaited(
+        offerings(
+          FetchPolicy.fetchCurrent,
+        ).then<void>((_) {}, onError: (Object _) {}),
+      );
+  }
+
+  Future<PurchaseResult> purchasePackage(AppReferPackage package) => purchase(
+    package.storeProduct,
+    StorePurchaseOptions(
+      presentedOfferingContext: package.presentedOfferingContext,
+    ),
+  );
+
   final BillingApiClient _api;
   final BillingStorage _storage;
   final PendingPurchaseQueue _queue;
@@ -225,6 +339,12 @@ class BillingEngine {
   /// App came to the foreground: retries failed store completions (Google
   /// acknowledge/consume), refreshes entitlements and drains the queue.
   Future<void> resume() async {
+    final user = await _activeUser();
+    if (user != null &&
+        (_offeringsCache.containsKey(user) ||
+            _storage.prefs.containsKey('apprefer_billing_offerings:$user'))) {
+      unawaited(offerings().then<void>((_) {}, onError: (Object _) {}));
+    }
     await retryUnfinished();
     await customerInfo(FetchPolicy.cachedOrFetched);
     await migrationSync();
@@ -672,7 +792,14 @@ class BillingEngine {
     final deviceId = await _safeAppreferId();
     try {
       final response = await _api.send(
-        RecordPurchase(user, deviceId, fields, attributes),
+        RecordPurchase(
+          user,
+          deviceId,
+          fields,
+          attributes,
+          presentedOfferingContext: intent?.presentedOfferingContext,
+          bucketId: intent?.bucketId,
+        ),
       );
       _storage.clearSentAttributes(attributes);
       await _complete(purchase);
@@ -688,7 +815,15 @@ class BillingEngine {
       final bool secured;
       if (e.isRetryable) {
         _notePause(e);
-        secured = await _queueAndSecure(purchase, fields, user, deviceId, e);
+        secured = await _queueAndSecure(
+          purchase,
+          fields,
+          user,
+          deviceId,
+          e,
+          context: intent?.presentedOfferingContext,
+          bucketId: intent?.bucketId,
+        );
       } else {
         // Refused for good (400/413/422): kept on the device for support and
         // Restore Purchases; the store fallback still unlocks a verified
@@ -781,6 +916,8 @@ class BillingEngine {
     AppReferBillingException error, {
     bool restore = false,
     bool attempted = true,
+    PresentedOfferingContext? context,
+    String? bucketId,
   }) async {
     _logger.warn('Billing: queued purchase ${purchase.id} for retry ($error)');
     await _queue.add(
@@ -792,6 +929,8 @@ class BillingEngine {
         storeFields: fields,
         enqueuedAt: _now(),
         attempts: attempted && !error.pausesQueue ? 1 : 0,
+        presentedOfferingContext: context,
+        bucketId: bucketId,
         restore: restore,
       ),
     );
@@ -1042,6 +1181,10 @@ class BillingEngine {
         productId: product.id,
         accountToken: accountToken,
         startedAt: _now(),
+        presentedOfferingContext: options.presentedOfferingContext,
+        bucketId: options.presentedOfferingContext != null
+            ? await _storage.offeringsBucketId()
+            : null,
       );
       if (!await _intents.add(intent)) {
         intent = null;
@@ -1238,6 +1381,8 @@ class BillingEngine {
             entry.storeFields,
             const {},
             restore: entry.restore,
+            presentedOfferingContext: entry.presentedOfferingContext,
+            bucketId: entry.bucketId,
           ),
         );
         await _queue.remove(entry.transactionId);
@@ -1367,6 +1512,7 @@ class BillingEngine {
       }
       _storage.loggedInAppUserId = appUserId;
       _lastServerFetch = null;
+      _invalidateOfferings();
     }
     final info = await customerInfo(FetchPolicy.fetchCurrent);
     Timer.run(() => unawaited(migrationSync(appUserId)));
@@ -1379,6 +1525,7 @@ class BillingEngine {
     _storage.loggedInAppUserId = null;
     _storage.resetAnonymousId();
     _lastServerFetch = null;
+    _invalidateOfferings();
     return customerInfo(FetchPolicy.fetchCurrent);
   }
 

@@ -132,6 +132,16 @@ class BillingStorage {
     }
   }
 
+  Future<String> offeringsBucketId() async {
+    const key = 'apprefer_billing_offerings_bucket';
+    final existing = prefs.getString(key);
+    if (existing != null) return existing;
+    final id = anonymousId();
+    if (!await prefs.setString(key, id))
+      throw const AppReferBillingException(AppReferBillingErrorCode.storage);
+    return id;
+  }
+
   String get currentAppUserId => loggedInAppUserId ?? anonymousId();
 
   /// SharedPreferences updates its in-memory copy at once and writes to disk
