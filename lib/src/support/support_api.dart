@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:http/http.dart' as http;
@@ -71,6 +72,7 @@ class SupportAPI {
     Future<void> Function(String, String?)? write,
     Future<Map<String, dynamic>> Function()? profile,
     String? Function()? apiKey,
+    Future<List<String>> Function()? keys,
   }) : _injectedClient = client != null,
        client = client ?? http.Client(),
        read =
@@ -82,43 +84,112 @@ class SupportAPI {
              'value': value,
            })),
        profile = profile ?? defaultProfile,
-       apiKey = apiKey ?? (() => AppReferRegistry.apiKey);
+       apiKey = apiKey ?? (() => AppReferRegistry.supportKey),
+       keys =
+           keys ??
+           (() async =>
+               await supportChannel.invokeListMethod<String>('keys') ?? []);
   final bool _injectedClient;
   http.Client client;
   int _generation = 0;
-  Future<void> reset() async {
+  int get actionGeneration => _generation;
+  final Future<List<String>> Function() keys;
+  Future<void> _storageWork = Future.value();
+  Future<void> _resetting = Future.value();
+  Future<T> _store<T>(Future<T> Function() action) {
+    final result = _storageWork.then((_) => action());
+    _storageWork = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
+
+  Future<void> reset() {
     _generation++;
     client.close();
     if (!_injectedClient) client = http.Client();
-    final pending = _session;
     _session = null;
     name = null;
     email = null;
-    persona.value = null;
-    if (pending != null) {
-      try {
-        await pending;
-      } catch (_) {}
-    }
-    if (apiKey() == null) return;
-    final prefix = 'support_${apiKey()}';
-    final old = await read('$prefix.token');
-    final push = await read('$prefix.push');
-    await write('$prefix.push', null);
-    await write('$prefix.token', null);
-    await write('$prefix.profile', null);
-    if (old != null) {
-      if (push != null) {
+    _resetting = _store(() async {
+      final all = <String>{...await keys()};
+      final key = apiKey();
+      if (key != null)
+        all.addAll([
+          'support_$key.token',
+          'support_$key.profile',
+          'support_$key.push',
+        ]);
+      final revocations = <Map<String, dynamic>>[];
+      for (final slot in all) {
+        if (!slot.startsWith('support_')) continue;
+        if (slot.endsWith('.token')) {
+          final old = await read(slot);
+          final prefix = slot.substring(0, slot.length - 6);
+          final push = await read('$prefix.push');
+          if (old != null)
+            revocations.add({
+              'token': old,
+              'key': prefix.substring(8),
+              if (push != null) 'push': push,
+            });
+        }
+      }
+      for (final slot in all) {
+        if (slot.startsWith('support_')) await write(slot, null);
+      }
+      final old = await read('apprefer_revocations');
+      final pending = old == null ? <dynamic>[] : jsonDecode(old) as List;
+      await write(
+        'apprefer_revocations',
+        jsonEncode([...pending, ...revocations]),
+      );
+    });
+    return _resetting.then((_) {
+      persona.value = null;
+      unawaited(_revokePending().catchError((Object _) {}));
+    });
+  }
+
+  Future<void>? _revoking;
+  Future<void> _revokePending() =>
+      _revoking ??= _runRevocations().whenComplete(() => _revoking = null);
+  Future<void> _runRevocations() async {
+    final pending = await _store(() async {
+      final raw = await read('apprefer_revocations');
+      return raw == null ? <dynamic>[] : jsonDecode(raw) as List;
+    });
+    for (final item in pending) {
+      final key = item['key'] as String? ?? apiKey();
+      if (key == null) continue;
+      for (final path in [
+        if (item['push'] != null) '/push-token',
+        '/session',
+      ]) {
         try {
-          await _raw('DELETE', '/push-token', {'token': push}, old);
-        } catch (_) {}
-      }
-      try {
-        await _raw('DELETE', '/session', null, old);
-      } catch (_) {
-        /* Best effort. */
+          await _raw(
+            'DELETE',
+            path,
+            path == '/push-token' ? {'token': item['push']} : null,
+            item['token'] as String,
+            keyOverride: key,
+            timeout: const Duration(seconds: 5),
+          );
+        } catch (_) {
+          /* Local logout is already complete. */
+        }
       }
     }
+    await _store(() async {
+      final raw = await read('apprefer_revocations');
+      final current = raw == null ? <dynamic>[] : jsonDecode(raw) as List;
+      current.removeWhere(
+        (item) => pending.any(
+          (old) =>
+              old['token'] == item['token'] &&
+              (old['key'] != null || apiKey() != null),
+        ),
+      );
+      await write('apprefer_revocations', jsonEncode(current));
+    });
   }
 
   final String baseUrl;
@@ -136,7 +207,7 @@ class SupportAPI {
     final storage = AppReferStorage();
     await storage.init();
     return {
-      if (storage.existingDeviceId() != null)
+      if (AppReferRegistry.apiKey != null && storage.existingDeviceId() != null)
         'deviceId': storage.existingDeviceId(),
       if (storage.getUserId() != null) 'appUserId': storage.getUserId(),
     };
@@ -146,10 +217,14 @@ class SupportAPI {
     String method,
     String path,
     Map<String, dynamic>? body,
-    String? token,
-  ) async {
-    final epoch = _generation;
-    final key = apiKey();
+    String? token, {
+    String? keyOverride,
+    int? expectedGeneration,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final epoch = expectedGeneration ?? _generation;
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    final key = keyOverride ?? apiKey();
     if (key == null)
       throw SupportException(0, 'Configure AppRefer before opening support.');
     final request = http.Request(
@@ -163,7 +238,7 @@ class SupportAPI {
       request.body = jsonEncode(body);
     }
     final response = await http.Response.fromStream(
-      await client.send(request).timeout(const Duration(seconds: 30)),
+      await client.send(request).timeout(timeout),
     );
     if (epoch != _generation) throw SupportException(0, 'Support reset');
     Map<String, dynamic> data = {};
@@ -202,16 +277,26 @@ class SupportAPI {
       if (email != null) 'email': email,
     });
     final fingerprint = jsonEncode(p);
-    var token = await read('$prefix.token');
+    await _resetting;
+    var token = await _store(() => read('$prefix.token'));
     if (epoch != _generation) throw SupportException(0, 'Support reset');
     if (token == null || await read('$prefix.profile') != fingerprint) {
-      final response = await _raw('POST', '/session', p, token);
+      final response = await _raw(
+        'POST',
+        '/session',
+        p,
+        token,
+        expectedGeneration: epoch,
+      );
       token = response['session'] as String? ?? token;
       if (token == null || token.isEmpty)
         throw SupportException(0, 'Invalid support session');
       if (epoch != _generation) throw SupportException(0, 'Support reset');
-      await write('$prefix.token', token);
-      await write('$prefix.profile', fingerprint);
+      await _store(() async {
+        if (epoch != _generation) throw SupportException(0, 'Support reset');
+        await write('$prefix.token', token);
+        await write('$prefix.profile', fingerprint);
+      });
     }
     return token;
   }
@@ -220,13 +305,18 @@ class SupportAPI {
     String method,
     String path, [
     Map<String, dynamic>? body,
+    int? expectedGeneration,
   ]) async {
-    final epoch = _generation;
+    final epoch = expectedGeneration ?? _generation;
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    await _resetting;
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    unawaited(_revokePending().catchError((Object _) {}));
     for (var attempt = 0; ; attempt++) {
       try {
         final token = await _token();
         if (epoch != _generation) throw SupportException(0, 'Support reset');
-        return await _raw(method, path, body, token);
+        return await _raw(method, path, body, token, expectedGeneration: epoch);
       } on SupportException catch (e) {
         if (epoch != _generation) rethrow;
         if (attempt != 0 ||
@@ -238,17 +328,26 @@ class SupportAPI {
     }
   }
 
+  Future<void> persistPushToken(String? token, int epoch) => _store(() async {
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    await write('support_${apiKey()}.push', token);
+  });
+
   Future<List<Map<String, dynamic>>> conversations() async {
+    final epoch = _generation;
     final list = await call('GET', '/conversations');
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
     persona.value = AppReferSupportPersona.fromJson(list['persona']);
     return List<Map<String, dynamic>>.from(list['conversations']);
   }
 
   Future<Map<String, dynamic>> thread(String id, {String? after}) async {
+    final epoch = _generation;
     final thread = await call(
       'GET',
       '/conversations/${Uri.encodeComponent(id)}${after == null ? '' : '?after=${Uri.encodeQueryComponent(after)}'}',
     );
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
     persona.value = AppReferSupportPersona.fromJson(thread['persona']);
     return thread;
   }
@@ -259,32 +358,36 @@ class SupportAPI {
     Map<String, dynamic> context, {
     required String clientMessageId,
     String? subject,
+    int? generation,
   }) => call('POST', '/conversations', {
     'text': text,
     if (subject != null && subject.isNotEmpty) 'subject': subject,
     if (ids.isNotEmpty) 'attachmentIds': ids,
     'context': context,
     'clientMessageId': clientMessageId,
-  });
+  }, generation);
   Future<Map<String, dynamic>> send(
     String id,
     String text,
     List<String> ids, {
     required String clientMessageId,
+    int? generation,
   }) async => Map<String, dynamic>.from(
     (await call('POST', '/conversations/${Uri.encodeComponent(id)}/messages', {
       'text': text,
       'clientMessageId': clientMessageId,
       if (ids.isNotEmpty) 'attachmentIds': ids,
-    }))['message'],
+    }, generation))['message'],
   );
-  Future<String> upload(Uint8List jpeg) async {
+  Future<String> upload(Uint8List jpeg, {int? generation}) async {
+    final epoch = generation ?? _generation;
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
     final slot = await call('POST', '/attachments', {
       'contentType': 'image/jpeg',
       'size': jpeg.length,
       'name': 'screenshot.jpg',
-    });
-    final epoch = _generation;
+    }, epoch);
+    if (epoch != _generation) throw SupportException(0, 'Support reset');
     final response = await client
         .put(
           Uri.parse(slot['uploadUrl'] as String),

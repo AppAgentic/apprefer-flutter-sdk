@@ -1,4 +1,5 @@
 import 'tracking_consent.dart';
+import 'event_queue.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -20,8 +21,19 @@ class AppReferHttpClient {
   final AppReferLogger _logger;
   final Set<http.Client> _clients = {};
   int _generation = 0;
+  int _eventGeneration = 0;
+  final Set<http.Client> _eventClients = {};
+  void cancelEvents() {
+    _eventGeneration++;
+    for (final client in _eventClients.toList()) {
+      client.close();
+    }
+    _eventClients.clear();
+  }
+
   void cancel() {
     _generation++;
+    cancelEvents();
     for (final client in _clients.toList()) {
       client.close();
     }
@@ -33,32 +45,55 @@ class AppReferHttpClient {
     Uri url, {
     required Map<String, String> headers,
     String? body,
+    bool event = false,
   }) async {
     final client = http.Client();
-    _clients.add(client);
+    final clients = event ? _eventClients : _clients;
+    clients.add(client);
     try {
       return await (method == 'POST'
               ? client.post(url, headers: headers, body: body)
               : client.get(url, headers: headers))
           .timeout(_requestTimeout);
     } finally {
-      _clients.remove(client);
+      clients.remove(client);
       client.close();
     }
   }
 
-  Future<int?> event(Map<String, dynamic> body) async {
-    final epoch = _generation;
+  Future<int?> event(Map<String, dynamic> body) async =>
+      (await eventResponse(body)).status;
+
+  Future<EventResponse> eventResponse(Map<String, dynamic> body) async {
+    final epoch = _eventGeneration;
     final hosts = _hosts(await TrackingConsent.current());
-    if (epoch != _generation) return null;
+    if (epoch != _eventGeneration) return const EventResponse(null);
     try {
       final response = await _send(
         'POST',
         Uri.parse('${hosts.first}/api/track/event'),
+        event: true,
         headers: _headers,
         body: jsonEncode(body),
       ).timeout(_requestTimeout);
-      return epoch == _generation ? response.statusCode : null;
+      final header = response.headers['retry-after'];
+      final seconds = double.tryParse(header ?? '');
+      final date = header == null || seconds != null ? null : _httpDate(header);
+      final delay = seconds != null && seconds.isFinite
+          ? (seconds * 1000).toInt()
+          : date?.difference(DateTime.now()).inMilliseconds ?? 0;
+      return EventResponse(
+        epoch == _eventGeneration ? response.statusCode : null,
+        retryAfter: max(0, delay),
+      );
+    } catch (_) {
+      return const EventResponse(null);
+    }
+  }
+
+  DateTime? _httpDate(String value) {
+    try {
+      return HttpDate.parse(value);
     } catch (_) {
       return null;
     }
@@ -95,12 +130,15 @@ class AppReferHttpClient {
     String? consent,
     bool consentSnapshot = false,
   }) async {
+    final epoch = _generation;
     final current = consentSnapshot ? consent : await TrackingConsent.current();
     if (body['event_name'] == '_advanced_matching' &&
         !TrackingConsent.allowed(current))
       return null;
+    if (epoch != _generation) return null;
     final hosts = _hosts(current);
     final result = await _postWithRetries(hosts.first, path, body);
+    if (epoch != _generation) return null;
     if (result != null) return result;
 
     // Fallback: single attempt on fallback URL
@@ -206,8 +244,10 @@ class AppReferHttpClient {
   }
 
   Future<Map<String, dynamic>?> get(String path) async {
+    final epoch = _generation;
     final hosts = _hosts(await TrackingConsent.current());
     final result = await _getWithRetries(hosts.first, path);
+    if (epoch != _generation) return null;
     if (result != null) return result;
 
     // Fallback: single attempt on fallback URL

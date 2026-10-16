@@ -18,6 +18,7 @@ void main() {
     final secure = <String, String>{};
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(supportChannel, (call) async {
+          if (call.method == 'keys') return secure.keys.toList();
           if (call.method == 'read') return secure[call.arguments as String];
           if (call.method == 'write') {
             final args = Map<String, dynamic>.from(call.arguments as Map);
@@ -128,7 +129,7 @@ void main() {
             200,
           );
         }),
-        apiKey: () => AppReferRegistry.apiKey,
+        apiKey: () => AppReferRegistry.supportKey,
         read: (k) async => store[k],
         write: (k, v) async {
           if (v == null) {

@@ -22,15 +22,15 @@ class AppReferSupport {
   Route<void>? _presented;
   NavigatorState? _presentingNavigator;
   void configure({required String apiKey}) {
-    AppReferRegistry.apiKey = apiKey;
+    AppReferRegistry.explicitSupportKey = apiKey;
   }
 
   Future<void> reset() async {
+    await api.reset();
     final route = _presented;
     if (route != null && route.isActive)
       _presentingNavigator?.removeRoute(route);
     _presented = null;
-    await api.reset();
     accountGeneration.value++;
   }
 
@@ -93,18 +93,20 @@ class AppReferSupport {
     String token, {
     String environment = 'production',
   }) async {
+    final epoch = api.actionGeneration;
     await supportChannel.invokeMethod<void>('notificationChannel');
     await api.call('POST', '/push-token', {
       'platform': Platform.isIOS ? 'ios' : 'android',
       'token': token,
       'environment': environment,
-    });
-    await api.write('support_${AppReferRegistry.apiKey}.push', token);
+    }, epoch);
+    await api.persistPushToken(token, epoch);
   }
 
   Future<void> removePushToken(String token) async {
-    await api.call('DELETE', '/push-token', {'token': token});
-    await api.write('support_${AppReferRegistry.apiKey}.push', null);
+    final epoch = api.actionGeneration;
+    await api.call('DELETE', '/push-token', {'token': token}, epoch);
+    await api.persistPushToken(null, epoch);
   }
 
   bool handleNotification(Map<String, dynamic> data, {BuildContext? context}) {
@@ -489,6 +491,7 @@ class _SupportViewState extends State<AppReferSupportView>
 
   /// Starts a conversation from the home; a retry reuses the clientMessageId.
   Future<void> _start() async {
+    final epoch = api.actionGeneration;
     final body = homeText.text.trim();
     if (sending || (body.isEmpty && homeImages.isEmpty)) return;
     final subject = topic?.title;
@@ -508,7 +511,7 @@ class _SupportViewState extends State<AppReferSupportView>
     try {
       p.ids.clear();
       for (final image in p.images) {
-        p.ids.add(await api.upload(image));
+        p.ids.add(await api.upload(image, generation: epoch));
       }
       // Device details are nice to have; never hold a message back for them.
       await metadataReady.timeout(const Duration(seconds: 2), onTimeout: () {});
@@ -517,6 +520,7 @@ class _SupportViewState extends State<AppReferSupportView>
         p.ids,
         metadata,
         clientMessageId: p.clientMessageId,
+        generation: epoch,
         subject: p.subject,
       );
       if (!mounted) return;
@@ -568,19 +572,21 @@ class _SupportViewState extends State<AppReferSupportView>
   }
 
   Future<void> _deliver(_Pending p, String conversation) async {
+    final epoch = api.actionGeneration;
     if (p.inFlight) return;
     p.inFlight = true;
     setState(() => p.failed = false);
     try {
       p.ids.clear();
       while (p.ids.length < p.images.length) {
-        p.ids.add(await api.upload(p.images[p.ids.length]));
+        p.ids.add(await api.upload(p.images[p.ids.length], generation: epoch));
       }
       final m = await api.send(
         conversation,
         p.text,
         p.ids,
         clientMessageId: p.clientMessageId,
+        generation: epoch,
       );
       if (mounted) {
         setState(() {

@@ -20,7 +20,7 @@ import 'services/registry.dart';
 import 'services/storage.dart';
 import 'version.dart';
 
-enum AttributionStatus { attributed, organic, failed }
+enum AttributionStatus { attributed, pending, organic, failed }
 
 class AppReferAttributionResult {
   const AppReferAttributionResult(this.status, {this.attribution, this.error});
@@ -37,6 +37,14 @@ class AppReferSDK with WidgetsBindingObserver {
   late EventQueue _events;
   static AppReferSupport get support => AppReferSupport.instance;
   static AppReferSDK? _instance;
+  static EventQueue? _eventQueue;
+  static int _accountGeneration = 0;
+  static Future<void> _accountWrites = Future.value();
+  static Future<void> _accountWrite(Future<void> Function() work) {
+    final task = _accountWrites.then((_) => work());
+    _accountWrites = task.then<void>((_) {}, onError: (Object _) {});
+    return task;
+  }
 
   late AppReferConfig _config;
   late AppReferStorage _storage;
@@ -55,10 +63,10 @@ class AppReferSDK with WidgetsBindingObserver {
   ) async {
     try {
       final attribution = await configure(config);
-      if (_instance!._failed)
+      if (attribution?.trackingDecisionPending == true)
         return AppReferAttributionResult(
-          AttributionStatus.failed,
-          error: StateError('Attribution unavailable'),
+          AttributionStatus.pending,
+          attribution: attribution,
         );
       if (attribution != null)
         return AppReferAttributionResult(
@@ -68,6 +76,13 @@ class AppReferSDK with WidgetsBindingObserver {
           attribution: attribution,
         );
       final prefs = await SharedPreferences.getInstance();
+      if (_instance!._failed &&
+          attribution == null &&
+          prefs.getBool('apprefer_organic_confirmed') != true)
+        return AppReferAttributionResult(
+          AttributionStatus.failed,
+          error: StateError('Attribution unavailable'),
+        );
       if (prefs.getBool('apprefer_organic_confirmed') == true)
         return const AppReferAttributionResult(AttributionStatus.organic);
       return AppReferAttributionResult(
@@ -80,6 +95,7 @@ class AppReferSDK with WidgetsBindingObserver {
   }
 
   static Future<void> reset() async {
+    _accountGeneration++;
     final sdk = _instance;
     if (sdk != null) {
       sdk._generation++;
@@ -87,21 +103,25 @@ class AppReferSDK with WidgetsBindingObserver {
       sdk._httpClient.cancel();
       sdk._conversion.cancel();
       await sdk._events.clear();
-      await sdk._storage.clearUser();
+      await _accountWrite(sdk._storage.clearUser);
     }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('apprefer_user_id');
+    await _accountWrite(() async {
+      await prefs.remove('apprefer_user_id');
+    });
     await prefs.remove(EventQueue.key);
+    await prefs.remove('${EventQueue.key}.corrupt');
     await support.reset();
   }
 
   static Future<void> clearPendingEvents() async {
-    _instance?._httpClient.cancel();
+    _instance?._httpClient.cancelEvents();
     if (_instance != null) {
       await _instance!._events.clear();
     } else {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove(EventQueue.key);
+      await prefs.remove('${EventQueue.key}.corrupt');
     }
   }
 
@@ -116,6 +136,7 @@ class AppReferSDK with WidgetsBindingObserver {
   /// resolves attribution, caches locally, returns result.
   /// On subsequent opens: reports changed consent, then returns cached attribution.
   static Future<Attribution?> configure(AppReferConfig config) async {
+    final accountEpoch = _accountGeneration;
     _instance?._httpClient.cancel();
     _instance?._conversion.cancel();
     final sdk = AppReferSDK._();
@@ -127,13 +148,25 @@ class AppReferSDK with WidgetsBindingObserver {
     );
     sdk._storage = AppReferStorage();
     await sdk._storage.init();
+    if (accountEpoch != _accountGeneration) return null;
     sdk._httpClient = AppReferHttpClient(
       baseUrl: AppReferConfig.trackingUrl,
       fallbackUrl: AppReferConfig.fallbackUrl,
       apiKey: config.apiKey,
       logger: sdk._logger,
     );
-    sdk._events = EventQueue(sdk._httpClient.event, sdk._storage.isSdkEnabled);
+    if (_eventQueue == null) {
+      _eventQueue = EventQueue(
+        sdk._httpClient.eventResponse,
+        sdk._storage.isSdkEnabled,
+      );
+    } else {
+      _eventQueue!.replace(
+        sdk._httpClient.eventResponse,
+        sdk._storage.isSdkEnabled,
+      );
+    }
+    sdk._events = _eventQueue!;
     unawaited(sdk._events.flush());
     sdk._conversion = ConversionValue(
       storage: sdk._storage,
@@ -155,8 +188,13 @@ class AppReferSDK with WidgetsBindingObserver {
 
     // Set user ID if provided at init time
     if (config.userId != null) {
-      await sdk._storage.setUserId(config.userId!);
+      await _accountWrite(() async {
+        if (accountEpoch == _accountGeneration)
+          await sdk._storage.setUserId(config.userId!);
+      });
     }
+
+    if (accountEpoch != _accountGeneration) return null;
 
     // Record first run date
     await sdk._storage.getFirstRunDate();
@@ -177,6 +215,8 @@ class AppReferSDK with WidgetsBindingObserver {
       unawaited(sdk._conversion.refresh());
       return _getCachedAttribution();
     }
+
+    if (accountEpoch != _accountGeneration) return null;
 
     // First run — resolve attribution
     try {
@@ -319,30 +359,35 @@ class AppReferSDK with WidgetsBindingObserver {
     double? revenue,
     String? currency,
   }) async {
-    final sdk = _instance;
-    if (sdk == null) return AppReferEventResult.dropped;
-    final epoch = sdk._generation;
-    if (!sdk._storage.isSdkEnabled()) {
-      await sdk._events.clear();
+    try {
+      final sdk = _instance;
+      if (sdk == null) return AppReferEventResult.dropped;
+      final epoch = sdk._generation;
+      if (!sdk._storage.isSdkEnabled()) {
+        await sdk._events.clear();
+        return AppReferEventResult.dropped;
+      }
+
+      final deviceId = await sdk._storage.getDeviceId();
+      final body = <String, dynamic>{
+        'device_id': deviceId,
+        'event_name': eventName,
+        if (properties != null) 'properties': properties,
+        if (revenue != null) 'revenue': revenue,
+        if (currency != null) 'currency': currency,
+      };
+
+      sdk._logger.info('Tracking event: $eventName');
+      if (epoch != sdk._generation) return AppReferEventResult.dropped;
+      final result = await sdk._events.enqueue(body);
+      if ((revenue ?? 0) > 0 ||
+          ConversionValue.trialEvents.contains(eventName)) {
+        unawaited(sdk._conversion.refresh(force: true));
+      }
+      return result;
+    } catch (_) {
       return AppReferEventResult.dropped;
     }
-
-    final deviceId = await sdk._storage.getDeviceId();
-    final body = <String, dynamic>{
-      'device_id': deviceId,
-      'event_name': eventName,
-      if (properties != null) 'properties': properties,
-      if (revenue != null) 'revenue': revenue,
-      if (currency != null) 'currency': currency,
-    };
-
-    sdk._logger.info('Tracking event: $eventName');
-    if (epoch != sdk._generation) return AppReferEventResult.dropped;
-    final result = await sdk._events.enqueue(body);
-    if ((revenue ?? 0) > 0 || ConversionValue.trialEvents.contains(eventName)) {
-      unawaited(sdk._conversion.refresh(force: true));
-    }
-    return result;
   }
 
   /// Meta Advanced Matching: send hashed user PII to improve CAPI match rates.
@@ -400,6 +445,7 @@ class AppReferSDK with WidgetsBindingObserver {
   /// Set RevenueCat app_user_id so webhook events can be linked
   /// to this device's attribution.
   static Future<void> setUserId(String userId) async {
+    final accountEpoch = _accountGeneration;
     final sdk = _instance;
     if (sdk == null) {
       assert(() {
@@ -408,10 +454,16 @@ class AppReferSDK with WidgetsBindingObserver {
       }());
       final storage = AppReferStorage();
       await storage.init();
-      await storage.setUserId(userId);
+      await _accountWrite(() async {
+        if (accountEpoch == _accountGeneration) await storage.setUserId(userId);
+      });
       return;
     }
-    await sdk._storage.setUserId(userId);
+    await _accountWrite(() async {
+      if (accountEpoch == _accountGeneration)
+        await sdk._storage.setUserId(userId);
+    });
+    if (accountEpoch != _accountGeneration) return;
     sdk._logger.info('User ID set: $userId');
 
     // Sync userId to server so webhook userId fallback can find this attribution

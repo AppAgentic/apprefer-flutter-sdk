@@ -61,6 +61,7 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         try {
             when(call.method) {
+                "keys" -> result.success(prefs.all.keys.toList())
                 "read" -> {
                     val stored = prefs.getString(call.arguments as String, null)
                     if (stored == null) result.success(null) else {
