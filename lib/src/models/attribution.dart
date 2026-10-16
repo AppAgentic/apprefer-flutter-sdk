@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 class Attribution {
+  final bool trackingDecisionPending;
   final String network;
   final String? campaign;
   final String matchType; // 'adservices', 'click_id', 'referrer', 'organic'
@@ -18,6 +19,7 @@ class Attribution {
   final DateTime createdAt;
 
   const Attribution({
+    this.trackingDecisionPending = false,
     required this.network,
     this.campaign,
     required this.matchType,
@@ -37,23 +39,30 @@ class Attribution {
 
   factory Attribution.fromJson(Map<String, dynamic> json) {
     return Attribution(
+      trackingDecisionPending: json['trackingDecisionPending'] == true,
       network: json['network'] as String? ?? 'unknown',
       campaign: json['campaign'] as String?,
-      matchType: json['match_type'] as String? ?? 'organic',
-      attributionId: json['attribution_id'] as String?,
-      campaignId: json['campaign_id'] as String?,
-      campaignName: json['campaign_name'] as String?,
-      adGroupId: json['ad_group_id'] as String?,
-      adId: json['ad_id'] as String?,
+      matchType:
+          (json['match_type'] ?? json['matchType']) as String? ?? 'organic',
+      attributionId:
+          (json['attribution_id'] ?? json['attributionId']) as String?,
+      campaignId: (json['campaign_id'] ?? json['campaignId']) as String?,
+      campaignName: (json['campaign_name'] ?? json['campaignName']) as String?,
+      adGroupId: (json['ad_group_id'] ?? json['adGroupId']) as String?,
+      adId: (json['ad_id'] ?? json['adId']) as String?,
       keyword: json['keyword'] as String?,
       fbclid: json['fbclid'] as String?,
       gclid: json['gclid'] as String?,
       ttclid: json['ttclid'] as String?,
       queryParams: (json['query_params'] ?? json['queryParams']) is Map
-          ? Map<String, dynamic>.from((json['query_params'] ?? json['queryParams']) as Map)
+          ? Map<String, dynamic>.from(
+              (json['query_params'] ?? json['queryParams']) as Map,
+            )
           : const {},
       customData: (json['custom_data'] ?? json['customData']) is Map
-          ? Map<String, dynamic>.from((json['custom_data'] ?? json['customData']) as Map)
+          ? Map<String, dynamic>.from(
+              (json['custom_data'] ?? json['customData']) as Map,
+            )
           : const {},
       createdAt: json['created_at'] != null
           ? (DateTime.tryParse(json['created_at'] as String) ?? DateTime.now())
@@ -63,6 +72,7 @@ class Attribution {
 
   Map<String, dynamic> toJson() {
     return {
+      'trackingDecisionPending': trackingDecisionPending,
       'network': network,
       'campaign': campaign,
       'match_type': matchType,

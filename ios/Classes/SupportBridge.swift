@@ -11,6 +11,16 @@ final class SupportBridge: NSObject, FlutterPlugin, PHPickerViewControllerDelega
     }
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
+        case "keys":
+            var query = self.query("")
+            query.removeValue(forKey: kSecAttrAccount as String)
+            query[kSecReturnAttributes as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitAll
+            var found: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &found)
+            if status == errSecItemNotFound { result([String]()) }
+            else if status == errSecSuccess { result((found as? [[String: Any]] ?? []).compactMap { $0[kSecAttrAccount as String] as? String }) }
+            else { result(FlutterError(code: "secure_storage", message: "Unable to list support sessions", details: status)) }
         case "read":
             let key = call.arguments as! String
             var query = self.query(key)

@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../services/device_info.dart';
+import '../services/registry.dart';
 import '../services/logger.dart';
 import 'support_api.dart';
 import 'support_style.dart';
@@ -13,10 +14,34 @@ import 'support_style.dart';
 export 'support_api.dart' show AppReferSupportPersona;
 
 /// Shared support configuration and presentation API.
-class AppReferSupport {
-  AppReferSupport._();
+class AppReferSupport with WidgetsBindingObserver {
+  AppReferSupport._() {
+    WidgetsFlutterBinding.ensureInitialized().addObserver(this);
+    api.resumeRevocations();
+  }
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) api.resumeRevocations();
+  }
+
   static final instance = AppReferSupport._();
   final SupportAPI api = SupportAPI();
+  final ValueNotifier<int> accountGeneration = ValueNotifier(0);
+  Route<void>? _presented;
+  NavigatorState? _presentingNavigator;
+  void configure({required String apiKey}) {
+    AppReferRegistry.explicitSupportKey = apiKey;
+    api.resumeRevocations();
+  }
+
+  Future<void> reset() async {
+    await api.reset();
+    final route = _presented;
+    if (route != null && route.isActive)
+      _presentingNavigator?.removeRoute(route);
+    _presented = null;
+    accountGeneration.value++;
+  }
 
   /// Set this to the host MaterialApp navigatorKey for context-free push routing.
   GlobalKey<NavigatorState>? navigatorKey;
@@ -63,25 +88,34 @@ class AppReferSupport {
     if (nav == null) {
       throw StateError('Pass context or set AppRefer.support.navigatorKey.');
     }
-    await nav.push(
-      MaterialPageRoute<void>(fullscreenDialog: true, builder: (_) => view),
+    final route = MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (_) => view,
     );
+    _presented = route;
+    _presentingNavigator = nav;
+    await nav.push(route);
+    if (identical(_presented, route)) _presented = null;
   }
 
   Future<void> registerPushToken(
     String token, {
     String environment = 'production',
   }) async {
+    final epoch = api.actionGeneration;
     await supportChannel.invokeMethod<void>('notificationChannel');
     await api.call('POST', '/push-token', {
       'platform': Platform.isIOS ? 'ios' : 'android',
       'token': token,
       'environment': environment,
-    });
+    }, epoch);
+    await api.persistPushToken(token, epoch);
   }
 
   Future<void> removePushToken(String token) async {
-    await api.call('DELETE', '/push-token', {'token': token});
+    final epoch = api.actionGeneration;
+    await api.call('DELETE', '/push-token', {'token': token}, epoch);
+    await api.persistPushToken(null, epoch);
   }
 
   bool handleNotification(Map<String, dynamic> data, {BuildContext? context}) {
@@ -233,6 +267,7 @@ class _SupportViewState extends State<AppReferSupportView>
     homeText.addListener(_changed);
     threadText.addListener(_changed);
     api.persona.addListener(_changed);
+    config.accountGeneration.addListener(_accountReset);
     metadataReady = _context();
     config.launcherIcon().then((bytes) {
       if (mounted && bytes != null && bytes.isNotEmpty) {
@@ -246,6 +281,30 @@ class _SupportViewState extends State<AppReferSupportView>
     }
     _refresh();
     _timer();
+  }
+
+  void _accountReset() {
+    if (!mounted) return;
+    timer?.cancel();
+    generation++;
+    setState(() {
+      id = null;
+      pollCursor = null;
+      firstSend = null;
+      topic = null;
+      conversations = [];
+      messages = [];
+      homeImages = [];
+      threadImages = [];
+      pending.clear();
+      homeText.clear();
+      threadText.clear();
+      sending = false;
+      loading = false;
+      refreshing = false;
+      sendError = '';
+      loadError = '';
+    });
   }
 
   void _changed() {
@@ -301,6 +360,7 @@ class _SupportViewState extends State<AppReferSupportView>
     timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     api.persona.removeListener(_changed);
+    config.accountGeneration.removeListener(_accountReset);
     for (final c in [homeText, threadText]) {
       c.removeListener(_changed);
       c.dispose();
@@ -440,6 +500,7 @@ class _SupportViewState extends State<AppReferSupportView>
 
   /// Starts a conversation from the home; a retry reuses the clientMessageId.
   Future<void> _start() async {
+    final epoch = api.actionGeneration;
     final body = homeText.text.trim();
     if (sending || (body.isEmpty && homeImages.isEmpty)) return;
     final subject = topic?.title;
@@ -459,7 +520,7 @@ class _SupportViewState extends State<AppReferSupportView>
     try {
       p.ids.clear();
       for (final image in p.images) {
-        p.ids.add(await api.upload(image));
+        p.ids.add(await api.upload(image, generation: epoch));
       }
       // Device details are nice to have; never hold a message back for them.
       await metadataReady.timeout(const Duration(seconds: 2), onTimeout: () {});
@@ -468,6 +529,7 @@ class _SupportViewState extends State<AppReferSupportView>
         p.ids,
         metadata,
         clientMessageId: p.clientMessageId,
+        generation: epoch,
         subject: p.subject,
       );
       if (!mounted) return;
@@ -519,19 +581,21 @@ class _SupportViewState extends State<AppReferSupportView>
   }
 
   Future<void> _deliver(_Pending p, String conversation) async {
+    final epoch = api.actionGeneration;
     if (p.inFlight) return;
     p.inFlight = true;
     setState(() => p.failed = false);
     try {
       p.ids.clear();
       while (p.ids.length < p.images.length) {
-        p.ids.add(await api.upload(p.images[p.ids.length]));
+        p.ids.add(await api.upload(p.images[p.ids.length], generation: epoch));
       }
       final m = await api.send(
         conversation,
         p.text,
         p.ids,
         clientMessageId: p.clientMessageId,
+        generation: epoch,
       );
       if (mounted) {
         setState(() {

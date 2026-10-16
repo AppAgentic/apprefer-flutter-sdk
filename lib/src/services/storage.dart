@@ -95,6 +95,7 @@ class AppReferStorage {
 
   Future<void> setSdkEnabled(bool enabled) async {
     await _prefs.setBool(_keySdkEnabled, enabled);
+    if (!enabled) await _prefs.remove('apprefer_pending_events');
   }
 
   // --- Last Config Fetch ---
@@ -108,6 +109,10 @@ class AppReferStorage {
   }
 
   // --- User ID ---
+
+  Future<void> clearUser() async {
+    await _prefs.remove(_keyUserId);
+  }
 
   String? getUserId() {
     return _prefs.getString(_keyUserId);

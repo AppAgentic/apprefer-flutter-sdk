@@ -4,4 +4,6 @@ class AppReferRegistry {
 
   /// The SDK key passed to `AppReferSDK.configure`.
   static String? apiKey;
+  static String? explicitSupportKey;
+  static String? get supportKey => explicitSupportKey ?? apiKey;
 }

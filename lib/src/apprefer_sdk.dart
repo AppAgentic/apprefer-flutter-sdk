@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'services/event_queue.dart';
+export 'services/event_queue.dart' show AppReferEventResult;
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/tracking_consent.dart';
@@ -18,11 +20,31 @@ import 'services/registry.dart';
 import 'services/storage.dart';
 import 'version.dart';
 
+enum AttributionStatus { attributed, pending, organic, failed }
+
+class AppReferAttributionResult {
+  const AppReferAttributionResult(this.status, {this.attribution, this.error});
+  final AttributionStatus status;
+  final Attribution? attribution;
+  final Object? error;
+}
+
 class AppReferSDK with WidgetsBindingObserver {
   Future<void>? _consentSync;
   bool _consentRecheck = false;
+  int _generation = 0;
+  bool _failed = false;
+  late EventQueue _events;
   static AppReferSupport get support => AppReferSupport.instance;
   static AppReferSDK? _instance;
+  static EventQueue? _eventQueue;
+  static int _accountGeneration = 0;
+  static Future<void> _accountWrites = Future.value();
+  static Future<void> _accountWrite(Future<void> Function() work) {
+    final task = _accountWrites.then((_) => work());
+    _accountWrites = task.then<void>((_) {}, onError: (Object _) {});
+    return task;
+  }
 
   late AppReferConfig _config;
   late AppReferStorage _storage;
@@ -36,6 +58,102 @@ class AppReferSDK with WidgetsBindingObserver {
 
   AppReferSDK._();
 
+  /// Disposes process state between isolated SDK tests; persisted install state is retained.
+  @visibleForTesting
+  static Future<void> disposeForTesting() async {
+    final sdk = _instance;
+    if (sdk != null) {
+      sdk._httpClient.cancel();
+      sdk._conversion.cancel();
+      WidgetsBinding.instance.removeObserver(sdk);
+    }
+    await _eventQueue?.clear();
+    _instance = null;
+    _configuring = null;
+    _requestedConfig = null;
+    _eventQueue = null;
+  }
+
+  static Future<AppReferAttributionResult> configureResult(
+    AppReferConfig config,
+  ) async {
+    try {
+      final attribution = await configure(config);
+      if (attribution?.trackingDecisionPending == true &&
+          attribution?.matchType != 'adservices')
+        return AppReferAttributionResult(
+          AttributionStatus.pending,
+          attribution: attribution,
+        );
+      if (attribution != null)
+        return AppReferAttributionResult(
+          attribution.network == 'organic'
+              ? AttributionStatus.organic
+              : AttributionStatus.attributed,
+          attribution: attribution,
+        );
+      final prefs = await SharedPreferences.getInstance();
+      if (_instance!._failed &&
+          attribution == null &&
+          prefs.getBool('apprefer_organic_confirmed') != true)
+        return AppReferAttributionResult(
+          AttributionStatus.failed,
+          error: StateError('Attribution unavailable'),
+        );
+      if (prefs.getBool('apprefer_organic_confirmed') == true)
+        return const AppReferAttributionResult(AttributionStatus.organic);
+      return AppReferAttributionResult(
+        AttributionStatus.failed,
+        error: StateError('Attribution unavailable'),
+      );
+    } catch (error) {
+      return AppReferAttributionResult(AttributionStatus.failed, error: error);
+    }
+  }
+
+  static Future<void> reset() async {
+    _accountGeneration++;
+    _configuring = null;
+    _requestedConfig = null;
+    final sdk = _instance;
+    if (sdk != null) {
+      sdk._generation++;
+      sdk._consentRecheck = false;
+      sdk._httpClient.cancel();
+      sdk._conversion.cancel();
+      await _ignoreStorage(sdk._events.clear);
+      await _ignoreStorage(() => _accountWrite(sdk._storage.clearUser));
+    }
+    if (sdk == null) {
+      _eventQueue ??= EventQueue((_) async => null, () => true);
+      await _ignoreStorage(_eventQueue!.clear);
+    }
+    await _ignoreStorage(() async {
+      final prefs = await SharedPreferences.getInstance();
+      await _accountWrite(() async {
+        await prefs.remove('apprefer_user_id');
+      });
+    });
+    await support.reset();
+  }
+
+  static Future<void> _ignoreStorage(Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (_) {}
+  }
+
+  static Future<void> clearPendingEvents() async {
+    _instance?._httpClient.cancelEvents();
+    if (_instance != null) {
+      await _instance!._events.clear();
+    } else {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(EventQueue.key);
+      await prefs.remove('${EventQueue.key}.corrupt');
+    }
+  }
+
   /// Refresh iOS conversion values after purchases made outside AppRefer Billing.
   /// A no-op on Android.
   static Future<void> updateConversionValue() async {
@@ -46,7 +164,42 @@ class AppReferSDK with WidgetsBindingObserver {
   /// On first open: sends device signals + AdServices token to backend,
   /// resolves attribution, caches locally, returns result.
   /// On subsequent opens: reports changed consent, then returns cached attribution.
-  static Future<Attribution?> configure(AppReferConfig config) async {
+  static Future<Attribution?>? _configuring;
+  static AppReferConfig? _requestedConfig;
+  static bool _sameConfig(AppReferConfig a, AppReferConfig b) =>
+      a.apiKey == b.apiKey &&
+      a.userId == b.userId &&
+      a.debug == b.debug &&
+      a.logLevel == b.logLevel;
+  static Future<Attribution?> configure(AppReferConfig config) {
+    support.api.resumeRevocations();
+    if (_requestedConfig != null &&
+        _sameConfig(_requestedConfig!, config) &&
+        _configuring != null)
+      return _configuring!;
+    if (_instance != null && _sameConfig(_instance!._config, config)) {
+      return trackingConsentDidChange().then((_) => _getCachedAttribution());
+    }
+    _requestedConfig = config;
+    final task = _configureNew(config);
+    _configuring = task;
+    unawaited(
+      task.then<void>(
+        (_) {
+          if (identical(_configuring, task)) _configuring = null;
+        },
+        onError: (Object _) {
+          if (identical(_configuring, task)) _configuring = null;
+        },
+      ),
+    );
+    return task;
+  }
+
+  static Future<Attribution?> _configureNew(AppReferConfig config) async {
+    final accountEpoch = _accountGeneration;
+    _instance?._httpClient.cancel();
+    _instance?._conversion.cancel();
     final sdk = AppReferSDK._();
     sdk._config = config;
     AppReferRegistry.apiKey = config.apiKey;
@@ -56,12 +209,26 @@ class AppReferSDK with WidgetsBindingObserver {
     );
     sdk._storage = AppReferStorage();
     await sdk._storage.init();
+    if (accountEpoch != _accountGeneration) return null;
     sdk._httpClient = AppReferHttpClient(
       baseUrl: AppReferConfig.trackingUrl,
       fallbackUrl: AppReferConfig.fallbackUrl,
       apiKey: config.apiKey,
       logger: sdk._logger,
     );
+    if (_eventQueue == null) {
+      _eventQueue = EventQueue(
+        sdk._httpClient.eventResponse,
+        sdk._storage.isSdkEnabled,
+      );
+    } else {
+      _eventQueue!.replace(
+        sdk._httpClient.eventResponse,
+        sdk._storage.isSdkEnabled,
+      );
+    }
+    sdk._events = _eventQueue!;
+    unawaited(sdk._events.flush());
     sdk._conversion = ConversionValue(
       storage: sdk._storage,
       client: AppReferHttpClient(
@@ -82,8 +249,13 @@ class AppReferSDK with WidgetsBindingObserver {
 
     // Set user ID if provided at init time
     if (config.userId != null) {
-      await sdk._storage.setUserId(config.userId!);
+      await _accountWrite(() async {
+        if (accountEpoch == _accountGeneration)
+          await sdk._storage.setUserId(config.userId!);
+      });
     }
+
+    if (accountEpoch != _accountGeneration) return null;
 
     // Record first run date
     await sdk._storage.getFirstRunDate();
@@ -105,6 +277,8 @@ class AppReferSDK with WidgetsBindingObserver {
       return _getCachedAttribution();
     }
 
+    if (accountEpoch != _accountGeneration) return null;
+
     // First run — resolve attribution
     try {
       return await sdk._resolveAttribution();
@@ -117,6 +291,7 @@ class AppReferSDK with WidgetsBindingObserver {
   }
 
   Future<Attribution?> _resolveAttribution() async {
+    final epoch = _generation;
     final consent = await TrackingConsent.current();
     final deviceId = await _storage.getDeviceId();
     final deviceInfoMap = await _deviceInfo.getDeviceInfo();
@@ -160,6 +335,10 @@ class AppReferSDK with WidgetsBindingObserver {
     };
 
     _logger.info('Sending configure request...');
+    if (epoch != _generation) {
+      _failed = true;
+      return null;
+    }
     final response = await _httpClient.post(
       '/api/track/configure',
       body,
@@ -167,6 +346,18 @@ class AppReferSDK with WidgetsBindingObserver {
       consentSnapshot: true,
     );
 
+    if (epoch != _generation) {
+      _failed = true;
+      return null;
+    }
+    _failed = response == null;
+    if (response != null &&
+        (response['organic'] == true ||
+            (response.containsKey('attribution') &&
+                response['attribution'] == null))) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('apprefer_organic_confirmed', true);
+    }
     if (response == null) {
       _logger.error('Configure request failed — will retry on next launch');
       // Do NOT set matchRequestAttempted so next launch retries attribution
@@ -215,29 +406,48 @@ class AppReferSDK with WidgetsBindingObserver {
     double? revenue,
     String? currency,
   }) async {
-    final sdk = _instance;
-    if (sdk == null) {
-      assert(() {
-        print('[AppRefer] trackEvent called before configure() — ignoring');
-        return true;
-      }());
-      return;
-    }
-    if (!sdk._storage.isSdkEnabled()) return;
+    await trackEventResult(
+      eventName,
+      properties: properties,
+      revenue: revenue,
+      currency: currency,
+    );
+  }
 
-    final deviceId = await sdk._storage.getDeviceId();
-    final body = <String, dynamic>{
-      'device_id': deviceId,
-      'event_name': eventName,
-      if (properties != null) 'properties': properties,
-      if (revenue != null) 'revenue': revenue,
-      if (currency != null) 'currency': currency,
-    };
+  static Future<AppReferEventResult> trackEventResult(
+    String eventName, {
+    Map<String, dynamic>? properties,
+    double? revenue,
+    String? currency,
+  }) async {
+    try {
+      final sdk = _instance;
+      if (sdk == null) return AppReferEventResult.dropped;
+      final epoch = sdk._generation;
+      if (!sdk._storage.isSdkEnabled()) {
+        await sdk._events.clear();
+        return AppReferEventResult.dropped;
+      }
 
-    sdk._logger.info('Tracking event: $eventName');
-    await sdk._httpClient.post('/api/track/event', body);
-    if ((revenue ?? 0) > 0 || ConversionValue.trialEvents.contains(eventName)) {
-      unawaited(sdk._conversion.refresh(force: true));
+      final deviceId = await sdk._storage.getDeviceId();
+      final body = <String, dynamic>{
+        'device_id': deviceId,
+        'event_name': eventName,
+        if (properties != null) 'properties': properties,
+        if (revenue != null) 'revenue': revenue,
+        if (currency != null) 'currency': currency,
+      };
+
+      sdk._logger.info('Tracking event: $eventName');
+      if (epoch != sdk._generation) return AppReferEventResult.dropped;
+      final result = await sdk._events.enqueue(body);
+      if ((revenue ?? 0) > 0 ||
+          ConversionValue.trialEvents.contains(eventName)) {
+        unawaited(sdk._conversion.refresh(force: true));
+      }
+      return result;
+    } catch (_) {
+      return AppReferEventResult.dropped;
     }
   }
 
@@ -260,6 +470,7 @@ class AppReferSDK with WidgetsBindingObserver {
       }());
       return;
     }
+    final epoch = sdk._generation;
     if (!sdk._storage.isSdkEnabled()) return;
 
     if (!TrackingConsent.allowed(await TrackingConsent.current())) return;
@@ -288,21 +499,32 @@ class AppReferSDK with WidgetsBindingObserver {
     };
 
     sdk._logger.info('Sending advanced matching data');
+    if (epoch != sdk._generation) return;
     await sdk._httpClient.post('/api/track/event', body);
   }
 
   /// Set RevenueCat app_user_id so webhook events can be linked
   /// to this device's attribution.
   static Future<void> setUserId(String userId) async {
+    final accountEpoch = _accountGeneration;
     final sdk = _instance;
     if (sdk == null) {
       assert(() {
-        print('[AppRefer] setUserId called before configure() — ignoring');
+        print('[AppRefer] Support identity stored');
         return true;
       }());
+      final storage = AppReferStorage();
+      await storage.init();
+      await _accountWrite(() async {
+        if (accountEpoch == _accountGeneration) await storage.setUserId(userId);
+      });
       return;
     }
-    await sdk._storage.setUserId(userId);
+    await _accountWrite(() async {
+      if (accountEpoch == _accountGeneration)
+        await sdk._storage.setUserId(userId);
+    });
+    if (accountEpoch != _accountGeneration) return;
     sdk._logger.info('User ID set: $userId');
 
     // Sync userId to server so webhook userId fallback can find this attribution
@@ -327,8 +549,10 @@ class AppReferSDK with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) support.api.resumeRevocations();
     if (state == AppLifecycleState.resumed) {
       unawaited(_conversion.refresh());
+      unawaited(_events.flush());
       unawaited(
         trackingConsentDidChange().catchError((Object e) {
           _logger.error('Consent sync failed: $e');
@@ -367,11 +591,15 @@ class AppReferSDK with WidgetsBindingObserver {
   }
 
   Future<void> _reportConsent() async {
+    final epoch = _generation;
     if (!_storage.isSdkEnabled() || !_storage.isMatchRequestAttempted()) return;
     final consent = await TrackingConsent.current();
     final prefs = await SharedPreferences.getInstance();
-    if (consent == null ||
-        consent == prefs.getString(TrackingConsent.reportedKey))
+    final cached = _getCachedAttribution();
+    if ((consent == null ||
+            consent == prefs.getString(TrackingConsent.reportedKey)) &&
+        !(cached?.trackingDecisionPending == true &&
+            cached?.matchType != 'adservices'))
       return;
     final body = <String, dynamic>{
       'device_id': await _storage.getDeviceId(),
@@ -404,13 +632,27 @@ class AppReferSDK with WidgetsBindingObserver {
         body['referrer_install_ts'] = referrer?['installBeginTimestampSeconds'];
       }
     }
+    if (epoch != _generation) {
+      _failed = true;
+      return;
+    }
     final response = await _httpClient.post(
       '/api/track/configure',
       body,
       consent: consent,
       consentSnapshot: true,
     );
+    if (epoch != _generation) {
+      _failed = true;
+      return;
+    }
+    _failed = response == null;
     if (response == null) return;
+    if (response['organic'] == true ||
+        (response.containsKey('attribution') &&
+            response['attribution'] == null)) {
+      await prefs.setBool('apprefer_organic_confirmed', true);
+    }
     if (response['sdkEnabled'] == false) {
       await _storage.setSdkEnabled(false);
       return;
@@ -423,7 +665,8 @@ class AppReferSDK with WidgetsBindingObserver {
     } else {
       await _storage.clearAttributionCache();
     }
-    await prefs.setString(TrackingConsent.reportedKey, consent);
+    if (consent != null)
+      await prefs.setString(TrackingConsent.reportedKey, consent);
   }
 
   /// Get cached attribution result (instant, no network call).
