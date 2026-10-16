@@ -18,6 +18,51 @@ class AppReferHttpClient {
   final String? fallbackUrl;
   final String apiKey;
   final AppReferLogger _logger;
+  final Set<http.Client> _clients = {};
+  int _generation = 0;
+  void cancel() {
+    _generation++;
+    for (final client in _clients.toList()) {
+      client.close();
+    }
+    _clients.clear();
+  }
+
+  Future<http.Response> _send(
+    String method,
+    Uri url, {
+    required Map<String, String> headers,
+    String? body,
+  }) async {
+    final client = http.Client();
+    _clients.add(client);
+    try {
+      return await (method == 'POST'
+              ? client.post(url, headers: headers, body: body)
+              : client.get(url, headers: headers))
+          .timeout(_requestTimeout);
+    } finally {
+      _clients.remove(client);
+      client.close();
+    }
+  }
+
+  Future<int?> event(Map<String, dynamic> body) async {
+    final epoch = _generation;
+    final hosts = _hosts(await TrackingConsent.current());
+    if (epoch != _generation) return null;
+    try {
+      final response = await _send(
+        'POST',
+        Uri.parse('${hosts.first}/api/track/event'),
+        headers: _headers,
+        body: jsonEncode(body),
+      ).timeout(_requestTimeout);
+      return epoch == _generation ? response.statusCode : null;
+    } catch (_) {
+      return null;
+    }
+  }
 
   // Only the default tracking pair follows consent. Explicit hosts stay pinned.
   bool get _routesTracking =>
@@ -72,6 +117,7 @@ class AppReferHttpClient {
     String path,
     Map<String, dynamic> body,
   ) async {
+    final epoch = _generation;
     final target = Uri.parse('$url$path');
     for (int attempt = 0; attempt < _maxRetries; attempt++) {
       try {
@@ -80,11 +126,16 @@ class AppReferHttpClient {
           _logger.debug('POST $path retry $attempt after ${delay.inSeconds}s');
           await Future.delayed(delay);
         }
+        if (epoch != _generation) return null;
         _logger.debug('POST $target');
-        final response = await http
-            .post(target, headers: _headers, body: jsonEncode(body))
-            .timeout(_requestTimeout);
+        final response = await _send(
+          'POST',
+          target,
+          headers: _headers,
+          body: jsonEncode(body),
+        ).timeout(_requestTimeout);
 
+        if (epoch != _generation) return null;
         if (response.statusCode >= 200 && response.statusCode < 300) {
           if (response.body.isEmpty) return {};
           return jsonDecode(response.body) as Map<String, dynamic>;
@@ -124,13 +175,18 @@ class AppReferHttpClient {
     String path,
     Map<String, dynamic> body,
   ) async {
+    final epoch = _generation;
     final target = Uri.parse('$url$path');
     try {
       _logger.debug('POST $target (fallback)');
-      final response = await http
-          .post(target, headers: _headers, body: jsonEncode(body))
-          .timeout(_requestTimeout);
+      final response = await _send(
+        'POST',
+        target,
+        headers: _headers,
+        body: jsonEncode(body),
+      ).timeout(_requestTimeout);
 
+      if (epoch != _generation) return null;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         if (response.body.isEmpty) return {};
         return jsonDecode(response.body) as Map<String, dynamic>;
@@ -164,6 +220,7 @@ class AppReferHttpClient {
   }
 
   Future<Map<String, dynamic>?> _getWithRetries(String url, String path) async {
+    final epoch = _generation;
     final target = Uri.parse('$url$path');
     for (int attempt = 0; attempt < _maxRetries; attempt++) {
       try {
@@ -172,11 +229,15 @@ class AppReferHttpClient {
           _logger.debug('GET $path retry $attempt after ${delay.inSeconds}s');
           await Future.delayed(delay);
         }
+        if (epoch != _generation) return null;
         _logger.debug('GET $target');
-        final response = await http
-            .get(target, headers: _headers)
-            .timeout(_requestTimeout);
+        final response = await _send(
+          'GET',
+          target,
+          headers: _headers,
+        ).timeout(_requestTimeout);
 
+        if (epoch != _generation) return null;
         if (response.statusCode >= 200 && response.statusCode < 300) {
           if (response.body.isEmpty) return {};
           return jsonDecode(response.body) as Map<String, dynamic>;
@@ -210,13 +271,17 @@ class AppReferHttpClient {
   }
 
   Future<Map<String, dynamic>?> _getOnce(String url, String path) async {
+    final epoch = _generation;
     final target = Uri.parse('$url$path');
     try {
       _logger.debug('GET $target (fallback)');
-      final response = await http
-          .get(target, headers: _headers)
-          .timeout(_requestTimeout);
+      final response = await _send(
+        'GET',
+        target,
+        headers: _headers,
+      ).timeout(_requestTimeout);
 
+      if (epoch != _generation) return null;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         if (response.body.isEmpty) return {};
         return jsonDecode(response.body) as Map<String, dynamic>;

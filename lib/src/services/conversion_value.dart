@@ -15,6 +15,14 @@ class ConversionValue {
   bool _inFlight = false;
   bool _rerunForced = false;
   bool _recheckScheduled = false;
+  Timer? _recheckTimer;
+  void cancel() {
+    client.cancel();
+    _recheckTimer?.cancel();
+    _recheckScheduled = false;
+    _rerunForced = false;
+  }
+
   static const trialEvents = {
     'startTrial',
     'trial_started',
@@ -64,7 +72,7 @@ class ConversionValue {
         final raised = await _refreshOnce(force: force);
         if (force && !raised && allowRecheck && !_recheckScheduled) {
           _recheckScheduled = true;
-          Timer(const Duration(seconds: 90), () {
+          _recheckTimer = Timer(const Duration(seconds: 90), () {
             _recheckScheduled = false;
             // Through the guarded path (enabled, window, one check at a time), without another recheck.
             unawaited(refresh(force: true, allowRecheck: false));

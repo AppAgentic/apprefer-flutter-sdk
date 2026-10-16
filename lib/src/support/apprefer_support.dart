@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../services/device_info.dart';
+import '../services/registry.dart';
 import '../services/logger.dart';
 import 'support_api.dart';
 import 'support_style.dart';
@@ -17,6 +18,21 @@ class AppReferSupport {
   AppReferSupport._();
   static final instance = AppReferSupport._();
   final SupportAPI api = SupportAPI();
+  final ValueNotifier<int> accountGeneration = ValueNotifier(0);
+  Route<void>? _presented;
+  NavigatorState? _presentingNavigator;
+  void configure({required String apiKey}) {
+    AppReferRegistry.apiKey = apiKey;
+  }
+
+  Future<void> reset() async {
+    final route = _presented;
+    if (route != null && route.isActive)
+      _presentingNavigator?.removeRoute(route);
+    _presented = null;
+    await api.reset();
+    accountGeneration.value++;
+  }
 
   /// Set this to the host MaterialApp navigatorKey for context-free push routing.
   GlobalKey<NavigatorState>? navigatorKey;
@@ -63,9 +79,14 @@ class AppReferSupport {
     if (nav == null) {
       throw StateError('Pass context or set AppRefer.support.navigatorKey.');
     }
-    await nav.push(
-      MaterialPageRoute<void>(fullscreenDialog: true, builder: (_) => view),
+    final route = MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (_) => view,
     );
+    _presented = route;
+    _presentingNavigator = nav;
+    await nav.push(route);
+    if (identical(_presented, route)) _presented = null;
   }
 
   Future<void> registerPushToken(
@@ -78,10 +99,12 @@ class AppReferSupport {
       'token': token,
       'environment': environment,
     });
+    await api.write('support_${AppReferRegistry.apiKey}.push', token);
   }
 
   Future<void> removePushToken(String token) async {
     await api.call('DELETE', '/push-token', {'token': token});
+    await api.write('support_${AppReferRegistry.apiKey}.push', null);
   }
 
   bool handleNotification(Map<String, dynamic> data, {BuildContext? context}) {
@@ -233,6 +256,7 @@ class _SupportViewState extends State<AppReferSupportView>
     homeText.addListener(_changed);
     threadText.addListener(_changed);
     api.persona.addListener(_changed);
+    config.accountGeneration.addListener(_accountReset);
     metadataReady = _context();
     config.launcherIcon().then((bytes) {
       if (mounted && bytes != null && bytes.isNotEmpty) {
@@ -246,6 +270,30 @@ class _SupportViewState extends State<AppReferSupportView>
     }
     _refresh();
     _timer();
+  }
+
+  void _accountReset() {
+    if (!mounted) return;
+    timer?.cancel();
+    generation++;
+    setState(() {
+      id = null;
+      pollCursor = null;
+      firstSend = null;
+      topic = null;
+      conversations = [];
+      messages = [];
+      homeImages = [];
+      threadImages = [];
+      pending.clear();
+      homeText.clear();
+      threadText.clear();
+      sending = false;
+      loading = false;
+      refreshing = false;
+      sendError = '';
+      loadError = '';
+    });
   }
 
   void _changed() {
@@ -301,6 +349,7 @@ class _SupportViewState extends State<AppReferSupportView>
     timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     api.persona.removeListener(_changed);
+    config.accountGeneration.removeListener(_accountReset);
     for (final c in [homeText, threadText]) {
       c.removeListener(_changed);
       c.dispose();
