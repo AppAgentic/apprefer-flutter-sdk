@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'offerings.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -18,6 +19,8 @@ class PendingPurchase {
   /// Queued by Restore Purchases, so the retry is still sent as a restore.
   final bool restore;
   final bool migrationOnly;
+  final PresentedOfferingContext? presentedOfferingContext;
+  final String? bucketId;
 
   const PendingPurchase({
     required this.transactionId,
@@ -29,6 +32,8 @@ class PendingPurchase {
     this.attempts = 1,
     this.restore = false,
     this.migrationOnly = false,
+    this.presentedOfferingContext,
+    this.bucketId,
   });
 
   /// A Google Play consumable: consumed only once AppRefer recorded it.
@@ -48,6 +53,8 @@ class PendingPurchase {
     attempts: attempts ?? this.attempts,
     restore: restore ?? this.restore,
     migrationOnly: migrationOnly,
+    presentedOfferingContext: presentedOfferingContext,
+    bucketId: bucketId,
   );
 
   PendingPurchase withAttempts(int attempts) => copyWith(attempts: attempts);
@@ -61,6 +68,9 @@ class PendingPurchase {
     'enqueuedAtMs': enqueuedAt.millisecondsSinceEpoch,
     'attempts': attempts,
     if (restore) 'restore': true,
+    if (presentedOfferingContext != null)
+      'presentedOfferingContext': presentedOfferingContext!.toJson(),
+    if (bucketId != null) 'bucketId': bucketId,
     if (migrationOnly) 'migrationOnly': true,
   };
 
@@ -78,6 +88,14 @@ class PendingPurchase {
       productId: productId,
       appUserId: user,
       appreferId: json['appreferId'] as String?,
+      presentedOfferingContext: json['presentedOfferingContext'] is Map
+          ? PresentedOfferingContext.fromJson(
+              Map<String, dynamic>.from(
+                json['presentedOfferingContext'] as Map,
+              ),
+            )
+          : null,
+      bucketId: json['bucketId'] as String?,
       storeFields: {
         for (final e in fields.entries)
           if (e.key is String && e.value is String)
@@ -231,6 +249,9 @@ class PendingPurchaseQueue {
         attempts: old.attempts + entry.attempts,
         restore: old.restore || entry.restore,
         migrationOnly: old.migrationOnly && entry.migrationOnly,
+        presentedOfferingContext:
+            owner.presentedOfferingContext ?? entry.presentedOfferingContext,
+        bucketId: owner.bucketId ?? entry.bucketId,
       );
     } else {
       _entries.add(entry);

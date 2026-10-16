@@ -13,6 +13,7 @@ import '../services/logger.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
 import 'billing_api_client.dart';
+import 'offerings.dart';
 import 'billing_engine.dart';
 import 'billing_error.dart';
 import 'billing_storage.dart';
@@ -334,6 +335,15 @@ class AppReferBilling {
     _listeners.remove(listener);
   }
 
+  static Future<AppReferOfferings> offerings({
+    FetchPolicy fetchPolicy = FetchPolicy.cachedOrFetched,
+  }) async => (await _requireEngine()).offerings(fetchPolicy);
+  static Future<PurchaseResult> purchasePackage(AppReferPackage package) async {
+    final result = await (await _requireEngine()).purchasePackage(package);
+    if (result.outcome == PurchaseOutcome.purchased)
+      unawaited(AppReferSDK.updateConversionValue());
+    return result;
+  }
   // --- Products and purchases ---
 
   /// Store products in the order requested. On Google Play a subscription

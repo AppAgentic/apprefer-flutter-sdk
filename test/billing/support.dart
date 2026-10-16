@@ -105,7 +105,7 @@ class FakeProduct extends ProductDetails {
       );
 }
 
-class FakeStore implements BillingStoreAdapter {
+class FakeStore extends BillingStoreAdapter {
   @override
   BillingStore store = BillingStore.appStore;
 

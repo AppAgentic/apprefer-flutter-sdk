@@ -1,3 +1,5 @@
+import 'storefront_country.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -21,7 +23,7 @@ import 'customer_info.dart';
 /// `serverVerificationData` and turns `PurchaseParam.applicationUserName` into
 /// `appAccountToken`; on Android `applicationUserName` becomes the Play
 /// `obfuscatedAccountId` and `serverVerificationData` is the purchase token.
-class InAppPurchaseBillingStore implements BillingStoreAdapter {
+class InAppPurchaseBillingStore extends BillingStoreAdapter {
   final InAppPurchase _iap;
   final BillingStorage? _storage;
   final Set<String> _consumableProductIds;
@@ -166,6 +168,21 @@ class InAppPurchaseBillingStore implements BillingStoreAdapter {
       value == null || value.isEmpty ? null : value;
 
   // --- Products and purchases ---
+
+  String? _appVersion;
+  @override
+  String? get appVersion => _appVersion;
+  @override
+  Future<String?> storefrontCountry() async {
+    try {
+      _appVersion = (await PackageInfo.fromPlatform()).version;
+    } catch (_) {}
+    try {
+      return storefrontAlpha2(await _iap.countryCode());
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   Future<List<ProductDetails>> products(List<String> productIds) async {
