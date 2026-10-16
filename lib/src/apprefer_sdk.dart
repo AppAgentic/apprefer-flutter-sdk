@@ -44,7 +44,11 @@ class AppReferSDK with WidgetsBindingObserver {
   static bool get _collectionBlocked => AppReferRegistry.collectionBlocked;
   static set _collectionBlocked(bool value) =>
       AppReferRegistry.collectionBlocked = value;
-  static bool _needsCollectionConfigure = false;
+  // In the registry too: Support and Billing link nothing while it waits for configure.
+  static bool get _needsCollectionConfigure =>
+      AppReferRegistry.collectionAwaitingConfigure;
+  static set _needsCollectionConfigure(bool value) =>
+      AppReferRegistry.collectionAwaitingConfigure = value;
   static Future<void> _collectionWrites = Future.value();
   static Future<void> _accountWrites = Future.value();
   static Future<void> _accountWrite(Future<void> Function() work) {
@@ -126,6 +130,7 @@ class AppReferSDK with WidgetsBindingObserver {
   /// is called again.
   static Future<void> reset() async {
     _accountGeneration++;
+    AppReferRegistry.accountEpoch++;
     AppReferRegistry.stoppedByReset = true;
     _configuring = null;
     _requestedConfig = null;
@@ -149,7 +154,7 @@ class AppReferSDK with WidgetsBindingObserver {
     await _ignoreStorage(() async {
       final prefs = await SharedPreferences.getInstance();
       await _accountWrite(() async {
-        await prefs.remove('apprefer_user_id');
+        await AppReferStorage.clearUserIn(prefs);
       });
     });
     await support.reset();
@@ -208,7 +213,7 @@ class AppReferSDK with WidgetsBindingObserver {
         await _ignoreStorage(
           () => _accountWrite(() async {
             if (accountEpoch == _accountGeneration)
-              await prefs.setString('apprefer_user_id', userId);
+              await AppReferStorage.writeUserId(prefs, userId);
           }),
         );
       }

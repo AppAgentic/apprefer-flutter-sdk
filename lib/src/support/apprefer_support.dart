@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../services/device_info.dart';
 import '../services/registry.dart';
+import '../services/storage.dart';
 import '../services/logger.dart';
 import 'support_api.dart';
 import 'support_style.dart';
@@ -41,6 +42,34 @@ class AppReferSupport with WidgetsBindingObserver {
       _presentingNavigator?.removeRoute(route);
     _presented = null;
     accountGeneration.value++;
+  }
+
+  /// Removes the account from Support without a full reset, e.g. when the
+  /// user withdraws consent: forgets the name, email and app user id, revokes
+  /// the current Support session and starts a new anonymous one that sends no
+  /// app user id or device id. A registered push token moves to the new
+  /// session once the old one is revoked, and an open help screen closes.
+  /// Conversations from the old session stay in your team inbox but are no
+  /// longer shown in the app. The app user id is not sent to Support again
+  /// until it changes (another account signs in, which then gets a fresh
+  /// session) or `AppReferSDK.reset()` runs. Attribution, Billing and the
+  /// stored user id are untouched.
+  Future<void> clearIdentity() async {
+    final storage = AppReferStorage();
+    await storage.init();
+    await storage.setSupportIdentityCleared(true);
+    await api.clearIdentity();
+    final route = _presented;
+    if (route != null && route.isActive)
+      _presentingNavigator?.removeRoute(route);
+    _presented = null;
+    accountGeneration.value++;
+    if (api.apiKey() == null) return;
+    try {
+      await api.ensureSession();
+    } catch (_) {
+      // Minted on the next request instead.
+    }
   }
 
   /// Set this to the host MaterialApp navigatorKey for context-free push routing.
@@ -104,12 +133,19 @@ class AppReferSupport with WidgetsBindingObserver {
   }) async {
     final epoch = api.actionGeneration;
     await supportChannel.invokeMethod<void>('notificationChannel');
+    if (await api.pushMovePending(token)) {
+      // Still on a session being revoked: it moves once that succeeded, so
+      // the old and new sessions never hold it at the same time.
+      await api.persistPushToken(token, epoch, environment: environment);
+      api.resumeRevocations();
+      return;
+    }
     await api.call('POST', '/push-token', {
       'platform': Platform.isIOS ? 'ios' : 'android',
       'token': token,
       'environment': environment,
     }, epoch);
-    await api.persistPushToken(token, epoch);
+    await api.persistPushToken(token, epoch, environment: environment);
   }
 
   Future<void> removePushToken(String token) async {

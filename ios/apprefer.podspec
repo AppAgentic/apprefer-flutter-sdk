@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'apprefer'
-  s.version          = '0.9.1'
+  s.version          = '0.9.2'
   s.summary          = 'AppRefer SDK - First-party mobile attribution.'
   s.description      = 'First-party mobile attribution platform for iOS and Android.'
   s.homepage         = 'https://apprefer.com'

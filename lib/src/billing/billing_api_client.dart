@@ -61,7 +61,12 @@ class RecordPurchase extends BillingEndpoint {
 class Identify extends BillingEndpoint {
   final String anonymousId;
   final String appUserId;
-  const Identify(this.anonymousId, this.appUserId);
+
+  /// False while the install may not be linked (collection off, after reset
+  /// until configure, Billing-only): the server then merges the purchases
+  /// without copying the anonymous customer's attribution link.
+  final bool link;
+  const Identify(this.anonymousId, this.appUserId, {this.link = true});
 }
 
 /// Client for `/api/billing/v1/*`. Tries the tracking host first, then the main
@@ -75,12 +80,17 @@ class BillingApiClient {
   /// 100 ms polls while waiting for the SDK key.
   final int keyWaitAttempts;
 
+  /// False while the install may not be linked (collection off, after reset
+  /// until configure): requests then never use the tracking host.
+  final Future<bool> Function()? linkAllowed;
+
   BillingApiClient({
     required List<String> baseUrls,
     required this.apiKey,
     http.Client? client,
     this.timeout = const Duration(seconds: 15),
     this.keyWaitAttempts = 30,
+    this.linkAllowed,
   }) : baseUrls = baseUrls.toSet().toList(),
        _client = client ?? http.Client();
 
@@ -134,9 +144,13 @@ class BillingApiClient {
             'presentedOfferingContext': presentedOfferingContext.toJson(),
           if (bucketId != null) 'bucketId': bucketId,
         };
-      case Identify(:final anonymousId, :final appUserId):
+      case Identify(:final anonymousId, :final appUserId, :final link):
         path = '/api/billing/v1/identify';
-        body = {'anonymousId': anonymousId, 'appUserId': appUserId};
+        body = {
+          'anonymousId': anonymousId,
+          'appUserId': appUserId,
+          'link': link,
+        };
     }
 
     final base = Uri.tryParse(baseUrl + path);
@@ -173,6 +187,18 @@ class BillingApiClient {
       }
     }
     return null;
+  }
+
+  /// [linkAllowed], with an error (e.g. unreadable preferences) read as
+  /// false, so the gate can never break a Billing request.
+  Future<bool> _linkAllowedSafely() async {
+    final gate = linkAllowed;
+    if (gate == null) return true;
+    try {
+      return await gate();
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Sends the request. 5xx and network errors fail over to the next host; 4xx are final.
@@ -212,7 +238,12 @@ class BillingApiClient {
         baseUrls.length == 2 &&
             baseUrls[0] == 'https://trk.apprefer.com' &&
             baseUrls[1] == 'https://apprefer.com'
-        ? TrackingConsent.hosts(await TrackingConsent.current(), baseUrls)
+        ? TrackingConsent.hosts(
+            await _linkAllowedSafely()
+                ? await TrackingConsent.current()
+                : 'denied',
+            baseUrls,
+          )
         : baseUrls;
     for (final baseUrl in hosts) {
       final request = makeRequest(endpoint, baseUrl, key);

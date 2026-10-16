@@ -11,7 +11,6 @@ import '../config.dart';
 import '../apprefer_sdk.dart';
 import '../services/logger.dart';
 import '../services/registry.dart';
-import '../services/storage.dart';
 import 'billing_api_client.dart';
 import 'offerings.dart';
 import 'billing_engine.dart';
@@ -151,6 +150,7 @@ class AppReferBilling {
           ],
           apiKey: () => apiKey ?? AppReferRegistry.apiKey,
           client: httpClient,
+          linkAllowed: AppReferRegistry.linkAllowed,
         ),
         storage: storage,
         queue: PendingPurchaseQueue(prefs, BillingStorage.pendingPurchasesKey),
@@ -191,12 +191,10 @@ class AppReferBilling {
 
   /// The attribution device id, sent as `appreferId` so purchases are matched
   /// to the ad click without `setUserId`. Only read: attribution owns minting
-  /// it, so billing can never race it into a second id.
-  static Future<String?> _appreferDeviceId() async {
-    final storage = AppReferStorage();
-    await storage.init();
-    return storage.existingDeviceId();
-  }
+  /// it, so billing can never race it into a second id. Same gate as Support:
+  /// null while collection is off, or after reset() until configure runs again.
+  static Future<String?> _appreferDeviceId() =>
+      AppReferRegistry.linkableDeviceId();
 
   static void _observeLifecycle(BillingEngine engine) {
     try {
@@ -261,7 +259,9 @@ class AppReferBilling {
 
   /// Customer attributes, sent with the next AppRefer call. Supported keys:
   /// `$email`, `$displayName`, `$phoneNumber`, `$idfa`, `$idfv`, `$fbAnonId`,
-  /// `$attConsentStatus`, `$deviceVersion`, `$ip`, `$gpsAdId`.
+  /// `$attConsentStatus`, `$deviceVersion`, `$ip`, `$gpsAdId`. The device keys
+  /// are dropped, not sent, while collection is off or after
+  /// `AppReferSDK.reset()` until configure runs again.
   static Future<void> setAttributes(Map<String, String> attributes) async {
     try {
       (await _requireEngine()).setAttributes(attributes);

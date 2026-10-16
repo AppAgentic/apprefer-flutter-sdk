@@ -125,16 +125,43 @@ class AppReferStorage {
 
   // --- User ID ---
 
-  Future<void> clearUser() async {
-    await _prefs.remove(_keyUserId);
+  Future<void> clearUser() => clearUserIn(_prefs);
+
+  /// Removes the user id and ends a Support identity clear (reset()).
+  static Future<void> clearUserIn(SharedPreferences prefs) async {
+    await prefs.remove(_keyUserId);
+    await prefs.remove(keySupportIdentityCleared);
+  }
+
+  /// Set by `AppReferSDK.support.clearIdentity()`: Support sends no app user id
+  /// until the user id changes or reset() runs.
+  static const keySupportIdentityCleared = 'apprefer_support_identity_cleared';
+  bool get supportIdentityCleared =>
+      _prefs.getBool(keySupportIdentityCleared) ?? false;
+  Future<void> setSupportIdentityCleared(bool value) async {
+    if (value) {
+      await _prefs.setBool(keySupportIdentityCleared, true);
+    } else {
+      await _prefs.remove(keySupportIdentityCleared);
+    }
   }
 
   String? getUserId() {
     return _prefs.getString(_keyUserId);
   }
 
-  Future<void> setUserId(String userId) async {
-    await _prefs.setString(_keyUserId, userId);
+  Future<void> setUserId(String userId) => writeUserId(_prefs, userId);
+
+  /// Stores the user id. A different account ends a Support identity clear;
+  /// the same id keeps it.
+  static Future<void> writeUserId(
+    SharedPreferences prefs,
+    String userId,
+  ) async {
+    if (prefs.getString(_keyUserId) != userId) {
+      await prefs.remove(keySupportIdentityCleared);
+    }
+    await prefs.setString(_keyUserId, userId);
   }
 
   ({int fine, String coarse})? conversionValue() {
