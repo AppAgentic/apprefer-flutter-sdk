@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:apprefer/apprefer.dart';
+import 'package:apprefer/src/services/storage.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -116,4 +117,73 @@ void main() {
       }, () => MockClient(server));
     },
   );
+
+  group('Round 2 D. the clearIdentity flag lives in the secure store', () {
+    const flag = 'apprefer_support_identity_cleared';
+
+    test('clearIdentity saves it next to the session token, not in '
+        'preferences', () async {
+      await http.runWithClient(() async {
+        final support = AppReferSDK.support;
+        support.configure(apiKey: 'pk_support');
+        await support.clearIdentity();
+        expect(secure[flag], '1');
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.containsKey(flag), isFalse);
+        // A different account ends it in the secure store too.
+        await AppReferSDK.setUserId('acct_B');
+        expect(secure.containsKey(flag), isFalse);
+      }, () => MockClient(server));
+    });
+
+    test(
+      'a 0.9.2 preferences copy moves to the secure store on first read',
+      () async {
+        SharedPreferences.setMockInitialValues({flag: true});
+        final storage = AppReferStorage();
+        await storage.init();
+        expect(await storage.isSupportIdentityCleared(), isTrue);
+        expect(secure[flag], '1');
+        expect(
+          (await SharedPreferences.getInstance()).containsKey(flag),
+          isFalse,
+        );
+        expect(await storage.isSupportIdentityCleared(), isTrue);
+      },
+    );
+
+    test(
+      'reinstall: preferences are gone but the Keychain session and flag '
+      'survive, so the cleared session stays anonymous and is kept',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        secure
+          ..[flag] = '1'
+          ..['support_pk_support.token'] = 'ars_kept'
+          ..['support_pk_support.cleared'] = '1'
+          ..['support_pk_support.profile'] = '{}';
+        await http.runWithClient(() async {
+          final support = AppReferSDK.support;
+          support.configure(apiKey: 'pk_support');
+          support.api.name = null;
+          support.api.email = null;
+          await support.api.conversations();
+          await settle();
+          expect(deleteOf('ars_kept'), -1, reason: 'not retired');
+          final get = requests.lastWhere((r) => r.method == 'GET');
+          expect(get.headers['X-AppRefer-Support-Session'], 'ars_kept');
+        }, () => MockClient(server));
+      },
+    );
+
+    test('an unreadable secure store reads as cleared', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            throw PlatformException(code: 'secure_storage');
+          });
+      final storage = AppReferStorage();
+      await storage.init();
+      expect(await storage.isSupportIdentityCleared(), isTrue);
+    });
+  });
 }

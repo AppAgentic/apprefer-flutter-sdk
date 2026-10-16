@@ -24,6 +24,15 @@ class BillingStorage {
   static const _customerInfo = 'apprefer_billing_customer_info';
   static const _productKinds = 'apprefer_billing_product_kinds';
   static const resetUserKey = 'apprefer_billing_reset_user';
+
+  /// Advances whenever the Billing user changes in this process (logIn,
+  /// logOut, a different stored user). A reset() marker write that started
+  /// before such a change is skipped.
+  static int identityChanges = 0;
+
+  /// The anonymous id `logOut()` minted in this process (null after a
+  /// logIn): a user the app just signed out to, never marked by reset().
+  static String? loggedOutAnonymousId;
   static const pendingPurchasesKey = 'apprefer_billing_pending_purchases';
   static const rejectedPurchasesKey = 'apprefer_billing_rejected_purchases';
   static const purchaseIntentsKey = 'apprefer_billing_purchase_intents';
@@ -117,6 +126,7 @@ class BillingStorage {
 
   String resetAnonymousId() {
     final id = '$anonymousPrefix${generateUuidV4().toUpperCase()}';
+    identityChanges++;
     _write(_anonymousId, () => prefs.setString(_anonymousId, id));
     _dropStaleResetUser();
     return id;
@@ -127,6 +137,11 @@ class BillingStorage {
   String? get loggedInAppUserId => _readIdentity(_appUserId);
 
   set loggedInAppUserId(String? value) {
+    try {
+      if (prefs.getString(_appUserId) != value) identityChanges++;
+    } catch (_) {
+      identityChanges++;
+    }
     if (value == null) {
       _write(_appUserId, () => prefs.remove(_appUserId));
     } else {
@@ -141,9 +156,19 @@ class BillingStorage {
   /// or anonymous), so the account gate survives a relaunch: while it is still
   /// the current Billing user, that user is never linked to the install.
   /// Nothing is saved when Billing never stored a user on this install.
-  static Future<void> markResetUser(SharedPreferences prefs) async {
+  ///
+  /// [since] is [identityChanges] when reset() was called: if Billing's user
+  /// changed meanwhile (a logIn/logOut while reset() was running), the write
+  /// is skipped, so it never marks the user set after the reset. A fresh
+  /// anonymous id minted by logOut() in this process is never marked either
+  /// (an app that signs out with logOut() before reset()).
+  static Future<void> markResetUser(
+    SharedPreferences prefs, {
+    required int since,
+  }) async {
+    if (identityChanges != since) return;
     final user = prefs.getString(_appUserId) ?? prefs.getString(_anonymousId);
-    if (user == null || user.isEmpty) return;
+    if (user == null || user.isEmpty || user == loggedOutAnonymousId) return;
     await prefs.setString(resetUserKey, user);
   }
 

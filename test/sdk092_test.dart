@@ -523,7 +523,7 @@ void main() {
         isFalse,
       );
       await AppReferSDK.reset();
-      expect(storage.supportIdentityCleared, isFalse);
+      expect(await storage.isSupportIdentityCleared(), isFalse);
     });
   });
 

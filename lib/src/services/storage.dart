@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../support/identity_flag.dart';
+
 class AppReferStorage {
   static const _keyDeviceId = 'apprefer_device_id';
   static const _keyFirstRunDate = 'apprefer_first_run_date';
@@ -130,21 +132,17 @@ class AppReferStorage {
   /// Removes the user id and ends a Support identity clear (reset()).
   static Future<void> clearUserIn(SharedPreferences prefs) async {
     await prefs.remove(_keyUserId);
-    await prefs.remove(keySupportIdentityCleared);
+    await SupportIdentityFlag.clear(prefs);
   }
 
   /// Set by `AppReferSDK.support.clearIdentity()`: Support sends no app user id
-  /// until the user id changes or reset() runs.
-  static const keySupportIdentityCleared = 'apprefer_support_identity_cleared';
-  bool get supportIdentityCleared =>
-      _prefs.getBool(keySupportIdentityCleared) ?? false;
-  Future<void> setSupportIdentityCleared(bool value) async {
-    if (value) {
-      await _prefs.setBool(keySupportIdentityCleared, true);
-    } else {
-      await _prefs.remove(keySupportIdentityCleared);
-    }
-  }
+  /// until the user id changes or reset() runs. Kept in the Support secure
+  /// store next to the session token (see [SupportIdentityFlag]).
+  static const keySupportIdentityCleared = SupportIdentityFlag.key;
+  Future<bool> isSupportIdentityCleared() => SupportIdentityFlag.read(_prefs);
+  Future<void> setSupportIdentityCleared(bool value) => value
+      ? SupportIdentityFlag.set(_prefs)
+      : SupportIdentityFlag.clear(_prefs);
 
   String? getUserId() {
     return _prefs.getString(_keyUserId);
@@ -159,7 +157,9 @@ class AppReferStorage {
     String userId,
   ) async {
     if (prefs.getString(_keyUserId) != userId) {
-      await prefs.remove(keySupportIdentityCleared);
+      // Throws if the flag can't be removed: the new id is then not stored,
+      // so a cleared session is never handed to it.
+      await SupportIdentityFlag.clear(prefs);
     }
     await prefs.setString(_keyUserId, userId);
   }

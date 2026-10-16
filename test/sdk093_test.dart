@@ -20,6 +20,7 @@ const marker = 'apprefer_billing_reset_user';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  round2C();
   setUp(() async {
     await AppReferSDK.disposeForTesting();
     SharedPreferences.setMockInitialValues({});
@@ -161,6 +162,77 @@ void main() {
       expect((await disk()).containsKey(marker), isFalse);
     });
   });
+
+  group(
+    'Round 2 A. the reset marker never names a user set by logIn/logOut',
+    () {
+      test(
+        'logOut() before reset(): the fresh anonymous user is not marked and '
+        'is linked after a relaunch',
+        () async {
+          final h = await Harness.create(
+            appUserId: 'alice',
+            server: FakeServer()..online(),
+            appreferId: AppReferRegistry.linkableDeviceId,
+          );
+          await configure();
+          await h.engine.logOut();
+          final fresh = h.engine.currentAppUserId;
+          await AppReferSDK.reset();
+          expect((await disk()).containsKey(marker), isFalse);
+          final next = await relaunch(await disk());
+          expect(next.engine.currentAppUserId, fresh);
+          await next.engine.customerInfo(FetchPolicy.fetchCurrent);
+          expect(
+            next.server.bodiesFor(customers).single['appreferId'],
+            isNotNull,
+          );
+        },
+      );
+
+      test('logOut() while reset() is still running: no marker', () async {
+        final h = await Harness.create(
+          appUserId: 'alice',
+          server: FakeServer()..online(),
+        );
+        final resetting = AppReferSDK.reset();
+        await h.engine.logOut();
+        await resetting;
+        expect((await disk()).containsKey(marker), isFalse);
+      });
+
+      test('logIn() while reset() is still running: the new user is not '
+          'marked', () async {
+        final h = await Harness.create(
+          appUserId: 'alice',
+          server: FakeServer()..online(),
+        );
+        final resetting = AppReferSDK.reset();
+        await h.engine.logIn('bob');
+        await resetting;
+        expect((await disk()).containsKey(marker), isFalse);
+      });
+
+      test('a logIn user is still marked by a later reset(), even after an '
+          'earlier logOut', () async {
+        final h = await Harness.create(
+          appUserId: 'alice',
+          server: FakeServer()..online(),
+        );
+        await h.engine.logOut();
+        await h.engine.logIn('carol');
+        await AppReferSDK.reset();
+        expect((await disk())[marker], 'carol');
+      });
+
+      test('an anonymous id not minted by logOut is still marked', () async {
+        final h = await Harness.create(server: FakeServer()..online());
+        final anon = h.engine.currentAppUserId;
+        await AppReferSDK.reset();
+        expect((await disk())[marker], anon);
+      });
+    },
+  );
 
   group('Fix 3. a re-registered push token held by a pending revocation', () {
     late Map<String, String> secure;
@@ -361,6 +433,67 @@ void main() {
         ),
         isTrue,
       );
+    });
+  });
+}
+
+void round2C() {
+  group('Round 2 C. a revocation requested as a pass ends still runs', () {
+    test('every point in the hand-off window', () async {
+      for (var hops = 0; hops < 40; hops++) {
+        final secure = <String, String>{
+          'apprefer_revocations': jsonEncode([
+            {
+              'token': 'ars_first',
+              'key': 'pk_test',
+              'createdAt': DateTime.now().millisecondsSinceEpoch,
+              'attempts': 0,
+            },
+          ]),
+        };
+        final deleted = <String?>[];
+        late SupportAPI api;
+        var armed = true;
+        api = SupportAPI(
+          apiKey: () => 'pk_test',
+          read: (k) async => secure[k],
+          write: (k, v) async {
+            v == null ? secure.remove(k) : secure[k] = v;
+            if (k == 'apprefer_revocations' && v == '[]' && armed) {
+              armed = false;
+              // A second revocation is queued a few microtasks later.
+              Future<void> later(int n) async {
+                for (var i = 0; i < n; i++) {
+                  await Future<void>.value();
+                }
+                secure['apprefer_revocations'] = jsonEncode([
+                  {
+                    'token': 'ars_second',
+                    'key': 'pk_test',
+                    'createdAt': DateTime.now().millisecondsSinceEpoch,
+                    'attempts': 0,
+                  },
+                ]);
+                api.resumeRevocations();
+              }
+
+              unawaited(later(hops));
+            }
+          },
+          keys: () async => secure.keys.toList(),
+          client: MockClient((r) async {
+            if (r.method == 'DELETE') {
+              deleted.add(r.headers['X-AppRefer-Support-Session']);
+            }
+            return http.Response('{}', 200);
+          }),
+        );
+        api.resumeRevocations();
+        for (var i = 0; i < 100; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        expect(deleted, ['ars_first', 'ars_second'], reason: 'hops=$hops');
+      }
     });
   });
 }

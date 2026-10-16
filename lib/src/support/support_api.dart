@@ -364,12 +364,25 @@ class SupportAPI {
       _revokeAgain = true;
       return running;
     }
-    return _revoking = () async {
-      do {
-        _revokeAgain = false;
-        await _runRevocations();
-      } while (_revokeAgain);
-    }().whenComplete(() => _revoking = null);
+    // The handle is set before the loop starts and cleared in the same step
+    // that decides to stop, so a request can never land after the last
+    // re-run check but before the handle is gone (it would be dropped).
+    final pass = Completer<void>();
+    _revoking = pass.future;
+    () async {
+      try {
+        do {
+          _revokeAgain = false;
+          await _runRevocations();
+        } while (_revokeAgain);
+        _revoking = null;
+        pass.complete();
+      } catch (e, s) {
+        _revoking = null;
+        pass.completeError(e, s);
+      }
+    }();
+    return pass.future;
   }
 
   Future<void> _runRevocations() async {
@@ -459,7 +472,7 @@ class SupportAPI {
   static Future<Map<String, dynamic>> defaultProfile() async {
     final storage = AppReferStorage();
     await storage.init();
-    final cleared = storage.supportIdentityCleared;
+    final cleared = await storage.isSupportIdentityCleared();
     return {
       // Only after configure in this process: never in Support-only apps, after
       // reset() (until configure runs again) or while collection is off. Never
@@ -478,7 +491,7 @@ class SupportAPI {
   static Future<bool> defaultIdentityCleared() async {
     final storage = AppReferStorage();
     await storage.init();
-    return storage.supportIdentityCleared;
+    return storage.isSupportIdentityCleared();
   }
 
   Future<Map<String, dynamic>> _raw(

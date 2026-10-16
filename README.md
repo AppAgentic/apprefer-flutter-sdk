@@ -24,7 +24,9 @@ Billing user) is never linked to the install. Call `AppReferBilling.logIn(…)` 
 `logOut()`) for the next account after `reset()`. Since 0.9.3 this also holds after
 the app is relaunched: `reset()` saves the Billing user it left behind, and until
 `logIn`/`logOut` runs (or Billing moves to a different user) that user gets no device
-id, no re-link and `link: false` on identify. `logIn` tells the server
+id, no re-link and `link: false` on identify. A fresh anonymous user created by
+`logOut()` in the same app session is never marked, so signing out with `logOut()`
+before (or while) `reset()` runs keeps that new user linkable. `logIn` tells the server
 (`link: false` with identify) not to copy the attribution link while the gate is
 closed; the purchases still move to the signed-in user.
 

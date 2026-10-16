@@ -2,7 +2,9 @@
 
 - Billing's account gate now survives a relaunch: reset() saves the Billing app user id that was current then (anonymous or not) as `apprefer_billing_reset_user`, next to Billing's own user id. While Billing still serves that user, customers/purchases requests carry no install device id or device attributes, there is no one-time re-link, and identify sends `link: false`. Any explicit `AppReferBilling.logIn(…)` (even with the same id) or `logOut()`, or a change to a different Billing user, clears it. Nothing is saved when Billing was never configured.
 - registerPushToken with a token that a pending Support session revocation still holds (including tokens saved by 0.9.1 without an environment) no longer posts it at once: the revocation is flagged to move the token with the environment now known, and it is registered on the current session only after the old session is revoked.
-- The Support revocation pass already runs again when a revocation is queued during a pass (clearIdentity(), or a cleared session retired), and the "minted while cleared" marker is already kept in the secure store next to the session token; no change needed in this SDK.
+- reset() never marks a user that logOut() just created: the fresh anonymous id minted by `AppReferBilling.logOut()` in this app session is not saved as the reset marker (an app that signs out with logOut() before reset(), or doesn't wait for reset()), and a marker write that finishes after a logIn/logOut is skipped. A user set by logIn is still marked by a later reset().
+- The Support revocation pass already ran again when a revocation was queued during a pass; the "running" handle is now cleared in the same step that ends the loop, so a request at that moment is never left for the next foreground.
+- The clearIdentity() flag is now kept in the Support secure store next to the session token (iOS Keychain, Android Keystore-encrypted storage), like the "minted while cleared" marker, so a reinstalled iOS app whose Keychain session survived still knows it was cleared. A copy saved in SharedPreferences by 0.9.2 is moved on first read; a secure store that can't be read counts as cleared.
 
 ## 0.9.2
 

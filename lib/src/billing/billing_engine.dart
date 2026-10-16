@@ -1567,6 +1567,8 @@ class BillingEngine {
     _identityEpoch = _observeEpoch();
     // The app says who the user is now, even when it is the same id.
     _storage.clearResetUser();
+    BillingStorage.identityChanges++;
+    BillingStorage.loggedOutAnonymousId = null;
     if (appUserId != _storage.currentAppUserId) {
       if (_storage.loggedInAppUserId == null) {
         _storage.addPendingIdentify((
@@ -1588,8 +1590,9 @@ class BillingEngine {
     _applyPendingConfigure();
     _identityEpoch = _observeEpoch();
     _storage.clearResetUser();
+    BillingStorage.identityChanges++;
     _storage.loggedInAppUserId = null;
-    _storage.resetAnonymousId();
+    BillingStorage.loggedOutAnonymousId = _storage.resetAnonymousId();
     _lastServerFetch = null;
     _invalidateOfferings();
     return customerInfo(FetchPolicy.fetchCurrent);
