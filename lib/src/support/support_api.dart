@@ -15,10 +15,22 @@ String newSupportMessageId() => List.generate(
 
 const supportChannel = MethodChannel('com.apprefer.sdk/support');
 
+/// What kind of failure, so the chat can explain it in the customer's
+/// language ([SupportException.message] stays English, for logs).
+enum SupportErrorReason { server, locked, upload, unavailable, reset }
+
 class SupportException implements Exception {
   final int status;
+
+  /// The server's (or the SDK's) English message, for logs. The chat shows
+  /// its own localized text instead (`SupportStrings.errorText`).
   final String message;
-  SupportException(this.status, this.message);
+  final SupportErrorReason reason;
+  SupportException(
+    this.status,
+    this.message, {
+    this.reason = SupportErrorReason.server,
+  });
   @override
   String toString() => message;
 }
@@ -251,7 +263,12 @@ class SupportAPI {
     int epoch, {
     required String environment,
   }) => _store(() async {
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     final key = apiKey();
     if (key == null) return false;
     bool holds(Map<String, dynamic> v) =>
@@ -497,7 +514,11 @@ class SupportAPI {
     await storage.init();
     final cleared = await storage.supportIdentityClearedState();
     if (cleared == null) {
-      throw SupportException(0, 'Support storage is unavailable; try again.');
+      throw SupportException(
+        0,
+        'Support storage is unavailable; try again.',
+        reason: SupportErrorReason.locked,
+      );
     }
     return cleared;
   }
@@ -512,10 +533,19 @@ class SupportAPI {
     Duration timeout = const Duration(seconds: 30),
   }) async {
     final epoch = expectedGeneration ?? _generation;
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     final key = keyOverride ?? apiKey();
     if (key == null)
-      throw SupportException(0, 'Configure AppRefer before opening support.');
+      throw SupportException(
+        0,
+        'Configure AppRefer before opening support.',
+        reason: SupportErrorReason.unavailable,
+      );
     final request = http.Request(
       method,
       Uri.parse('$baseUrl/api/support/v1$path'),
@@ -529,7 +559,12 @@ class SupportAPI {
     final response = await http.Response.fromStream(
       await client.send(request).timeout(timeout),
     );
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     Map<String, dynamic> data = {};
     try {
       if (response.body.isNotEmpty)
@@ -573,7 +608,12 @@ class SupportAPI {
     if (_invalidatedSlots.contains('$prefix.token') ||
         pending.any((item) => item['token'] == token))
       token = null;
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     if (token != null && !cleared && await read('$prefix.cleared') == '1') {
       // Minted while the identity was cleared, and a different user id has
       // been stored since without reset(): never hand it to that account.
@@ -591,9 +631,19 @@ class SupportAPI {
       token = response['session'] as String? ?? token;
       if (token == null || token.isEmpty)
         throw SupportException(0, 'Invalid support session');
-      if (epoch != _generation) throw SupportException(0, 'Support reset');
+      if (epoch != _generation)
+        throw SupportException(
+          0,
+          'Support reset',
+          reason: SupportErrorReason.reset,
+        );
       await _store(() async {
-        if (epoch != _generation) throw SupportException(0, 'Support reset');
+        if (epoch != _generation)
+          throw SupportException(
+            0,
+            'Support reset',
+            reason: SupportErrorReason.reset,
+          );
         await write('$prefix.token', token);
         _invalidatedSlots.remove('$prefix.token');
         await write('$prefix.profile', fingerprint);
@@ -612,7 +662,12 @@ class SupportAPI {
     int epoch,
   ) async {
     await _store(() async {
-      if (epoch != _generation) throw SupportException(0, 'Support reset');
+      if (epoch != _generation)
+        throw SupportException(
+          0,
+          'Support reset',
+          reason: SupportErrorReason.reset,
+        );
       _deferredRevocations.add(
         await _revocation(token, prefix.substring(8), move: true),
       );
@@ -635,13 +690,28 @@ class SupportAPI {
     int? expectedGeneration,
   ]) async {
     final epoch = expectedGeneration ?? _generation;
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     await _resetting;
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     for (var attempt = 0; ; attempt++) {
       try {
         final token = await _token();
-        if (epoch != _generation) throw SupportException(0, 'Support reset');
+        if (epoch != _generation)
+          throw SupportException(
+            0,
+            'Support reset',
+            reason: SupportErrorReason.reset,
+          );
         return await _raw(method, path, body, token, expectedGeneration: epoch);
       } on SupportException catch (e) {
         if (epoch != _generation) rethrow;
@@ -660,7 +730,12 @@ class SupportAPI {
     int epoch, {
     String? environment,
   }) => _store(() async {
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     await write('support_${apiKey()}.push', token);
     // Kept so clearIdentity() re-registers the token for the same APNs
     // environment after a relaunch.
@@ -673,7 +748,12 @@ class SupportAPI {
   Future<List<Map<String, dynamic>>> conversations() async {
     final epoch = _generation;
     final list = await call('GET', '/conversations');
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     persona.value = AppReferSupportPersona.fromJson(list['persona']);
     return List<Map<String, dynamic>>.from(list['conversations']);
   }
@@ -684,7 +764,12 @@ class SupportAPI {
       'GET',
       '/conversations/${Uri.encodeComponent(id)}${after == null ? '' : '?after=${Uri.encodeQueryComponent(after)}'}',
     );
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     persona.value = AppReferSupportPersona.fromJson(thread['persona']);
     return thread;
   }
@@ -718,13 +803,23 @@ class SupportAPI {
   );
   Future<String> upload(Uint8List jpeg, {int? generation}) async {
     final epoch = generation ?? _generation;
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     final slot = await call('POST', '/attachments', {
       'contentType': 'image/jpeg',
       'size': jpeg.length,
       'name': 'screenshot.jpg',
     }, epoch);
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     final response = await client
         .put(
           Uri.parse(slot['uploadUrl'] as String),
@@ -732,11 +827,17 @@ class SupportAPI {
           body: jpeg,
         )
         .timeout(const Duration(seconds: 60));
-    if (epoch != _generation) throw SupportException(0, 'Support reset');
+    if (epoch != _generation)
+      throw SupportException(
+        0,
+        'Support reset',
+        reason: SupportErrorReason.reset,
+      );
     if (response.statusCode < 200 || response.statusCode >= 300)
       throw SupportException(
         response.statusCode,
         'The screenshot did not upload. Try again.',
+        reason: SupportErrorReason.upload,
       );
     return slot['attachmentId'] as String;
   }

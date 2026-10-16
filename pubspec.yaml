@@ -16,6 +16,10 @@ dependencies:
   crypto: ^3.0.3
   device_info_plus: ^10.0.0
   package_info_plus: ^8.0.0
+  # Support chat dates and times in the chat's language (DateFormat plus its
+  # bundled locale data). Wide range so it never fights the exact version
+  # flutter_localizations pins in the host app.
+  intl: '>=0.18.1 <1.0.0'
   # AppRefer Billing. StoreKit 2 (the storekit default) supplies the signed
   # jwsRepresentation; 0.4.13+1 fixes completePurchase hanging on finished consumables.
   in_app_purchase: ^3.3.1

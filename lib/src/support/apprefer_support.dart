@@ -10,6 +10,7 @@ import '../services/registry.dart';
 import '../services/storage.dart';
 import '../services/logger.dart';
 import 'support_api.dart';
+import 'support_strings.dart';
 import 'support_style.dart';
 
 export 'support_api.dart' show AppReferSupportPersona;
@@ -78,11 +79,38 @@ class AppReferSupport with WidgetsBindingObserver {
   /// Bubble and button colour. Defaults to the host theme's primary colour.
   Color? accentColor;
 
-  /// Hero title. Defaults to "<App name> support".
+  /// Hero title. Defaults to "<App name> support" in the chat's language.
   String? title;
 
   /// How fast the team usually answers, completing "We usually reply in …".
-  String replyTime = 'under an hour';
+  /// Defaults to "under an hour" in the chat's language. A value you set is
+  /// used as written in every language, so set it for the language your app
+  /// is showing; in most languages the sentence around it leaves out "in"
+  /// (e.g. German "innerhalb einer Stunde").
+  String get replyTime =>
+      _replyTime ?? SupportStrings.text('support.replyTime.default');
+  set replyTime(String value) => _replyTime = value;
+  String? _replyTime;
+
+  /// Your own text for any of the chat's strings, by key (e.g.
+  /// `{'support.home.subtitle': "What's up?"}`). Used before the SDK's
+  /// translations, in every language. Placeholders such as `{name}` are
+  /// filled in; plural keys take `'key#one'`, `'key#few'`, … or just `'key'`
+  /// for every count. Keys: `Localization/support-strings.json` in the SDK
+  /// repo.
+  Map<String, String> get strings => SupportStrings.overrides;
+  set strings(Map<String, String> value) =>
+      SupportStrings.overrides = Map.of(value);
+
+  /// Forces the chat's language (e.g. "de", "pt-BR", "zh-Hant"). By default
+  /// it follows the locale your app is running in, then the device's
+  /// languages, then English. Null follows the app again.
+  String? get language => SupportStrings.forcedLanguage;
+  set language(String? value) => SupportStrings.forcedLanguage = value;
+
+  /// Every language the chat ships.
+  static const List<String> supportedLanguages =
+      SupportStrings.supportedLanguages;
 
   /// First names of the people who answer (e.g. `['Jay']`), shown on the help home.
   List<String> teamNames = const [];
@@ -181,50 +209,70 @@ class AppReferSupport with WidgetsBindingObserver {
 /// A quick-help tile on the home screen. Tapping it starts a message on that
 /// topic (the title becomes the conversation subject), or runs [action]
 /// instead (e.g. your own restore-purchases flow).
+///
+/// The built-in tiles ([billing], [restore], [bug], [idea]) read their text
+/// in the chat's language when shown; text you pass is shown as written.
 class AppReferSupportTopic {
   const AppReferSupportTopic({
-    required this.title,
-    required this.subtitle,
+    required String title,
+    required String subtitle,
     required this.icon,
     required this.tint,
-    required this.prompt,
+    required String prompt,
     this.action,
-  });
-  final String title, subtitle;
+  }) : _title = title,
+       _subtitle = subtitle,
+       _prompt = prompt,
+       _builtIn = null;
+
+  const AppReferSupportTopic._builtIn(
+    String id, {
+    required this.icon,
+    required this.tint,
+  }) : _builtIn = id,
+       _title = null,
+       _subtitle = null,
+       _prompt = null,
+       action = null;
+
+  final String? _builtIn, _title, _subtitle, _prompt;
   final IconData icon;
   final Color tint;
-
-  /// The hint in the message field once the tile is picked.
-  final String prompt;
   final VoidCallback? action;
 
-  static const billing = AppReferSupportTopic(
-    title: 'Billing & refunds',
-    subtitle: 'Charges, plans, receipts',
+  /// `billing`, `restore`, `bug` or `idea` for the built-in tiles; the title
+  /// for your own.
+  String get id => _builtIn ?? _title!;
+
+  /// The tile's title; also the new conversation's subject.
+  String get title =>
+      _title ?? SupportStrings.text('support.topic.$_builtIn.title');
+  String get subtitle =>
+      _subtitle ?? SupportStrings.text('support.topic.$_builtIn.subtitle');
+
+  /// The hint in the message field once the tile is picked.
+  String get prompt =>
+      _prompt ?? SupportStrings.text('support.topic.$_builtIn.prompt');
+
+  static const billing = AppReferSupportTopic._builtIn(
+    'billing',
     icon: Icons.credit_card_rounded,
     tint: Color(0xff6e4aff),
-    prompt: 'What happened with the charge?',
   );
-  static const restore = AppReferSupportTopic(
-    title: 'Restore purchase',
-    subtitle: 'Get your plan back',
+  static const restore = AppReferSupportTopic._builtIn(
+    'restore',
     icon: Icons.refresh_rounded,
     tint: Color(0xff2e8ffa),
-    prompt: 'Which plan did you buy, and on which account?',
   );
-  static const bug = AppReferSupportTopic(
-    title: 'Report a bug',
-    subtitle: 'Screenshots welcome',
+  static const bug = AppReferSupportTopic._builtIn(
+    'bug',
     icon: Icons.bug_report_rounded,
     tint: Color(0xfff04554),
-    prompt: 'What went wrong? A screenshot helps.',
   );
-  static const idea = AppReferSupportTopic(
-    title: 'Suggest an idea',
-    subtitle: 'We read every one',
+  static const idea = AppReferSupportTopic._builtIn(
+    'idea',
     icon: Icons.lightbulb_rounded,
     tint: Color(0xff1fb866),
-    prompt: 'What would make the app better for you?',
   );
   static const defaults = [billing, restore, bug, idea];
 }
@@ -293,7 +341,9 @@ class _SupportViewState extends State<AppReferSupportView>
   late SupportColors colors;
   ThemeData? _theme;
   Object? _themeKey;
-  String get title => config.title ?? '$appName support';
+  String get title =>
+      config.title ??
+      SupportStrings.text('support.home.title', {'app': appName});
 
   /// The app's AI assistant, as last seen from AppRefer.
   AppReferSupportPersona? get _persona => api.persona.value;
@@ -456,7 +506,16 @@ class _SupportViewState extends State<AppReferSupportView>
       }
       if (mounted) setState(() => loadError = '');
     } catch (e) {
-      if (mounted) setState(() => loadError = '$e');
+      if (mounted && !_isReset(e)) {
+        setState(
+          () => loadError = SupportStrings.errorText(
+            e,
+            fallback: current == null
+                ? 'support.error.loadFailed'
+                : 'support.thread.loadFailed',
+          ),
+        );
+      }
     } finally {
       refreshing = false;
       if (mounted) {
@@ -524,10 +583,19 @@ class _SupportViewState extends State<AppReferSupportView>
         final list = home ? homeImages : threadImages;
         list.addAll((picked ?? []).take(4 - list.length));
       });
-    } catch (e) {
-      if (mounted) setState(() => sendError = '$e');
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () =>
+              sendError = SupportStrings.text('support.error.imageUnreadable'),
+        );
+      }
     }
   }
+
+  /// A request dropped because the account was reset meanwhile: nothing to show.
+  bool _isReset(Object e) =>
+      e is SupportException && e.reason == SupportErrorReason.reset;
 
   void _pickTopic(AppReferSupportTopic t) {
     if (t.action != null) {
@@ -597,7 +665,14 @@ class _SupportViewState extends State<AppReferSupportView>
       _timer();
       _bottom();
     } catch (e) {
-      if (mounted) setState(() => sendError = '$e');
+      if (mounted && !_isReset(e)) {
+        setState(
+          () => sendError = SupportStrings.errorText(
+            e,
+            fallback: 'support.error.notSent',
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => sending = false);
     }
@@ -652,7 +727,7 @@ class _SupportViewState extends State<AppReferSupportView>
       if (mounted) {
         setState(() {
           p.failed = true;
-          sendError = '$e';
+          if (!_isReset(e)) sendError = SupportStrings.errorText(e);
         });
       }
     } finally {
@@ -663,23 +738,24 @@ class _SupportViewState extends State<AppReferSupportView>
   // MARK: Formatting
 
   DateTime? _date(dynamic value) => DateTime.tryParse('$value')?.toLocal();
-  String _clock(DateTime date) =>
-      MaterialLocalizations.of(context).formatTimeOfDay(
-        TimeOfDay.fromDateTime(date),
-        alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
-      );
+  String _clock(DateTime date) => SupportStrings.clock(
+    date,
+    alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+  );
   String _time(dynamic value) {
     final date = _date(value);
     if (date == null) return '';
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final day = DateTime(date.year, date.month, date.day);
-    final label = day == today
-        ? 'Today'
-        : day == today.subtract(const Duration(days: 1))
-        ? 'Yesterday'
-        : MaterialLocalizations.of(context).formatShortDate(date);
-    return '$label, ${_clock(date)}';
+    return SupportStrings.timestamp(
+      date,
+      alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+    );
+  }
+
+  String _subject(Map<String, dynamic> c) {
+    final subject = '${c['subject'] ?? ''}'.trim();
+    return subject.isEmpty
+        ? SupportStrings.text('support.conversation.defaultSubject')
+        : subject;
   }
 
   // MARK: Shared pieces
@@ -744,7 +820,7 @@ class _SupportViewState extends State<AppReferSupportView>
   );
 
   Widget _label(String text) => Text(
-    text.toUpperCase(),
+    SupportStrings.upper(text),
     style: TextStyle(
       fontSize: 12,
       fontWeight: FontWeight.w700,
@@ -757,7 +833,7 @@ class _SupportViewState extends State<AppReferSupportView>
     final unread = c['unread'] as int? ?? 0;
     if (unread > 0) {
       return Semantics(
-        label: '$unread unread',
+        label: SupportStrings.plural('support.a11y.unread', unread),
         excludeSemantics: true,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -830,12 +906,12 @@ class _SupportViewState extends State<AppReferSupportView>
               radius: 29,
               shadow: _shadow(0.18, 20, 10),
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(6, 7, 7, 7),
+                padding: const EdgeInsetsDirectional.fromSTEB(6, 7, 7, 7),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     _button(
-                      'Add screenshot',
+                      SupportStrings.text('support.a11y.addScreenshot'),
                       busy || images.length >= 4 ? null : () => _pick(home),
                       SizedBox(
                         width: 44,
@@ -867,9 +943,16 @@ class _SupportViewState extends State<AppReferSupportView>
                           hintText: home
                               ? topic?.prompt ??
                                     (_persona == null
-                                        ? 'Ask us anything…'
-                                        : 'Message ${_persona!.name}…')
-                              : 'Message',
+                                        ? SupportStrings.text(
+                                            'support.composer.placeholder.home',
+                                          )
+                                        : SupportStrings.text(
+                                            'support.composer.placeholder.persona',
+                                            {'name': _persona!.name},
+                                          ))
+                              : SupportStrings.text(
+                                  'support.composer.placeholder.thread',
+                                ),
                           hintMaxLines: 1,
                           hintStyle: TextStyle(
                             fontSize: 17,
@@ -880,7 +963,7 @@ class _SupportViewState extends State<AppReferSupportView>
                     ),
                     const SizedBox(width: 6),
                     _button(
-                      'Send',
+                      SupportStrings.text('support.a11y.send'),
                       canSend ? (home ? _start : () => _sendThread()) : null,
                       Container(
                         width: 44,
@@ -925,12 +1008,12 @@ class _SupportViewState extends State<AppReferSupportView>
       SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(0, 8, 8, 8),
+          padding: const EdgeInsetsDirectional.fromSTEB(0, 8, 8, 8),
           child: Row(
             children: [
               for (var i = 0; i < images.length; i++)
                 Padding(
-                  padding: const EdgeInsets.only(right: 10),
+                  padding: const EdgeInsetsDirectional.only(end: 10),
                   child: Stack(
                     clipBehavior: Clip.none,
                     children: [
@@ -953,11 +1036,11 @@ class _SupportViewState extends State<AppReferSupportView>
                           ),
                         ),
                       ),
-                      Positioned(
+                      PositionedDirectional(
                         top: -6,
-                        right: -6,
+                        end: -6,
                         child: _button(
-                          'Remove screenshot',
+                          SupportStrings.text('support.a11y.removeScreenshot'),
                           busy
                               ? null
                               : () => setState(() {
@@ -985,7 +1068,7 @@ class _SupportViewState extends State<AppReferSupportView>
                 ),
               if (images.length < 4)
                 _button(
-                  'Add another screenshot',
+                  SupportStrings.text('support.a11y.addAnotherScreenshot'),
                   busy ? null : () => _pick(home),
                   Container(
                     width: 62,
@@ -1009,7 +1092,9 @@ class _SupportViewState extends State<AppReferSupportView>
 
   String get _greeting {
     final first = supportFirstName(api.name);
-    return first == null ? 'Hi there 👋' : 'Hi $first 👋';
+    return first == null
+        ? SupportStrings.text('support.home.greeting')
+        : SupportStrings.text('support.home.greeting.named', {'name': first});
   }
 
   Widget _home() {
@@ -1096,7 +1181,7 @@ class _SupportViewState extends State<AppReferSupportView>
                 _appIcon(),
                 const Spacer(),
                 _button(
-                  'Close',
+                  SupportStrings.text('support.a11y.close'),
                   () => Navigator.maybePop(context),
                   ClipOval(
                     child: BackdropFilter(
@@ -1132,7 +1217,7 @@ class _SupportViewState extends State<AppReferSupportView>
             const SizedBox(height: 2),
             FittedBox(
               fit: BoxFit.scaleDown,
-              alignment: Alignment.centerLeft,
+              alignment: AlignmentDirectional.centerStart,
               child: Text(
                 _greeting,
                 maxLines: 1,
@@ -1147,7 +1232,7 @@ class _SupportViewState extends State<AppReferSupportView>
             ),
             const SizedBox(height: 2),
             Text(
-              'How can we help today?',
+              SupportStrings.text('support.home.subtitle'),
               style: TextStyle(
                 fontSize: 19,
                 fontWeight: FontWeight.w500,
@@ -1227,7 +1312,7 @@ class _SupportViewState extends State<AppReferSupportView>
     final count = names.length + offset;
     final on = palette.onAccent;
     return Container(
-      padding: const EdgeInsets.fromLTRB(8, 7, 14, 7),
+      padding: const EdgeInsetsDirectional.fromSTEB(8, 7, 14, 7),
       decoration: BoxDecoration(
         color: Colors.black.withValues(
           alpha: palette.darkOnAccent ? 0.06 : 0.16,
@@ -1254,8 +1339,8 @@ class _SupportViewState extends State<AppReferSupportView>
                     ]
                   : [
                       for (var i = names.length - 1; i >= 0; i--)
-                        Positioned(
-                          left: 20.0 * (i + offset),
+                        PositionedDirectional(
+                          start: 20.0 * (i + offset),
                           child: SupportAvatar(
                             name: names[i],
                             size: 28,
@@ -1264,8 +1349,8 @@ class _SupportViewState extends State<AppReferSupportView>
                           ),
                         ),
                       if (persona != null)
-                        Positioned(
-                          left: 0,
+                        PositionedDirectional(
+                          start: 0,
                           child: SupportAvatar(
                             name: persona.name,
                             size: 28,
@@ -1298,68 +1383,79 @@ class _SupportViewState extends State<AppReferSupportView>
   Widget _continueCard(Map<String, dynamic> c) {
     final firstTeam = config.teamNames.where((n) => n.trim().isNotEmpty);
     final persona = c['lastFrom'] == 'bot' ? _persona : null;
-    return _Pressable(
-      onTap: () => _openConversation(c['id'] as String),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: colors.card,
-          borderRadius: BorderRadius.circular(26),
-          boxShadow: _shadow(0.22, 22, 14),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _label('Continue'),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                if (persona != null)
-                  SupportAvatar(
-                    name: persona.name,
-                    size: 46,
-                    colors: [palette.warm, palette.hot],
-                    imageUrl: persona.avatarUrl,
-                  )
-                else
-                  SupportAvatar(
-                    name: firstTeam.firstOrNull,
-                    size: 46,
-                    colors: [palette.warm, palette.hot],
-                    icon: firstTeam.isEmpty ? Icons.forum_rounded : null,
-                  ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${c['subject'] ?? ''}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: colors.primary,
+    void open() => _openConversation(c['id'] as String);
+    return Semantics(
+      button: true,
+      label: SupportStrings.text('support.a11y.continueConversation', {
+        'subject': _subject(c),
+      }),
+      onTap: open,
+      excludeSemantics: true,
+      child: _Pressable(
+        onTap: open,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: colors.card,
+            borderRadius: BorderRadius.circular(26),
+            boxShadow: _shadow(0.22, 22, 14),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _label(SupportStrings.text('support.home.continue')),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  if (persona != null)
+                    SupportAvatar(
+                      name: persona.name,
+                      size: 46,
+                      colors: [palette.warm, palette.hot],
+                      imageUrl: persona.avatarUrl,
+                    )
+                  else
+                    SupportAvatar(
+                      name: firstTeam.firstOrNull,
+                      size: 46,
+                      colors: [palette.warm, palette.hot],
+                      icon: firstTeam.isEmpty ? Icons.forum_rounded : null,
+                    ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _subject(c),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: colors.primary,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        c['lastFrom'] == 'customer'
-                            ? 'You: ${c['preview'] ?? ''}'
-                            : '${c['preview'] ?? ''}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 14, color: colors.muted),
-                      ),
-                    ],
+                        const SizedBox(height: 2),
+                        Text(
+                          c['lastFrom'] == 'customer'
+                              ? SupportStrings.text('support.home.youPrefix', {
+                                  'text': '${c['preview'] ?? ''}',
+                                })
+                              : '${c['preview'] ?? ''}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 14, color: colors.muted),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(width: 6),
-                _badgeOrTime(c),
-              ],
-            ),
-          ],
+                  const SizedBox(width: 6),
+                  _badgeOrTime(c),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1373,8 +1469,8 @@ class _SupportViewState extends State<AppReferSupportView>
     children: [
       if (labelled) ...[
         Padding(
-          padding: const EdgeInsets.only(left: 6),
-          child: _label('Quick help'),
+          padding: const EdgeInsetsDirectional.only(start: 6),
+          child: _label(SupportStrings.text('support.home.quickHelp')),
         ),
         const SizedBox(height: 10),
       ],
@@ -1420,7 +1516,7 @@ class _SupportViewState extends State<AppReferSupportView>
           const SizedBox(height: 10),
           FittedBox(
             fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
+            alignment: AlignmentDirectional.centerStart,
             child: Text(
               t.title,
               maxLines: 1,
@@ -1446,8 +1542,8 @@ class _SupportViewState extends State<AppReferSupportView>
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       Padding(
-        padding: const EdgeInsets.only(left: 6),
-        child: _label('Your conversations'),
+        padding: const EdgeInsetsDirectional.only(start: 6),
+        child: _label(SupportStrings.text('support.home.conversations')),
       ),
       const SizedBox(height: 10),
       DecoratedBox(
@@ -1507,7 +1603,7 @@ class _SupportViewState extends State<AppReferSupportView>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '${c['subject'] ?? ''}',
+                    _subject(c),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -1535,11 +1631,11 @@ class _SupportViewState extends State<AppReferSupportView>
   }
 
   Widget _topicChip(AppReferSupportTopic t) => Align(
-    alignment: Alignment.centerLeft,
+    alignment: AlignmentDirectional.centerStart,
     child: Padding(
       padding: const EdgeInsets.symmetric(horizontal: 18),
       child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+        padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 4, 4),
         decoration: ShapeDecoration(
           color: colors.card,
           shape: StadiumBorder(
@@ -1561,7 +1657,7 @@ class _SupportViewState extends State<AppReferSupportView>
             ),
             const SizedBox(width: 2),
             _button(
-              'Remove topic',
+              SupportStrings.text('support.a11y.removeTopic'),
               () => setState(() => topic = null),
               Padding(
                 padding: const EdgeInsets.all(6),
@@ -1656,10 +1752,14 @@ class _SupportViewState extends State<AppReferSupportView>
                 ),
               if (!loading && mine.isEmpty && last?['from'] == 'customer')
                 Padding(
-                  padding: const EdgeInsets.only(top: 5, right: 4),
+                  padding: const EdgeInsetsDirectional.only(top: 5, end: 4),
                   child: Text(
-                    "${lastDate == null ? 'Sent' : 'Sent ${_clock(lastDate)}'} · we'll notify you when the team replies",
-                    textAlign: TextAlign.right,
+                    lastDate == null
+                        ? SupportStrings.text('support.thread.sentNoticeNoTime')
+                        : SupportStrings.text('support.thread.sentNotice', {
+                            'time': _clock(lastDate),
+                          }),
+                    textAlign: TextAlign.end,
                     style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w500,
@@ -1707,7 +1807,7 @@ class _SupportViewState extends State<AppReferSupportView>
           child: Row(
             children: [
               _button(
-                'Back',
+                SupportStrings.text('support.a11y.back'),
                 _back,
                 Container(
                   width: 42,
@@ -1744,7 +1844,11 @@ class _SupportViewState extends State<AppReferSupportView>
                       children: [
                         Flexible(
                           child: Text(
-                            persona?.name ?? agent ?? '$appName team',
+                            persona?.name ??
+                                agent ??
+                                SupportStrings.text('support.thread.team', {
+                                  'app': appName,
+                                }),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -1763,8 +1867,13 @@ class _SupportViewState extends State<AppReferSupportView>
                     const SizedBox(height: 1),
                     Text(
                       persona != null
-                          ? '$appName team · replies instantly'
-                          : 'Usually replies in ${config.replyTime}',
+                          ? SupportStrings.text(
+                              'support.thread.personaSubtitle',
+                              {'app': appName},
+                            )
+                          : SupportStrings.text('support.thread.replyTime', {
+                              'time': config.replyTime,
+                            }),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 12.5, color: colors.muted),
@@ -1817,7 +1926,7 @@ class _SupportViewState extends State<AppReferSupportView>
     String? imageUrl,
     bool avatar,
   ) => Padding(
-    padding: const EdgeInsets.only(right: 40),
+    padding: const EdgeInsetsDirectional.only(end: 40),
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
@@ -1840,11 +1949,11 @@ class _SupportViewState extends State<AppReferSupportView>
               padding: const EdgeInsets.fromLTRB(15, 10, 15, 12),
               decoration: BoxDecoration(
                 color: colors.card,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(22),
-                  topRight: const Radius.circular(22),
-                  bottomRight: const Radius.circular(22),
-                  bottomLeft: Radius.circular(avatar ? 6 : 22),
+                borderRadius: BorderRadiusDirectional.only(
+                  topStart: const Radius.circular(22),
+                  topEnd: const Radius.circular(22),
+                  bottomEnd: const Radius.circular(22),
+                  bottomStart: Radius.circular(avatar ? 6 : 22),
                 ),
                 boxShadow: _shadow(0.06, 8, 2),
               ),
@@ -1892,7 +2001,7 @@ class _SupportViewState extends State<AppReferSupportView>
   Widget _handoffPill(String? to) => Center(
     child: MergeSemantics(
       child: Container(
-        padding: const EdgeInsets.fromLTRB(5, 5, 12, 5),
+        padding: const EdgeInsetsDirectional.fromSTEB(5, 5, 12, 5),
         decoration: ShapeDecoration(
           color: colors.card,
           shape: StadiumBorder(
@@ -1911,7 +2020,14 @@ class _SupportViewState extends State<AppReferSupportView>
             const SizedBox(width: 8),
             Flexible(
               child: Text(
-                'Passed to ${to ?? 'the team'} · usually replies in ${config.replyTime}',
+                to == null
+                    ? SupportStrings.text('support.thread.handoff.team', {
+                        'time': config.replyTime,
+                      })
+                    : SupportStrings.text('support.thread.handoff.person', {
+                        'name': to,
+                        'time': config.replyTime,
+                      }),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -1958,7 +2074,9 @@ class _SupportViewState extends State<AppReferSupportView>
               errorBuilder: (_, e, s) => Icon(
                 Icons.broken_image_outlined,
                 color: colors.muted,
-                semanticLabel: 'Image unavailable',
+                semanticLabel: SupportStrings.text(
+                  'support.a11y.imageUnavailable',
+                ),
               ),
             ),
     );
@@ -1970,7 +2088,7 @@ class _SupportViewState extends State<AppReferSupportView>
     );
     if (url == null) return box;
     return _button(
-      'Screenshot',
+      SupportStrings.text('support.a11y.screenshot'),
       () => _view(url),
       box,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -1991,7 +2109,7 @@ class _SupportViewState extends State<AppReferSupportView>
     final urls = _imageUrls(m);
     final text = '${m['text'] ?? ''}';
     return Padding(
-      padding: const EdgeInsets.only(left: 60),
+      padding: const EdgeInsetsDirectional.only(start: 60),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
@@ -2007,11 +2125,11 @@ class _SupportViewState extends State<AppReferSupportView>
     padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
     decoration: BoxDecoration(
       gradient: palette.bubble,
-      borderRadius: BorderRadius.only(
-        topLeft: const Radius.circular(22),
-        topRight: const Radius.circular(22),
-        bottomLeft: const Radius.circular(22),
-        bottomRight: Radius.circular(tail ? 6 : 22),
+      borderRadius: BorderRadiusDirectional.only(
+        topStart: const Radius.circular(22),
+        topEnd: const Radius.circular(22),
+        bottomStart: const Radius.circular(22),
+        bottomEnd: Radius.circular(tail ? 6 : 22),
       ),
     ),
     child: Text(
@@ -2024,7 +2142,7 @@ class _SupportViewState extends State<AppReferSupportView>
     final urls = _imageUrls(m);
     final text = '${m['text'] ?? ''}';
     return Padding(
-      padding: const EdgeInsets.only(right: 40),
+      padding: const EdgeInsetsDirectional.only(end: 40),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
@@ -2057,11 +2175,11 @@ class _SupportViewState extends State<AppReferSupportView>
                     ),
                     decoration: BoxDecoration(
                       color: colors.card,
-                      borderRadius: BorderRadius.only(
-                        topLeft: const Radius.circular(22),
-                        topRight: const Radius.circular(22),
-                        bottomRight: const Radius.circular(22),
-                        bottomLeft: Radius.circular(avatar ? 6 : 22),
+                      borderRadius: BorderRadiusDirectional.only(
+                        topStart: const Radius.circular(22),
+                        topEnd: const Radius.circular(22),
+                        bottomEnd: const Radius.circular(22),
+                        bottomStart: Radius.circular(avatar ? 6 : 22),
                       ),
                       boxShadow: _shadow(0.06, 8, 2),
                     ),
@@ -2083,9 +2201,9 @@ class _SupportViewState extends State<AppReferSupportView>
   }
 
   Widget _botCard(Map<String, dynamic> m) => Padding(
-    padding: const EdgeInsets.only(right: 50),
+    padding: const EdgeInsetsDirectional.only(end: 50),
     child: Align(
-      alignment: Alignment.centerLeft,
+      alignment: AlignmentDirectional.centerStart,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
@@ -2097,7 +2215,7 @@ class _SupportViewState extends State<AppReferSupportView>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '✦ INSTANT ANSWER',
+              '✦ ${SupportStrings.upper(SupportStrings.text('support.thread.instantAnswer'))}',
               style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w700,
@@ -2121,7 +2239,7 @@ class _SupportViewState extends State<AppReferSupportView>
   );
 
   Widget _pendingBubble(_Pending p) => Padding(
-    padding: const EdgeInsets.only(left: 60),
+    padding: const EdgeInsetsDirectional.only(start: 60),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
@@ -2142,9 +2260,9 @@ class _SupportViewState extends State<AppReferSupportView>
         if (p.failed)
           GestureDetector(
             onTap: id == null ? null : () => _deliver(p, id!),
-            child: const Text(
-              'Not sent · Tap to retry',
-              style: TextStyle(
+            child: Text(
+              SupportStrings.text('support.thread.notSent'),
+              style: const TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
                 color: Color(0xffe5383b),
@@ -2153,7 +2271,7 @@ class _SupportViewState extends State<AppReferSupportView>
           )
         else
           Text(
-            'Sending…',
+            SupportStrings.text('support.thread.sending'),
             style: TextStyle(
               fontSize: 11.5,
               fontWeight: FontWeight.w500,
@@ -2187,7 +2305,7 @@ class _SupportViewState extends State<AppReferSupportView>
       ),
       shape: const StadiumBorder(),
     );
-    const thanks = "👍 Thanks, that's sorted";
+    final thanks = SupportStrings.text('support.thread.quickReply.thanks');
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -2195,7 +2313,10 @@ class _SupportViewState extends State<AppReferSupportView>
         children: [
           chip(thanks, () => _sendThread(thanks)),
           const SizedBox(width: 8),
-          chip('I have another question', threadFocus.requestFocus),
+          chip(
+            SupportStrings.text('support.thread.quickReply.another'),
+            threadFocus.requestFocus,
+          ),
         ],
       ),
     );
@@ -2212,6 +2333,9 @@ class _SupportViewState extends State<AppReferSupportView>
 
   @override
   Widget build(BuildContext context) {
+    // The chat speaks the language the app is running in (see SupportStrings).
+    final appLocale = Localizations.maybeLocaleOf(context);
+    SupportStrings.appLocales = appLocale == null ? null : [appLocale];
     final host = Theme.of(context);
     final accent = config.accentColor ?? host.colorScheme.primary;
     final dark =
@@ -2250,16 +2374,19 @@ class _SupportViewState extends State<AppReferSupportView>
     }
     return Theme(
       data: _theme!,
-      child: AnnotatedRegion<SystemUiOverlayStyle>(
-        value: overlay,
-        child: PopScope(
-          canPop: id == null,
-          onPopInvokedWithResult: (popped, result) {
-            if (!popped) _back();
-          },
-          child: Scaffold(
-            backgroundColor: colors.background,
-            body: id == null ? _home() : _thread(),
+      child: Directionality(
+        textDirection: SupportStrings.textDirection,
+        child: AnnotatedRegion<SystemUiOverlayStyle>(
+          value: overlay,
+          child: PopScope(
+            canPop: id == null,
+            onPopInvokedWithResult: (popped, result) {
+              if (!popped) _back();
+            },
+            child: Scaffold(
+              backgroundColor: colors.background,
+              body: id == null ? _home() : _thread(),
+            ),
           ),
         ),
       ),
@@ -2332,42 +2459,48 @@ class _SupportImageViewer extends StatelessWidget {
   const _SupportImageViewer({required this.url});
   final String url;
   @override
-  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
-    value: SystemUiOverlayStyle.light,
-    child: Material(
-      color: Colors.black,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => Navigator.maybePop(context),
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: Image.network(
-                url,
-                fit: BoxFit.contain,
-                loadingBuilder: (_, child, progress) => progress == null
-                    ? child
-                    : const Center(
-                        child: CircularProgressIndicator(color: Colors.white),
-                      ),
-                errorBuilder: (_, e, s) => const Center(
-                  child: Icon(Icons.broken_image_outlined, color: Colors.white),
+  Widget build(BuildContext context) => Directionality(
+    textDirection: SupportStrings.textDirection,
+    child: AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.light,
+      child: Material(
+        color: Colors.black,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => Navigator.maybePop(context),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: Image.network(
+                  url,
+                  fit: BoxFit.contain,
+                  loadingBuilder: (_, child, progress) => progress == null
+                      ? child
+                      : const Center(
+                          child: CircularProgressIndicator(color: Colors.white),
+                        ),
+                  errorBuilder: (_, e, s) => const Center(
+                    child: Icon(
+                      Icons.broken_image_outlined,
+                      color: Colors.white,
+                    ),
+                  ),
                 ),
               ),
-            ),
-            Positioned(
-              top: MediaQuery.paddingOf(context).top + 16,
-              right: 16,
-              child: IconButton(
-                tooltip: 'Close',
-                onPressed: () => Navigator.maybePop(context),
-                style: IconButton.styleFrom(
-                  backgroundColor: Colors.white.withValues(alpha: 0.18),
+              PositionedDirectional(
+                top: MediaQuery.paddingOf(context).top + 16,
+                end: 16,
+                child: IconButton(
+                  tooltip: SupportStrings.text('support.a11y.close'),
+                  onPressed: () => Navigator.maybePop(context),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.white.withValues(alpha: 0.18),
+                  ),
+                  icon: const Icon(Icons.close_rounded, color: Colors.white),
                 ),
-                icon: const Icon(Icons.close_rounded, color: Colors.white),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     ),
