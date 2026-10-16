@@ -39,6 +39,10 @@ class AppReferSDK with WidgetsBindingObserver {
   static AppReferSDK? _instance;
   static EventQueue? _eventQueue;
   static int _accountGeneration = 0;
+  static int _collectionGeneration = 0;
+  static bool _collectionBlocked = false;
+  static bool _needsCollectionConfigure = false;
+  static Future<void> _collectionWrites = Future.value();
   static Future<void> _accountWrites = Future.value();
   static Future<void> _accountWrite(Future<void> Function() work) {
     final task = _accountWrites.then((_) => work());
@@ -72,6 +76,8 @@ class AppReferSDK with WidgetsBindingObserver {
     _configuring = null;
     _requestedConfig = null;
     _eventQueue = null;
+    _collectionBlocked = false;
+    _needsCollectionConfigure = false;
   }
 
   static Future<AppReferAttributionResult> configureResult(
@@ -93,7 +99,7 @@ class AppReferSDK with WidgetsBindingObserver {
           attribution: attribution,
         );
       final prefs = await SharedPreferences.getInstance();
-      if (_instance!._failed &&
+      if ((_instance?._failed ?? true) == false &&
           attribution == null &&
           prefs.getBool('apprefer_organic_confirmed') != true)
         return AppReferAttributionResult(
@@ -171,7 +177,53 @@ class AppReferSDK with WidgetsBindingObserver {
       a.userId == b.userId &&
       a.debug == b.debug &&
       a.logLevel == b.logLevel;
-  static Future<Attribution?> configure(AppReferConfig config) {
+  static Future<Attribution?> configure(AppReferConfig config) async {
+    final epoch = _collectionGeneration;
+    await _collectionWrites;
+    final prefs = await SharedPreferences.getInstance();
+    if (_collectionBlocked ||
+        epoch != _collectionGeneration ||
+        prefs.getBool('apprefer_collection_enabled') == false) {
+      AppReferRegistry.apiKey = config.apiKey;
+      return Attribution.fromJsonString(
+        prefs.getString('apprefer_attribution_cache'),
+      );
+    }
+    if (_needsCollectionConfigure) {
+      if (_instance != null) WidgetsBinding.instance.removeObserver(_instance!);
+      _instance = null;
+      _configuring = null;
+      _needsCollectionConfigure = false;
+    }
+    return _configureEnabled(config);
+  }
+
+  /// Persistently pause attribution and analytics. Support and Billing stay available.
+  /// Enabling takes effect on the next configure.
+  static Future<void> setCollectionEnabled(bool enabled) async {
+    _collectionGeneration++;
+    _collectionBlocked = !enabled;
+    _needsCollectionConfigure = true;
+    _configuring = null;
+    final sdk = _instance;
+    if (sdk != null) {
+      sdk._storage.pauseCollection();
+      sdk._generation++;
+      sdk._consentRecheck = false;
+      sdk._httpClient.cancel();
+      sdk._conversion.cancel();
+    }
+    final write = _collectionWrites.then((_) async {
+      final prefs = await SharedPreferences.getInstance();
+      if (!await prefs.setBool('apprefer_collection_enabled', enabled))
+        throw StateError('Cannot persist collection setting');
+    });
+    _collectionWrites = write.then<void>((_) {}, onError: (Object _) {});
+    if (!enabled) await clearPendingEvents();
+    await write;
+  }
+
+  static Future<Attribution?> _configureEnabled(AppReferConfig config) {
     support.api.resumeRevocations();
     if (_requestedConfig != null &&
         _sameConfig(_requestedConfig!, config) &&
@@ -198,6 +250,7 @@ class AppReferSDK with WidgetsBindingObserver {
 
   static Future<Attribution?> _configureNew(AppReferConfig config) async {
     final accountEpoch = _accountGeneration;
+    final collectionEpoch = _collectionGeneration;
     _instance?._httpClient.cancel();
     _instance?._conversion.cancel();
     final sdk = AppReferSDK._();
@@ -209,9 +262,15 @@ class AppReferSDK with WidgetsBindingObserver {
     );
     sdk._storage = AppReferStorage();
     await sdk._storage.init();
+    if (collectionEpoch != _collectionGeneration || _collectionBlocked)
+      return _getCachedAttribution();
     if (accountEpoch != _accountGeneration) return null;
     sdk._httpClient = AppReferHttpClient(
       baseUrl: AppReferConfig.trackingUrl,
+      collectionAllowed: () =>
+          collectionEpoch == _collectionGeneration &&
+          !_collectionBlocked &&
+          sdk._storage.isSdkEnabled(),
       fallbackUrl: AppReferConfig.fallbackUrl,
       apiKey: config.apiKey,
       logger: sdk._logger,
@@ -233,6 +292,10 @@ class AppReferSDK with WidgetsBindingObserver {
       storage: sdk._storage,
       client: AppReferHttpClient(
         baseUrl: 'https://apprefer.com',
+        collectionAllowed: () =>
+            collectionEpoch == _collectionGeneration &&
+            !_collectionBlocked &&
+            sdk._storage.isSdkEnabled(),
         apiKey: config.apiKey,
         logger: sdk._logger,
       ),
@@ -429,10 +492,12 @@ class AppReferSDK with WidgetsBindingObserver {
         return AppReferEventResult.dropped;
       }
 
+      final userId = sdk._storage.getUserId(); // snapshot before awaiting
       final deviceId = await sdk._storage.getDeviceId();
       final body = <String, dynamic>{
         'device_id': deviceId,
         'event_name': eventName,
+        if (!eventName.startsWith('_') && userId != null) 'app_user_id': userId,
         if (properties != null) 'properties': properties,
         if (revenue != null) 'revenue': revenue,
         if (currency != null) 'currency': currency,

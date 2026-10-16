@@ -13,6 +13,13 @@ class AppReferStorage {
   static const _keyUserId = 'apprefer_user_id';
 
   late SharedPreferences _prefs;
+  bool _collectionPaused = false;
+  bool collectionAllowed() =>
+      !_collectionPaused &&
+      (_prefs.getBool('apprefer_collection_enabled') ?? true);
+  void pauseCollection() {
+    _collectionPaused = true;
+  }
 
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
@@ -90,7 +97,7 @@ class AppReferStorage {
   // --- SDK Enabled ---
 
   bool isSdkEnabled() {
-    return _prefs.getBool(_keySdkEnabled) ?? true;
+    return collectionAllowed() && (_prefs.getBool(_keySdkEnabled) ?? true);
   }
 
   Future<void> setSdkEnabled(bool enabled) async {

@@ -70,7 +70,11 @@ class ConversionValue {
       do {
         _rerunForced = false;
         final raised = await _refreshOnce(force: force);
-        if (force && !raised && allowRecheck && !_recheckScheduled) {
+        if (storage.isSdkEnabled() &&
+            force &&
+            !raised &&
+            allowRecheck &&
+            !_recheckScheduled) {
           _recheckScheduled = true;
           _recheckTimer = Timer(const Duration(seconds: 90), () {
             _recheckScheduled = false;
@@ -91,6 +95,7 @@ class ConversionValue {
     try {
       var value = storage.conversionValue();
       if (value == null) {
+        if (!storage.isSdkEnabled()) return false;
         await update(0, 'low');
         await storage.setConversionValue(0, 'low');
         value = (fine: 0, coarse: 'low');
@@ -120,6 +125,7 @@ class ConversionValue {
             _coarse.indexOf(coarse as String),
           )];
       if (nextFine == value.fine && nextCoarse == value.coarse) return false;
+      if (!storage.isSdkEnabled()) return false;
       await update(nextFine, nextCoarse);
       await storage.setConversionValue(nextFine, nextCoarse);
       return true;
