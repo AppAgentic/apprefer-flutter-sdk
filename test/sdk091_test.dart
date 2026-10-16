@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:apprefer/apprefer.dart';
 import 'package:apprefer/src/services/event_queue.dart';
+import 'package:apprefer/src/services/registry.dart';
 import 'package:apprefer/src/services/storage.dart';
 import 'package:apprefer/src/services/http_client.dart';
 import 'package:apprefer/src/services/logger.dart';
@@ -334,4 +335,136 @@ void main() {
       },
     );
   }
+
+  group('no device id on Support after reset or with collection off', () {
+    SupportAPI supportApi(List<Map<String, dynamic>> sessions) {
+      final secure = <String, String>{};
+      return SupportAPI(
+        apiKey: () => 'pk_test',
+        read: (key) async => secure[key],
+        write: (key, value) async {
+          if (value == null) {
+            secure.remove(key);
+          } else {
+            secure[key] = value;
+          }
+        },
+        keys: () async => secure.keys.toList(),
+        client: MockClient((r) async {
+          final session = r.url.path.endsWith('/session');
+          if (session && r.method == 'POST') {
+            sessions.add(jsonDecode(r.body) as Map<String, dynamic>);
+          }
+          return http.Response(
+            session ? '{"session":"support-091b"}' : '{"conversations":[]}',
+            200,
+          );
+        }),
+      );
+    }
+
+    test(
+      'reset stops attribution and Support device id until configure',
+      () async {
+        final paths = <String>[];
+        final events = <String>[];
+        var status = 200;
+        await http.runWithClient(
+          () async {
+            // A granted analytics: attribution is configured in this process.
+            await AppReferSDK.configure(config);
+            final prefs = await SharedPreferences.getInstance();
+            final device = prefs.getString('apprefer_device_id');
+            expect(device, isNotNull);
+            expect((await SupportAPI.defaultProfile())['deviceId'], device);
+            // A signs out.
+            await AppReferSDK.reset();
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            final before = paths.length;
+            // B signs in, never consents, and only uses Support.
+            final sessions = <Map<String, dynamic>>[];
+            final api = supportApi(sessions);
+            expect(await api.conversations(), isEmpty);
+            expect(sessions, hasLength(1));
+            expect(sessions.single, isNot(contains('deviceId')));
+            // Nothing on the attribution side sends until configure.
+            await AppReferSDK.setUserId('B');
+            await AppReferSDK.setTrackingConsent(true);
+            await AppReferSDK.trackingConsentDidChange();
+            await AppReferSDK.updateConversionValue();
+            await AppReferSDK.setAdvancedMatching(email: 'b@example.test');
+            expect(
+              await AppReferSDK.trackEventResult('signed_out'),
+              AppReferEventResult.queued,
+            );
+            WidgetsBinding.instance.handleAppLifecycleStateChanged(
+              AppLifecycleState.resumed,
+            );
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            expect(paths.length, before);
+            // Configure again: the held event is sent, Support links the install.
+            await AppReferSDK.configure(config);
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            expect(events, contains('signed_out'));
+            expect((await SupportAPI.defaultProfile())['deviceId'], device);
+            await api.conversations();
+            expect(sessions.last['deviceId'], device);
+            // Collection withdrawn: Support stops sending the device id.
+            await AppReferSDK.setCollectionEnabled(false);
+            final count = sessions.length;
+            await api.conversations();
+            expect(sessions, hasLength(count + 1));
+            expect(sessions.last, isNot(contains('deviceId')));
+          },
+          () => MockClient((r) async {
+            paths.add(r.url.path);
+            if (r.url.path.endsWith('/event')) {
+              final body = jsonDecode(r.body) as Map<String, dynamic>;
+              events.add(body['event_name'] as String);
+            }
+            return http.Response('{"attribution":null}', status);
+          }),
+        );
+      },
+    );
+
+    test(
+      'configure started before reset does not restart attribution',
+      () async {
+        var calls = 0;
+        await http.runWithClient(
+          () async {
+            await AppReferSDK.configure(config);
+            final stale = AppReferSDK.configure(config);
+            await AppReferSDK.reset();
+            expect(await stale, isNull);
+            final before = calls;
+            expect(
+              await AppReferSDK.trackEventResult('held'),
+              AppReferEventResult.queued,
+            );
+            expect(calls, before);
+            expect(
+              (await SupportAPI.defaultProfile()),
+              isNot(contains('deviceId')),
+            );
+          },
+          () => MockClient((r) async {
+            calls++;
+            return http.Response('{"attribution":null}', 200);
+          }),
+        );
+      },
+    );
+
+    test('Support-only sends no device id', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('apprefer_device_id', 'existing-install');
+      AppReferRegistry.apiKey = null;
+      AppReferSDK.support.configure(apiKey: 'pk_support');
+      final sessions = <Map<String, dynamic>>[];
+      await supportApi(sessions).conversations();
+      expect(sessions.single, isNot(contains('deviceId')));
+    });
+  });
 }

@@ -13,9 +13,13 @@ enum AppReferEventResult { sent, queued, dropped }
 
 /// Durable, at-least-once product delivery. Transport must make one attempt.
 class EventQueue {
-  EventQueue(this.send, this.enabled);
+  EventQueue(this.send, this.enabled, {bool Function()? held})
+    : held = held ?? (() => false);
   Future<dynamic> Function(Map<String, dynamic>) send;
   bool Function() enabled;
+
+  /// True after reset() until configure: events stay queued but are not sent.
+  final bool Function() held;
   void replace(
     Future<dynamic> Function(Map<String, dynamic>) send,
     bool Function() enabled,
@@ -145,7 +149,7 @@ class EventQueue {
       await clear();
       return results;
     }
-    if (_running) return results;
+    if (held() || _running) return results;
     _running = true;
     final epoch = _generation;
     try {
@@ -155,7 +159,7 @@ class EventQueue {
         return v;
       });
       for (final entry in values) {
-        if (epoch != _generation || !enabled()) break;
+        if (epoch != _generation || !enabled() || held()) break;
         if ((only != null && entry['id'] != only) ||
             (entry['next'] as num) > DateTime.now().millisecondsSinceEpoch)
           continue;

@@ -12,6 +12,10 @@ class ConversionValue {
   final bool Function() isIOS;
   final DateTime Function() now;
   final Future<void> Function(int, String) update;
+
+  /// False after reset() until configure runs again.
+  final bool Function() active;
+  bool get _allowed => storage.isSdkEnabled() && active();
   bool _inFlight = false;
   bool _rerunForced = false;
   bool _recheckScheduled = false;
@@ -37,7 +41,9 @@ class ConversionValue {
     bool Function()? isIOS,
     DateTime Function()? now,
     Future<void> Function(int, String)? update,
-  }) : isIOS = isIOS ?? (() => defaultTargetPlatform == TargetPlatform.iOS),
+    bool Function()? active,
+  }) : active = active ?? (() => true),
+       isIOS = isIOS ?? (() => defaultTargetPlatform == TargetPlatform.iOS),
        now = now ?? DateTime.now,
        update = update ?? _nativeUpdate;
 
@@ -55,7 +61,7 @@ class ConversionValue {
   }
 
   Future<void> refresh({bool force = false, bool allowRecheck = true}) async {
-    if (!isIOS() || !storage.isSdkEnabled()) return;
+    if (!isIOS() || !_allowed) return;
     if (_inFlight) {
       if (force) _rerunForced = true;
       return;
@@ -70,7 +76,7 @@ class ConversionValue {
       do {
         _rerunForced = false;
         final raised = await _refreshOnce(force: force);
-        if (storage.isSdkEnabled() &&
+        if (_allowed &&
             force &&
             !raised &&
             allowRecheck &&
@@ -95,7 +101,7 @@ class ConversionValue {
     try {
       var value = storage.conversionValue();
       if (value == null) {
-        if (!storage.isSdkEnabled()) return false;
+        if (!_allowed) return false;
         await update(0, 'low');
         await storage.setConversionValue(0, 'low');
         value = (fine: 0, coarse: 'low');
@@ -114,7 +120,7 @@ class ConversionValue {
       final coarse = response?['coarse'];
       if (fine is! int || fine < 0 || fine > 63 || !_coarse.contains(coarse))
         return false;
-      if (!storage.isSdkEnabled()) return false;
+      if (!_allowed) return false;
       await storage.setConversionCheckedAt(now());
       // Compare with what is stored now, not before the request.
       value = storage.conversionValue() ?? value;
@@ -125,7 +131,7 @@ class ConversionValue {
             _coarse.indexOf(coarse as String),
           )];
       if (nextFine == value.fine && nextCoarse == value.coarse) return false;
-      if (!storage.isSdkEnabled()) return false;
+      if (!_allowed) return false;
       await update(nextFine, nextCoarse);
       await storage.setConversionValue(nextFine, nextCoarse);
       return true;

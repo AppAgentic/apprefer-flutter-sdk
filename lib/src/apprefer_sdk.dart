@@ -78,6 +78,7 @@ class AppReferSDK with WidgetsBindingObserver {
     _eventQueue = null;
     _collectionBlocked = false;
     _needsCollectionConfigure = false;
+    AppReferRegistry.stoppedByReset = false;
   }
 
   static Future<AppReferAttributionResult> configureResult(
@@ -117,8 +118,12 @@ class AppReferSDK with WidgetsBindingObserver {
     }
   }
 
+  /// Clears account state; install attribution and device id are retained.
+  /// Attribution sends nothing, and Support sends no device id, until configure
+  /// is called again.
   static Future<void> reset() async {
     _accountGeneration++;
+    AppReferRegistry.stoppedByReset = true;
     _configuring = null;
     _requestedConfig = null;
     final sdk = _instance;
@@ -131,7 +136,11 @@ class AppReferSDK with WidgetsBindingObserver {
       await _ignoreStorage(() => _accountWrite(sdk._storage.clearUser));
     }
     if (sdk == null) {
-      _eventQueue ??= EventQueue((_) async => null, () => true);
+      _eventQueue ??= EventQueue(
+        (_) async => null,
+        () => true,
+        held: () => AppReferRegistry.stoppedByReset,
+      );
       await _ignoreStorage(_eventQueue!.clear);
     }
     await _ignoreStorage(() async {
@@ -178,9 +187,14 @@ class AppReferSDK with WidgetsBindingObserver {
       a.debug == b.debug &&
       a.logLevel == b.logLevel;
   static Future<Attribution?> configure(AppReferConfig config) async {
+    // Configuring for the next account restarts attribution after reset().
+    AppReferRegistry.stoppedByReset = false;
+    final accountEpoch = _accountGeneration;
     final epoch = _collectionGeneration;
     await _collectionWrites;
     final prefs = await SharedPreferences.getInstance();
+    // reset() ran meanwhile: this configure belonged to the previous account.
+    if (accountEpoch != _accountGeneration) return null;
     if (_collectionBlocked ||
         epoch != _collectionGeneration ||
         prefs.getBool('apprefer_collection_enabled') == false) {
@@ -230,6 +244,8 @@ class AppReferSDK with WidgetsBindingObserver {
         _configuring != null)
       return _configuring!;
     if (_instance != null && _sameConfig(_instance!._config, config)) {
+      // Events tracked since reset() were held until now.
+      unawaited(_instance!._events.flush());
       return trackingConsentDidChange().then((_) => _getCachedAttribution());
     }
     _requestedConfig = config;
@@ -270,6 +286,7 @@ class AppReferSDK with WidgetsBindingObserver {
       collectionAllowed: () =>
           collectionEpoch == _collectionGeneration &&
           !_collectionBlocked &&
+          !AppReferRegistry.stoppedByReset &&
           sdk._storage.isSdkEnabled(),
       fallbackUrl: AppReferConfig.fallbackUrl,
       apiKey: config.apiKey,
@@ -279,6 +296,7 @@ class AppReferSDK with WidgetsBindingObserver {
       _eventQueue = EventQueue(
         sdk._httpClient.eventResponse,
         sdk._storage.isSdkEnabled,
+        held: () => AppReferRegistry.stoppedByReset,
       );
     } else {
       _eventQueue!.replace(
@@ -295,10 +313,12 @@ class AppReferSDK with WidgetsBindingObserver {
         collectionAllowed: () =>
             collectionEpoch == _collectionGeneration &&
             !_collectionBlocked &&
+            !AppReferRegistry.stoppedByReset &&
             sdk._storage.isSdkEnabled(),
         apiKey: config.apiKey,
         logger: sdk._logger,
       ),
+      active: () => !AppReferRegistry.stoppedByReset,
     );
     sdk._deviceInfo = AppReferDeviceInfo(logger: sdk._logger);
     sdk._adServices = AppReferAdServices(logger: sdk._logger);
@@ -536,7 +556,7 @@ class AppReferSDK with WidgetsBindingObserver {
       return;
     }
     final epoch = sdk._generation;
-    if (!sdk._storage.isSdkEnabled()) return;
+    if (!sdk._storage.isSdkEnabled() || AppReferRegistry.stoppedByReset) return;
 
     if (!TrackingConsent.allowed(await TrackingConsent.current())) return;
     final hashedData = <String, String>{};
@@ -593,7 +613,7 @@ class AppReferSDK with WidgetsBindingObserver {
     sdk._logger.info('User ID set: $userId');
 
     // Sync userId to server so webhook userId fallback can find this attribution
-    if (!sdk._storage.isSdkEnabled()) return;
+    if (!sdk._storage.isSdkEnabled() || AppReferRegistry.stoppedByReset) return;
     final deviceId = await sdk._storage.getDeviceId();
     final body = <String, dynamic>{
       'device_id': deviceId,
@@ -630,6 +650,7 @@ class AppReferSDK with WidgetsBindingObserver {
   static Future<void> trackingConsentDidChange() async {
     final sdk = _instance;
     if (sdk == null ||
+        AppReferRegistry.stoppedByReset ||
         !sdk._storage.isSdkEnabled() ||
         !sdk._storage.isMatchRequestAttempted())
       return;
@@ -657,7 +678,10 @@ class AppReferSDK with WidgetsBindingObserver {
 
   Future<void> _reportConsent() async {
     final epoch = _generation;
-    if (!_storage.isSdkEnabled() || !_storage.isMatchRequestAttempted()) return;
+    if (AppReferRegistry.stoppedByReset ||
+        !_storage.isSdkEnabled() ||
+        !_storage.isMatchRequestAttempted())
+      return;
     final consent = await TrackingConsent.current();
     final prefs = await SharedPreferences.getInstance();
     final cached = _getCachedAttribution();
