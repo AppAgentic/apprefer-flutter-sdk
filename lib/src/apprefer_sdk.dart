@@ -130,6 +130,7 @@ class AppReferSDK with WidgetsBindingObserver {
   /// is called again.
   static Future<void> reset() async {
     _accountGeneration++;
+    AppReferRegistry.accountEpoch++;
     AppReferRegistry.stoppedByReset = true;
     _configuring = null;
     _requestedConfig = null;

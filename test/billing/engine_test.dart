@@ -394,6 +394,7 @@ void main() {
       expect(server.bodiesFor(identify).single, {
         'anonymousId': anon,
         'appUserId': 'user_1',
+        'link': true,
       });
       expect(h.storage.pendingIdentifies, isEmpty);
     });

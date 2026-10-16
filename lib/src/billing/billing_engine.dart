@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:in_app_purchase/in_app_purchase.dart';
 
 import '../services/logger.dart';
+import '../services/registry.dart';
 import 'billing_api_client.dart';
 import 'offerings.dart';
 import 'billing_error.dart';
@@ -183,6 +184,20 @@ class BillingEngine {
   final PurchaseIntentStore _intents;
   final BillingEngineOptions _options;
   final Future<String?> Function() _appreferId;
+
+  /// The install link gate at send time (sent as `link` with identify).
+  final Future<bool> Function() _linkAllowed;
+
+  /// The account epoch: advances on every `AppReferSDK.reset()`.
+  final int Function() _accountEpoch;
+
+  /// The epoch at creation, or at the last logIn/logOut: the device id is
+  /// sent only while it is still current, so the user Billing served before a
+  /// reset is never linked to the install.
+  late int _identityEpoch;
+
+  /// The epoch [_unlinkedUsers] belongs to.
+  late int _seenEpoch;
   final AppReferLogger _logger;
   final void Function(AppReferCustomerInfo) _onChange;
   final DateTime Function() _now;
@@ -268,6 +283,8 @@ class BillingEngine {
     BillingEngineOptions options = const BillingEngineOptions(),
     String? appUserId,
     required Future<String?> Function() appreferId,
+    Future<bool> Function()? linkAllowed,
+    int Function()? accountEpoch,
     AppReferLogger logger = const AppReferLogger(),
     DateTime Function()? now,
     void Function(AppReferCustomerInfo)? onChange,
@@ -290,9 +307,12 @@ class BillingEngine {
            ),
        _options = options,
        _appreferId = appreferId,
+       _linkAllowed = linkAllowed ?? AppReferRegistry.linkAllowed,
+       _accountEpoch = accountEpoch ?? (() => AppReferRegistry.accountEpoch),
        _logger = logger,
        _now = now ?? DateTime.now,
        _onChange = onChange ?? ((_) {}) {
+    _identityEpoch = _seenEpoch = _accountEpoch();
     if (appUserId != null && appUserId.isNotEmpty) {
       _pendingConfigure = appUserId;
       try {
@@ -392,7 +412,7 @@ class BillingEngine {
       };
       final purchases = await _store.migrationPurchases();
       if (await _activeUser() != user) return;
-      final deviceId = await _safeAppreferId();
+      final deviceId = await _linkableDeviceId(user);
       var durable = true;
       var imported = false;
       for (final purchase in purchases) {
@@ -509,7 +529,7 @@ class BillingEngine {
   Future<AppReferCustomerInfo> _fetchFromServer(String user) async {
     await _flushPendingIdentifies();
     final attributes = _storage.pendingAttributes;
-    final deviceId = await _safeAppreferId();
+    final deviceId = await _linkableDeviceId(user);
     final needsRegister =
         !_registeredUsers.contains(user) ||
         attributes.isNotEmpty ||
@@ -826,7 +846,9 @@ class BillingEngine {
     final attributes = user == current
         ? _storage.pendingAttributes
         : const <String, String>{};
-    final deviceId = await _safeAppreferId();
+    // Only for the current Billing user: a purchase owned by someone else
+    // (e.g. started before a logIn) is never linked to this install.
+    final deviceId = await _linkableDeviceId(user);
     try {
       final response = await _api.send(
         RecordPurchase(
@@ -1288,7 +1310,7 @@ class BillingEngine {
       // purchases stay open with the store.
       if (user == null) return localFallback();
       await _flushPendingIdentifies();
-      final deviceId = await _safeAppreferId();
+      final deviceId = await _linkableDeviceId(user);
       BillingCustomerResponse? last;
       AppReferBillingException? failed;
       AppReferBillingException? paused;
@@ -1411,12 +1433,12 @@ class BillingEngine {
     }
     for (final entry in _queue.entries) {
       try {
-        // A queued device id is sent only while linking is allowed now.
-        final linked = await _safeAppreferId() != null;
+        // Never the stored id: only what may be linked now, for the current
+        // Billing user, so entries from a previous account get none.
         final response = await _api.send(
           RecordPurchase(
             entry.appUserId,
-            linked ? entry.appreferId : null,
+            await _linkableDeviceId(entry.appUserId),
             entry.storeFields,
             const {},
             restore: entry.restore,
@@ -1542,6 +1564,7 @@ class BillingEngine {
       );
     }
     _applyPendingConfigure();
+    _identityEpoch = _observeEpoch();
     if (appUserId != _storage.currentAppUserId) {
       if (_storage.loggedInAppUserId == null) {
         _storage.addPendingIdentify((
@@ -1561,6 +1584,7 @@ class BillingEngine {
   /// Pending identifies stay: they still have to reach the server.
   Future<AppReferCustomerInfo> logOut() async {
     _applyPendingConfigure();
+    _identityEpoch = _observeEpoch();
     _storage.loggedInAppUserId = null;
     _storage.resetAnonymousId();
     _lastServerFetch = null;
@@ -1587,7 +1611,13 @@ class BillingEngine {
     try {
       for (final pending in _storage.pendingIdentifies) {
         try {
-          await _api.send(Identify(pending.anonymousId, pending.appUserId));
+          await _api.send(
+            Identify(
+              pending.anonymousId,
+              pending.appUserId,
+              link: await _safeLinkAllowed(),
+            ),
+          );
         } on AppReferBillingException catch (e) {
           if (e.isRetryable) {
             _logger.warn('Billing: identify will be retried ($e)');
@@ -1608,6 +1638,39 @@ class BillingEngine {
     } catch (_) {
       return null;
     }
+  }
+
+  Future<bool> _safeLinkAllowed() async {
+    try {
+      return await _linkAllowed();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// The current account epoch; a new one (reset() ran) forgets who was
+  /// registered without a device id, so nobody from before is linked later.
+  int _observeEpoch() {
+    final epoch = _accountEpoch();
+    if (epoch != _seenEpoch) {
+      _seenEpoch = epoch;
+      _unlinkedUsers.clear();
+    }
+    return epoch;
+  }
+
+  /// The install device id for a request owned by [owner]: only when [owner]
+  /// is the current Billing user, given to Billing (creation, logIn or
+  /// logOut) after the last reset(), and the gate is open; otherwise null.
+  Future<String?> _linkableDeviceId(String? owner) async {
+    final epoch = _observeEpoch();
+    if (owner == null ||
+        owner.isEmpty ||
+        _identityEpoch != epoch ||
+        owner != currentAppUserId) {
+      return null;
+    }
+    return _safeAppreferId();
   }
 
   static final _appUserIdPattern = RegExp(r'^\S{1,256}$');

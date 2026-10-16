@@ -12,6 +12,11 @@ class AppReferRegistry {
   /// session is never linked to the previous account's install.
   static bool stoppedByReset = false;
 
+  /// Advances on every `AppReferSDK.reset()` (the account epoch). Billing
+  /// sends the install device id only for the user it was given after the
+  /// last reset, so an account active before it is never linked.
+  static int accountEpoch = 0;
+
   /// `setCollectionEnabled(false)` in this process, even if saving it failed.
   static bool collectionBlocked = false;
 

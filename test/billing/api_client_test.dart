@@ -122,6 +122,7 @@ void main() {
       expect(jsonDecode(r.body), {
         'anonymousId': r'$ARAnon:X',
         'appUserId': 'u1',
+        'link': true,
       });
     });
   });

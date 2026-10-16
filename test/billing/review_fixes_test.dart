@@ -429,8 +429,8 @@ void main() {
       h.server.online();
       await h.engine.customerInfo(FetchPolicy.fetchCurrent);
       expect(h.server.bodiesFor(identify), [
-        {'anonymousId': anon1, 'appUserId': 'u1'},
-        {'anonymousId': anon2, 'appUserId': 'u2'},
+        {'anonymousId': anon1, 'appUserId': 'u1', 'link': true},
+        {'anonymousId': anon2, 'appUserId': 'u2', 'link': true},
       ]);
       expect(h.storage.pendingIdentifies, isEmpty);
     });
