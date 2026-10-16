@@ -393,19 +393,25 @@ void main() {
             await AppReferSDK.trackingConsentDidChange();
             await AppReferSDK.updateConversionValue();
             await AppReferSDK.setAdvancedMatching(email: 'b@example.test');
+            // Before B consents: dropped, never queued or sent later.
             expect(
               await AppReferSDK.trackEventResult('signed_out'),
-              AppReferEventResult.queued,
+              AppReferEventResult.dropped,
             );
+            await AppReferSDK.trackEvent('signed_out_fire_and_forget');
+            expect(prefs.getString(EventQueue.key), isNull);
             WidgetsBinding.instance.handleAppLifecycleStateChanged(
               AppLifecycleState.resumed,
             );
             await Future<void>.delayed(const Duration(milliseconds: 20));
             expect(paths.length, before);
-            // Configure again: the held event is sent, Support links the install.
+            // Configure again: new events flow, Support links the install.
             await AppReferSDK.configure(config);
-            await Future<void>.delayed(const Duration(milliseconds: 20));
-            expect(events, contains('signed_out'));
+            expect(
+              await AppReferSDK.trackEventResult('signed_in'),
+              AppReferEventResult.sent,
+            );
+            expect(events.where((e) => e.startsWith('signed_out')), isEmpty);
             expect((await SupportAPI.defaultProfile())['deviceId'], device);
             await api.conversations();
             expect(sessions.last['deviceId'], device);
@@ -441,7 +447,7 @@ void main() {
             final before = calls;
             expect(
               await AppReferSDK.trackEventResult('held'),
-              AppReferEventResult.queued,
+              AppReferEventResult.dropped,
             );
             expect(calls, before);
             expect(

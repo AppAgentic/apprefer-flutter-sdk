@@ -506,6 +506,9 @@ class AppReferSDK with WidgetsBindingObserver {
     try {
       final sdk = _instance;
       if (sdk == null) return AppReferEventResult.dropped;
+      // After reset() nothing is queued until configure runs for the next account: those
+      // events come before the new user consents, so they must never be sent later.
+      if (AppReferRegistry.stoppedByReset) return AppReferEventResult.dropped;
       final epoch = sdk._generation;
       if (!sdk._storage.isSdkEnabled()) {
         await sdk._events.clear();
