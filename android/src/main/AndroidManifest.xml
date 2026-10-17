@@ -2,4 +2,8 @@
     package="com.apprefer.sdk">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
+    <application>
+        <!-- Lifecycle notifications: snooze, dismiss and re-show. Not exported: only the plugin's own PendingIntents reach it. -->
+        <receiver android:name="com.apprefer.flutter.engagement.EngagementRenderer$Receiver" android:exported="false" />
+    </application>
 </manifest>

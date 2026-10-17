@@ -22,5 +22,6 @@ export 'src/billing/customer_info.dart' hide BillingCustomerResponse;
 export 'src/billing/rejected_purchases.dart' show RejectedPurchase;
 
 export 'src/support/apprefer_support.dart';
+export 'src/engagement/apprefer_engagement.dart' hide engagementChannel, engagementStampKey;
 
 export 'src/billing/offerings.dart';

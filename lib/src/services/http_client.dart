@@ -9,6 +9,8 @@ import 'package:http/http.dart' as http;
 
 import '../services/logger.dart';
 import '../version.dart';
+import '../engagement/apprefer_engagement.dart'
+    show AppReferEngagement, engagementStampKey;
 
 const String _sdkVersion = appReferVersion;
 const int _maxRetries = 3;
@@ -76,8 +78,14 @@ class AppReferHttpClient {
         'POST',
         Uri.parse('${hosts.first}/api/track/event'),
         event: true,
-        headers: _headers,
-        body: jsonEncode(body),
+        // The stamp never leaves the device; the credential goes only while it is current.
+        headers: {
+          ..._headers,
+          if (AppReferEngagement.instance.headerFor(body[engagementStampKey])
+              case final header?)
+            'X-AppRefer-Install': header,
+        },
+        body: jsonEncode(Map.of(body)..remove(engagementStampKey)),
       ).timeout(_requestTimeout);
       final header = response.headers['retry-after'];
       final seconds = double.tryParse(header ?? '');
