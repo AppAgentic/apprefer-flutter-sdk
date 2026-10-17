@@ -285,15 +285,55 @@ class EngagementClient {
   String _key(String name) => 'apprefer_engagement_${name}_${_slot ?? 'none'}';
   int get _serial => int.tryParse(prefs.get(_key('serial')) ?? '') ?? 0;
   Future<void> _setSerial(int v) => prefs.set(_key('serial'), '$v');
-  bool get _pendingLogout => prefs.get(_key('pending_logout')) == '1';
-  Future<void> _setPendingLogout(bool v) async {
-    await prefs.set(_key('pending_logout'), v ? '1' : null);
-    if (!v) await prefs.set(_key('pending_logout_epoch'), null);
+  /// An unsent logout: the epoch it signs out of, saved as one value `<installId>:<epoch>` in a
+  /// single write, so a crash can never leave a logout without its target. It only applies to
+  /// the install it was made for. A logout whose epoch was not known is never saved: it could
+  /// only be aimed at whatever the server holds later, which may be a newer identity
+  /// ([_adoptUnaimedLogout]).
+  int? get _pendingLogoutEpoch {
+    final c = _credential;
+    final parts = prefs.get(_key('pending_logout_target'))?.split(':');
+    if (c == null ||
+        parts == null ||
+        parts.length != 2 ||
+        parts[0] != c.installId)
+      return null;
+    return int.tryParse(parts[1]);
   }
 
-  /// The epoch a saved logout was made under (null: not known then).
-  int? get _pendingLogoutEpoch =>
-      int.tryParse(prefs.get(_key('pending_logout_epoch')) ?? '');
+  bool get _pendingLogout => _pendingLogoutEpoch != null;
+  Future<void> _savePendingLogout(int epoch) async {
+    final c = _credential;
+    if (c != null)
+      await prefs.set(_key('pending_logout_target'), '${c.installId}:$epoch');
+  }
+
+  Future<void> _clearPendingLogout() =>
+      prefs.set(_key('pending_logout_target'), null);
+
+  /// Gives a logout that was saved without its target one: a logout made before this slot
+  /// started in that process ([_pendingLogoutAny]), or the two separate values an earlier
+  /// 0.11.0 development build wrote (a crash between them left the flag without its epoch).
+  /// It signs out of the identity this install last knew, persisted with its install id. When
+  /// none is known (a reinstall keeps the Keychain credential but not these prefs, or the
+  /// epoch was never learnt here) the logout is dropped, never aimed at the server's current
+  /// identity, which a backend bind may already have replaced: an unsent logout can never
+  /// detach a newer identity. The app backend's org-key detach stays authoritative.
+  Future<void> _adoptUnaimedLogout() async {
+    final legacy = prefs.get(_key('pending_logout')) == '1';
+    if (!legacy && prefs.get(_pendingLogoutAny) != '1') return;
+    final legacyEpoch = legacy
+        ? int.tryParse(prefs.get(_key('pending_logout_epoch')) ?? '')
+        : null;
+    final target = legacyEpoch ?? _knownEpoch;
+    if (_pendingLogoutEpoch == null && target != null)
+      await _savePendingLogout(target);
+    await _setSerial(_serial + 1);
+    // Removed only after the target is saved: a crash in between adopts it again.
+    await prefs.set(_key('pending_logout'), null);
+    await prefs.set(_key('pending_logout_epoch'), null);
+    await prefs.set(_pendingLogoutAny, null);
+  }
 
   /// Sets the epoch and persists it with the install id, so a cold start sees an epoch the
   /// server moved meanwhile.
@@ -429,33 +469,9 @@ class EngagementClient {
     }
     if (gen != _generation) return status;
     final c = _credential!;
-    if (prefs.get(_pendingLogoutAny) == '1') {
-      // Saved before this slot started in that process: it signs out of the identity this
-      // slot last knew (persisted), never one the server moved to afterwards.
-      final epoch = _knownEpoch;
-      await prefs.set(_pendingLogoutAny, null);
-      await _setPendingLogout(true);
-      await prefs.set(_key('pending_logout_epoch'), epoch?.toString());
-      await _setSerial(_serial + 1);
-    }
-    if (_pendingLogout) {
-      var expected = _pendingLogoutEpoch;
-      if (expected == null) {
-        // Nothing was known about this install's identity when it was saved: sign out of
-        // what is there now.
-        final me = await _send('GET', '/api/engagement/v1/installs/me', key, c);
-        if (gen != _generation) return status;
-        final install = me.body?['install'];
-        expected = me.status == 200 && install is Map
-            ? _intOf(install['accountEpoch'])
-            : null;
-        if (expected == null) {
-          if (!await _handleFailure(me))
-            status = AppReferEngagementStatus.pending;
-          await _publish();
-          return status;
-        }
-      }
+    await _adoptUnaimedLogout();
+    final expected = _pendingLogoutEpoch;
+    if (expected != null) {
       final r = await _send(
         'POST',
         '/api/engagement/v1/installs/me/logout',
@@ -465,12 +481,12 @@ class EngagementClient {
       );
       if (gen != _generation) return status;
       if (r.status == 200) {
-        await _setPendingLogout(false);
+        await _clearPendingLogout();
         await _setEpoch(_intOf(r.body?['accountEpoch']));
       } else if (r.status == 409) {
         // The install already left that identity (another sign-in or a backend change):
         // done, and the newer one stays.
-        await _setPendingLogout(false);
+        await _clearPendingLogout();
       } else if (await _handleFailure(r)) {
         return status;
       } else {
@@ -507,6 +523,7 @@ class EngagementClient {
     if (_slot != null)
       await secure.delete('apprefer_engagement_install_$_slot');
     await prefs.set(_key('epoch'), null);
+    await _clearPendingLogout();
     _credential = null;
     _accountEpoch = null;
     await prefs.set(_key('sync_hash'), null);
@@ -670,7 +687,7 @@ class EngagementClient {
       );
     final epoch = _intOf(r.body?['accountEpoch']);
     if (r.status == 200 && epoch != null) {
-      await _setPendingLogout(false);
+      await _clearPendingLogout();
       await _setEpoch(epoch);
       await prefs.set(_key('sync_hash'), null);
       await _publish();
@@ -706,13 +723,12 @@ class EngagementClient {
       _generation++;
       return;
     }
-    // Saved with the identity it signs out of (an older unsent logout keeps its own).
+    // Saved with the identity it signs out of, in one write (an older unsent logout keeps its
+    // own). With no epoch known for this install nothing is saved or sent: the only other
+    // target would be whatever the server holds by then ([_adoptUnaimedLogout]).
     final expected = _knownEpoch;
     await _beginIdentityChange();
-    if (!_pendingLogout || _pendingLogoutEpoch == null) {
-      await _setPendingLogout(true);
-      await prefs.set(_key('pending_logout_epoch'), expected?.toString());
-    }
+    if (!_pendingLogout && expected != null) await _savePendingLogout(expected);
     final key = _apiKey, c = _credential, epoch = _pendingLogoutEpoch;
     if (!status.isActive || key == null || c == null || epoch == null) return;
     final gen = _generation;
@@ -725,13 +741,13 @@ class EngagementClient {
     );
     if (gen != _generation) return;
     if (r.status == 200) {
-      await _setPendingLogout(false);
+      await _clearPendingLogout();
       await _setEpoch(_intOf(r.body?['accountEpoch']));
       await prefs.set(_key('sync_hash'), null);
       await _publish();
     } else if (r.status == 409) {
       // Already signed out of that identity on the server (a newer one is there): done.
-      await _setPendingLogout(false);
+      await _clearPendingLogout();
       await _reverify(gen);
     } else {
       await _handleFailure(r);
@@ -774,7 +790,7 @@ class EngagementClient {
     await secure.delete('apprefer_engagement_install_${slotFor(key)}');
     _credential = null;
     _accountEpoch = null;
-    await _setPendingLogout(false);
+    await _clearPendingLogout();
     await prefs.set(_key('sync_hash'), null);
     return true;
   }

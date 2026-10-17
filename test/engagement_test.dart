@@ -474,6 +474,90 @@ void main() {
       );
     });
 
+    group('pending logout target', () {
+      final slot = EngagementClient.slotFor(key);
+
+      test('an offline logout is saved as one value for its install', () async {
+        final c = client();
+        final id = (await c.start(key, explicit: true)).installId!;
+        await c.identify('ok:user-a');
+        server.offline = true;
+        await c.logout();
+        expect(prefs.map['apprefer_engagement_pending_logout_target_$slot'], '$id:1');
+        expect(
+          prefs.map['apprefer_engagement_pending_logout_$slot'],
+          isNull,
+          reason: 'no separate flag that a crash could strand',
+        );
+        expect(prefs.map['apprefer_engagement_pending_logout_epoch_$slot'], isNull);
+        server.offline = false;
+        await client().start(key, explicit: true);
+        expect(server.lastBody('POST', '/logout')['expectedEpoch'], 1);
+        expect(server.installs[id]!['account'], isNull);
+        expect(prefs.map['apprefer_engagement_pending_logout_target_$slot'], isNull);
+      });
+
+      test(
+        'an interrupted two-value logout signs out only the persisted epoch',
+        () async {
+          final c = client();
+          final id = (await c.start(key, explicit: true)).installId!;
+          await c.identify('ok:user-a'); // epoch 1, persisted with the install id
+          // An earlier build crashed between its two writes: the flag without its epoch.
+          prefs.map['apprefer_engagement_pending_logout_$slot'] = '1';
+          server.backendBind(id, 'user-b'); // epoch 2 while the app wasn't running
+          final restarted = client();
+          await restarted.start(key, explicit: true);
+          final logouts = server.calls
+              .where((r) => r.url.path.endsWith('/logout'))
+              .map((r) => (jsonDecode(r.body) as Map)['expectedEpoch'])
+              .toList();
+          expect(logouts, [1], reason: 'aimed at the persisted epoch, never the fresh one');
+          expect(server.installs[id]!['account'], 'user-b');
+          expect(restarted.snapshot!.accountEpoch, 2);
+          expect(restarted.stateForTesting().pendingLogout, isFalse);
+          expect(prefs.map['apprefer_engagement_pending_logout_$slot'], isNull);
+        },
+      );
+
+      test(
+        "a retained credential without its epoch never detaches the server's identity",
+        () async {
+          final first = client();
+          final id = (await first.start(key, explicit: true)).installId!;
+          await first.identify('ok:user-a');
+          // Reinstall: the Keychain credential survives, the prefs (the epoch) do not.
+          prefs.map.clear();
+          server.backendBind(id, 'user-b');
+          final reinstalled = client();
+          await reinstalled.logout(); // reset() before start
+          await reinstalled.start(key, explicit: true);
+          expect(
+            server.count('POST', '/api/engagement/v1/installs/me/logout'),
+            0,
+            reason: 'no target known: dropped',
+          );
+          expect(server.installs[id]!['account'], 'user-b');
+          expect(reinstalled.snapshot!.accountEpoch, 2);
+          expect(prefs.map['apprefer_engagement_pending_logout_any'], isNull);
+          // Started but never verified (offline), then a logout: nothing saved or sent later.
+          prefs.map.clear();
+          server.offline = true;
+          final offline = client();
+          expect(
+            await offline.start(key, explicit: true),
+            AppReferEngagementStatus.pending,
+          );
+          await offline.logout();
+          server.offline = false;
+          server.backendBind(id, 'user-c');
+          await client().start(key, explicit: true);
+          expect(server.count('POST', '/api/engagement/v1/installs/me/logout'), 0);
+          expect(server.installs[id]!['account'], 'user-c');
+        },
+      );
+    });
+
     test(
       'a sign-in started under an old identity does not replace the new one',
       () async {
