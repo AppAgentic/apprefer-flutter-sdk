@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'support_strings.dart';
 
 /// Colours for the chat, built from the app's accent (same maths as iOS).
 class SupportPalette {
@@ -222,7 +223,7 @@ class SupportAITag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Semantics(
-    label: 'AI assistant',
+    label: SupportStrings.text('support.a11y.aiAssistant'),
     excludeSemantics: true,
     child: Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -231,7 +232,7 @@ class SupportAITag extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
-        'AI',
+        SupportStrings.text('support.ai.tag'),
         style: TextStyle(
           fontSize: 10,
           fontWeight: FontWeight.w900,
@@ -243,7 +244,8 @@ class SupportAITag extends StatelessWidget {
   );
 }
 
-/// The presence pill's text on the help home (same wording as iOS).
+/// The presence pill's text on the help home (same wording as iOS), in the
+/// chat's language.
 String supportPresenceLine({
   String? persona,
   required List<String> teamNames,
@@ -252,13 +254,28 @@ String supportPresenceLine({
   final all = teamNames.where((n) => n.trim().isNotEmpty).toList();
   if (persona != null) {
     return all.isEmpty
-        ? '$persona replies instantly · the team in $replyTime'
-        : '$persona replies instantly · ${all.first} and the team in $replyTime';
+        ? SupportStrings.text('support.presence.persona', {
+            'persona': persona,
+            'time': replyTime,
+          })
+        : SupportStrings.text('support.presence.personaWithTeam', {
+            'persona': persona,
+            'name': all.first,
+            'time': replyTime,
+          });
   }
-  if (all.isEmpty) return 'We usually reply in $replyTime';
+  if (all.isEmpty) {
+    return SupportStrings.text('support.presence.team', {'time': replyTime});
+  }
   return all.length == 1
-      ? '${all.first} · usually replies in $replyTime'
-      : '${all.first} and the team · usually $replyTime';
+      ? SupportStrings.text('support.presence.one', {
+          'name': all.first,
+          'time': replyTime,
+        })
+      : SupportStrings.text('support.presence.many', {
+          'name': all.first,
+          'time': replyTime,
+        });
 }
 
 /// The thank-you / another-question chips: only after an answer, never after

@@ -1,5 +1,22 @@
 # AppRefer Flutter SDK
 
+## 0.10.0 (unreleased): help centre in the chat; the help chat speaks 35 languages
+
+**Help centre.** When your app has published help articles in AppRefer, the help home
+shows a "Help articles" card (search plus the top articles), with a help centre screen
+(every article by category, search) and an article reader. "Still need help? Message
+us" starts a conversation about the article. Nothing changes for apps without
+articles. Read them in code too: `AppReferSDK.support.articles(query:)`,
+`article(slug)`, and `AppReferSDK.support.status()` to decide whether to register
+push tokens. See [Help centre and status](#help-centre-and-status-0100).
+
+**AppRefer Support is localized.** Every label, placeholder, error and accessibility
+label in the help chat ships in 35 languages and follows the locale your app is
+running in, so the chat matches your screens. No `localizationsDelegates` needed.
+Override any string or force a language; see
+[Support chat → Languages](#languages-and-your-own-wording). Arabic and Hebrew lay
+out right to left.
+
 ## 0.9.2: Billing follows the collection choice; Support clearIdentity
 
 **Billing sends no device id while it must not.** AppReferBilling uses the same rule
@@ -197,23 +214,26 @@ Call once at app launch. Resolves attribution on first install, returns cached r
 ```dart
 final attribution = await AppReferSDK.configure(AppReferConfig(
   apiKey: 'pk_live_...',  // or pk_test_ for development
-  userId: null,           // optional — link RevenueCat user ID at init
+  userId: null,           // optional — your app's user id (the one you pass to AppReferBilling.logIn)
   debug: false,           // optional — enable verbose logging
   logLevel: 1,            // optional — 0=none, 1=errors, 2=warnings, 3=verbose
 ));
 ```
 
-### Link RevenueCat User ID
+### Link your user ID
 
-Connect the device to RevenueCat so purchase webhooks can be attributed.
+Tell AppRefer who is signed in, so Support conversations and product events carry the account.
+AppRefer Billing links purchases to the ad click on its own (the install device id is sent
+automatically), so this isn't needed for purchase attribution.
 
 ```dart
-await AppReferSDK.setUserId(Purchases.appUserID);
+await AppReferSDK.setUserId(currentUser.id);
+await AppReferBilling.logIn(currentUser.id); // if you use AppRefer Billing
 ```
 
 ### Track Events
 
-Track non-purchase events. Purchases are handled automatically via RevenueCat webhooks.
+Track non-purchase events. Purchases made with AppRefer Billing are recorded and sent to your ad networks automatically.
 
 ```dart
 await AppReferSDK.trackEvent('signup');
@@ -237,7 +257,7 @@ await AppReferSDK.setAdvancedMatching(
 
 ```dart
 final cached = await AppReferSDK.getAttribution();   // no network call
-final deviceId = await AppReferSDK.getDeviceId();     // for RC subscriber attributes
+final deviceId = await AppReferSDK.getDeviceId();     // e.g. for your support tools or backend
 ```
 
 ## Attribution Model
@@ -368,9 +388,9 @@ Testing: use a sandbox Apple ID or a Play license tester. Transactions from an X
 ## Best Practices
 
 - **Call `configure()` once** — ideally in `main()` before `runApp()`. The SDK deduplicates automatically; subsequent calls return the cached result with no network overhead.
-- **Set the RevenueCat user ID early** — call `AppReferSDK.setUserId()` right after `Purchases.configure()` so purchase webhooks can be attributed to the correct device.
+- **Set the user ID when someone signs in** — call `AppReferSDK.setUserId()` and `AppReferBilling.logIn()` with the same id, so Support, product events and purchases all belong to that account.
 - **Call `setAdvancedMatching()` after login/signup** — this sends hashed PII to improve Meta CAPI match rates. Only needs to be called once per user session.
-- **Don't track purchases with `trackEvent()`** — revenue events are handled automatically via RevenueCat webhooks. Use `trackEvent()` only for non-purchase milestones like `signup`, `tutorial_complete`, or `onboarding_finish`.
+- **Don't track purchases with `trackEvent()`** — AppRefer Billing records purchases, renewals and refunds and forwards them for you. Use `trackEvent()` only for non-purchase milestones like `signup`, `tutorial_complete`, or `onboarding_finish`.
 - **Use the test key during development** — `pk_test_` keys create sandbox events that are isolated from production data and never forwarded to ad networks. Switch to `pk_live_` for release builds.
 - **Use the Debugger** — verify events are flowing correctly in the [AppRefer dashboard](https://apprefer.com) → Debugger before going to production. Toggle the Sandbox switch to see test events.
 - **Android: add the Install Referrer dependency** — without it, Android attribution falls back to probabilistic matching instead of deterministic referrer-based matching.
@@ -400,8 +420,8 @@ await AppReferSDK.support.open(context: context);
 await AppReferSDK.support.compose('Problem with my subscription', context: context);
 await AppReferSDK.support.identify(name: 'María', email: 'maria@example.com');
 AppReferSDK.support.accentColor = Colors.deepPurple; // hero, bubbles, send button
-AppReferSDK.support.title = 'My app support'; // defaults to <App name> support
-AppReferSDK.support.replyTime = 'a few hours'; // "We usually reply in …"
+AppReferSDK.support.title = 'My app support'; // defaults to "<App name> support", translated
+AppReferSDK.support.replyTime = 'a few hours'; // "We usually reply in …"; defaults to "under an hour", translated
 AppReferSDK.support.teamNames = ['Jay']; // first names shown on the home
 AppReferSDK.support.appIcon = const AssetImage('assets/icon.png'); // defaults to the launcher icon
 AppReferSDK.support.topics = [
@@ -420,7 +440,9 @@ final unread = await AppReferSDK.support.unreadCount();
 
 // For context-free notification handling, assign your MaterialApp navigatorKey:
 AppReferSDK.support.navigatorKey = navigatorKey;
-await AppReferSDK.support.registerPushToken(fcmToken);
+// Register only once AppRefer has verified your APNs key / FCM service account:
+final status = await AppReferSDK.support.status();
+if (status.pushReady) await AppReferSDK.support.registerPushToken(fcmToken);
 // From a notification tap (not every foreground notification):
 if (AppReferSDK.support.handleNotification(message.data)) return;
 // On sign-out / token removal:
@@ -433,14 +455,18 @@ const AppReferSupportView(composing: 'Report a problem');
 ```
 
 `topics` defaults to Billing & refunds, Restore purchase, Report a bug and Suggest
-an idea. Picking a tile sets the message field's hint to the topic's `prompt` and
-sends its `title` as the conversation subject. `replyTimeText` was removed: use
+an idea (`AppReferSupportTopic.billing`, `.restore`, `.bug`, `.idea`; their `id`s are
+`billing`, `restore`, `bug`, `idea`), in the chat's language. Picking a tile sets the
+message field's hint to the topic's `prompt` and sends its `title` as the conversation
+subject. `replyTimeText` was removed: use
 `replyTime`. The home's colours (hero glows, bubbles, avatars) are derived from
 `accentColor`; on a bright accent such as yellow, text on it turns dark.
 
 Customers can attach up to four screenshots per message. Native system photo
 pickers need no photo-library permission. Images are reduced to at most 1600 px
-and JPEG-compressed below 700 KB before direct upload. No new dependencies.
+and JPEG-compressed below 700 KB before direct upload. The only dependency Support
+adds is `intl` (0.10.0, for dates and times in the chat's language), with a wide
+version range so it fits whatever `flutter_localizations` pins in your app.
 Session tokens use iOS Keychain and Android Keystore-backed AES-GCM storage
 (including RSA-wrapped AES on Android 5).
 
@@ -453,6 +479,61 @@ Push transport stays in the host app: forward APNs/FCM registration and notifica
 taps to these APIs. On Android registration creates `apprefer_support`; configure
 FCM to use that channel for support replies. iOS payloads use `apprefer: {type:
 support_reply, conversationId: ...}`; Android uses those fields directly in data.
+
+### Languages and your own wording
+
+The chat ships in 35 languages: ar, ca, cs, da, de, el, en, es, es-MX, fi, fr, he, hi, hr, hu, id, it, ja, ko, ms, nb, nl, pl, pt-BR, pt-PT, ro, ru, sk, sv, th, tr, uk, vi, zh-Hans, zh-Hant. Nothing to set up, and no `localizationsDelegates` are needed.
+
+- **Which language:** the locale your app is running in (the `Localizations` locale of the widget tree the chat opens in, which Flutter resolves from your `MaterialApp`'s `supportedLocales`), so an app that ships fewer languages than the SDK gets a chat that matches its own screens (an English-only app on a German phone shows an English chat). If the SDK has no table for it, the device's preferred languages are tried, then English. Regional variants map sensibly: Latin American Spanish → es-MX, Portuguese outside Brazil → pt-PT, Chinese by script and region, Norwegian → nb.
+- **Force a language:** `AppReferSDK.support.language = 'de'` (any shipped code; `null` follows the app again). `AppReferSupport.supportedLanguages` lists them.
+- **Right to left:** in Arabic and Hebrew the chat lays out right to left, bubble tails, back chevron and screenshot buttons included.
+- **Dates and times** use the chat's language ("Heute, 14:05") and the device's 24-hour setting.
+- **Your own wording:** set any key; your text wins over the SDK's translation in every language. Placeholders are written `{name}` and filled in by name, so you can reorder them.
+
+```dart
+AppReferSDK.support.strings = {
+  'support.home.subtitle': 'What can we fix for you?',
+  'support.presence.team': 'Real humans · usually {time}',
+  'support.a11y.unread#one': 'One new reply', // plural keys: "#one", "#few", … or the bare key for every count
+};
+// For your own app languages, set the values for the locale you're showing:
+if (Localizations.localeOf(context).languageCode == 'de') {
+  AppReferSDK.support.strings = {'support.home.subtitle': 'Wie können wir helfen?'};
+}
+```
+
+`title`, `replyTime` and topic texts you set are shown as written. The defaults are translated, and `replyTime` is inserted into a translated sentence: in most languages that sentence already carries its own "in", so give the whole phrase (German `'innerhalb weniger Stunden'`, French `'en quelques heures'`). The built-in tiles translate themselves; their title becomes the conversation subject in the customer's language. Errors (offline, rate limit, message too long, upload failed, couldn't load, not sent, image unreadable, device locked) are shown in the customer's language, never as the server's English message.
+
+Every key, its English text, a note for translators and all translations are in [`Localization/support-strings.json`](Localization/support-strings.json), the table all four AppRefer SDKs share; `dart run tool/generate_support_strings.dart` compiles it into `lib/src/support/support_strings_table.g.dart`. Messages your team writes and the AI assistant's answers and hand-over line come from AppRefer, not from this table.
+
+### Help centre and status (0.10.0)
+
+Publish help articles in AppRefer (dashboard, API or MCP) and they appear in the chat with no code: a "Help articles" card on the help home (search and the first three; "See all" with more), a help centre screen (articles by category, search that filters as you type and then asks the server, which also searches article bodies) and a reader. The reader renders markdown (headings, lists, bold and italic, code, quotes, links and https images) with a small built-in parser: no new package. HTML is never run and only http(s) and mailto links are kept; they open outside the app through the SDK's own platform channel. "Still need help? Message us" goes back to the message field with the article's title as the conversation subject. Apps without published articles see no help section at all. Articles come in the chat's language (the best translation the server has); lists are kept in memory for five minutes, and offline the chat shows what it had, never an error screen. Test keys (`pk_test_`) also show drafts, marked "Draft". Back (and the system back gesture) returns from an article to the help centre, then to the home.
+
+```dart
+// Open straight on the help centre or one article (any translation's slug works)
+await AppReferSDK.support.openHelpCentre(context: context);
+await AppReferSDK.support.openArticle('restore-purchases', context: context);
+const AppReferSupportView(opening: AppReferSupportDestination.helpCentre);
+const AppReferSupportView(opening: AppReferSupportDestination.article('restore-purchases'));
+
+// Your own help screens
+final articles = await AppReferSDK.support.articles(); // List<AppReferHelpArticle>: slug, title, summary, category, url, updatedAt, isDraft
+final results = await AppReferSDK.support.articles(query: 'refund'); // server search (titles, summaries, bodies), up to 20
+try {
+  final article = await AppReferSDK.support.article('refunds'); // AppReferHelpArticleDetail: + body (markdown)
+} on SupportException catch (e) {
+  if (e.status == 404) {/* removed or unpublished */}
+}
+
+// Is Support ready?
+final status = await AppReferSDK.support.status();
+status.pushReady; // this platform's push configured and accepted by Apple / Google
+status.emailReplies; // customers can answer reply emails
+status.helpCentreArticles; // published articles
+```
+
+`status()` follows the server's caching (5 minutes once every configured channel is verified, else 30 seconds), so calling it on every launch is cheap. Register push tokens only when `pushReady` is true. The line under a customer's last message follows the same status: "we'll notify you" when push is ready and the app registered, "we'll email you" when replies are emailed and the customer gave an email in `identify`, otherwise "the team's reply will appear here". On Android the `apprefer_support` notification channel is now named in the chat's language.
 
 ## Tracking consent (0.6.0)
 
@@ -505,7 +586,7 @@ AppRefer does this for you:
 
 - On first launch it registers the install (value 0, coarse `low`), as Apple recommends.
 - It then sets the value AppRefer computes from what it already knows: **10** (`medium`) once a free trial starts, **20 + whole dollars paid** (`high`, capped at 63) once the user pays, e.g. $9.99 → 30, $39.99 → 60. Values only go up and windows are never locked early.
-- It checks on launch, when the app becomes active, after trial or revenue events and after AppReferBilling purchases, for the 35 days Apple's postbacks cover. If you take payments elsewhere (e.g. RevenueCat), call `await AppReferSDK.updateConversionValue()` after a purchase to set it sooner.
+- It checks on launch, when the app becomes active, after trial or revenue events and after AppReferBilling purchases, for the 35 days Apple's postbacks cover. If you take payments outside AppReferBilling, call `await AppReferSDK.updateConversionValue()` after a purchase to set it sooner.
 - It updates both AdAttributionKit (iOS 17.4+) and SKAdNetwork (iOS 15.4+), as Apple asks when your ad networks may use either.
 
 To receive copies of the winning postbacks in AppRefer, add to your app's Info.plist:
