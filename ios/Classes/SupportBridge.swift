@@ -45,6 +45,12 @@ final class SupportBridge: NSObject, FlutterPlugin, PHPickerViewControllerDelega
                 result(status == errSecSuccess ? nil : FlutterError(code: "secure_storage", message: "Unable to save support session", details: status))
             } else { SecItemDelete(query as CFDictionary); result(nil) }
         case "notificationChannel": result(nil)
+        case "pushEnvironment":
+            // Read off the main thread: the profile is a file read (once per process).
+            DispatchQueue.global(qos: .utility).async {
+                let environment = PushEnvironmentDetector.detected
+                DispatchQueue.main.async { result(environment) }
+            }
         case "openUrl":
             // Help article links: only http(s) and mailto, opened outside the app.
             guard let string = call.arguments as? String, let url = URL(string: string),

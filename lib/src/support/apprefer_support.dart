@@ -201,32 +201,28 @@ class AppReferSupport with WidgetsBindingObserver {
     if (identical(_presented, route)) _presented = null;
   }
 
-  Future<void> registerPushToken(
-    String token, {
-    String environment = 'production',
-  }) async {
+  /// Forces the APNs environment ('production' or 'sandbox') push tokens are
+  /// registered for and [status] checks. null (the default) reads it on iOS
+  /// from the app's signing: sandbox for development-signed builds (Debug or
+  /// Release) and the Simulator; production for App Store, TestFlight, Ad Hoc
+  /// and Enterprise builds.
+  String? get pushEnvironment => api.pushEnvironmentOverride;
+  set pushEnvironment(String? value) {
+    if (value != null && value != 'production' && value != 'sandbox') {
+      throw ArgumentError.value(value, 'pushEnvironment');
+    }
+    api.pushEnvironmentOverride = value;
+  }
+
+  /// [environment] ('production' or 'sandbox') overrides [pushEnvironment]
+  /// for this token; without it the effective environment is used.
+  Future<void> registerPushToken(String token, {String? environment}) async {
     final epoch = api.actionGeneration;
     await supportChannel.invokeMethod<void>(
       'notificationChannel',
       SupportStrings.text('support.notification.channel'),
     );
-    if (await api.deferPushRegistration(
-      token,
-      epoch,
-      environment: environment,
-    )) {
-      // Still on a session being revoked (also a token saved before 0.9.2
-      // without its environment): it moves once that revocation succeeded,
-      // so the old and new sessions never hold it at the same time.
-      api.resumeRevocations();
-      return;
-    }
-    await api.call('POST', '/push-token', {
-      'platform': Platform.isIOS ? 'ios' : 'android',
-      'token': token,
-      'environment': environment,
-    }, epoch);
-    await api.persistPushToken(token, epoch, environment: environment);
+    await api.registerPushToken(token, epoch, environment: environment);
   }
 
   Future<void> removePushToken(String token) async {

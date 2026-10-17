@@ -88,7 +88,13 @@ class SupportAPI {
     String? Function()? apiKey,
     Future<List<String>> Function()? keys,
     Future<bool> Function()? identityCleared,
+    bool? isIOS,
+    Future<String?> Function()? detectPushEnvironment,
   }) : _injectedClient = client != null,
+       isIOS = isIOS ?? Platform.isIOS,
+       _detectPushEnvironment =
+           detectPushEnvironment ??
+           (() => supportChannel.invokeMethod<String>('pushEnvironment')),
        client = client ?? http.Client(),
        read =
            read ?? ((key) => supportChannel.invokeMethod<String>('read', key)),
@@ -109,7 +115,40 @@ class SupportAPI {
            (() async =>
                await supportChannel.invokeListMethod<String>('keys') ?? []);
   final bool _injectedClient;
+  final bool isIOS;
   http.Client client;
+
+  /// 'production' or 'sandbox' set by the app (`AppReferSupport.pushEnvironment`);
+  /// null reads it from the build's signing (iOS).
+  String? pushEnvironmentOverride;
+  final Future<String?> Function() _detectPushEnvironment;
+  Future<String?>? _detectedPushEnvironment;
+
+  /// The APNs environment tokens are registered for and readiness is checked
+  /// against: the app's choice, else (iOS) the native plugin's reading of the
+  /// embedded provisioning profile (development = sandbox; none, App Store or
+  /// TestFlight = production; Simulator = sandbox). Android and a failed
+  /// native read: production. Never throws.
+  Future<String> pushEnvironment() async {
+    final explicit = pushEnvironmentOverride;
+    if (explicit != null) return explicit;
+    if (!isIOS) return 'production';
+    final pending = _detectedPushEnvironment ??= _detectOnce();
+    final detected = await pending;
+    // Unknown: not cached, the next call asks the plugin again.
+    if (detected == null && identical(_detectedPushEnvironment, pending)) {
+      _detectedPushEnvironment = null;
+    }
+    return pushEnvironmentOverride ?? detected ?? 'production';
+  }
+
+  Future<String?> _detectOnce() async {
+    try {
+      final value = await _detectPushEnvironment();
+      if (value == 'sandbox' || value == 'production') return value;
+    } catch (_) {}
+    return null;
+  }
   int _generation = 0;
   int get actionGeneration => _generation;
   final Future<List<String>> Function() keys;
@@ -294,6 +333,31 @@ class SupportAPI {
     return true;
   });
 
+  /// Registers [token] taken at [epoch] for [environment] (null: the effective
+  /// [pushEnvironment]). The environment is resolved after the epoch was
+  /// taken, so a reset or account switch while the plugin answers throws
+  /// (reset) and nothing reaches the next account.
+  Future<void> registerPushToken(
+    String token,
+    int epoch, {
+    String? environment,
+  }) async {
+    environment ??= await pushEnvironment();
+    if (await deferPushRegistration(token, epoch, environment: environment)) {
+      // Still on a session being revoked (also a token saved before 0.9.2
+      // without its environment): it moves once that revocation succeeded,
+      // so the old and new sessions never hold it at the same time.
+      resumeRevocations();
+      return;
+    }
+    await call('POST', '/push-token', {
+      'platform': isIOS ? 'ios' : 'android',
+      'token': token,
+      'environment': environment,
+    }, epoch);
+    await persistPushToken(token, epoch, environment: environment);
+  }
+
   /// Registers a moved push token on the current session, only if it is
   /// still the one saved on the device (a reset since then cleared it, so it
   /// never reaches the next account). Failures are left to the app's next
@@ -312,7 +376,7 @@ class SupportAPI {
               : null);
       if (environment == null) return;
       await call('POST', '/push-token', {
-        'platform': Platform.isIOS ? 'ios' : 'android',
+        'platform': isIOS ? 'ios' : 'android',
         'token': token,
         'environment': environment,
       }, epoch);
@@ -755,7 +819,8 @@ class SupportAPI {
     client: () => client,
     apiKey: apiKey,
     baseUrl: baseUrl,
-    isIOS: Platform.isIOS,
+    isIOS: isIOS,
+    pushEnvironment: pushEnvironment,
   );
 
   Future<List<Map<String, dynamic>>> conversations() async {
