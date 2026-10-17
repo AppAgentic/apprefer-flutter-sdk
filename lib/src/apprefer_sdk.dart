@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'services/tracking_consent.dart';
 import 'services/conversion_value.dart';
 import 'support/apprefer_support.dart';
+import 'engagement/apprefer_engagement.dart';
 import 'billing/billing_storage.dart';
 import 'dart:io';
 
@@ -37,6 +38,9 @@ class AppReferSDK with WidgetsBindingObserver {
   bool _failed = false;
   late EventQueue _events;
   static AppReferSupport get support => AppReferSupport.instance;
+
+  /// Lifecycle engagement: `AppReferSDK.engagement.start()`.
+  static AppReferEngagement get engagement => AppReferEngagement.instance;
   static AppReferSDK? _instance;
   static EventQueue? _eventQueue;
   static int _accountGeneration = 0;
@@ -169,6 +173,8 @@ class AppReferSDK with WidgetsBindingObserver {
       );
     });
     await support.reset();
+    // Lifecycle engagement: the account's queued messages stop, nothing waits to navigate.
+    await _ignoreStorage(engagement.logout);
   }
 
   static Future<void> _ignoreStorage(Future<void> Function() action) async {
@@ -206,6 +212,10 @@ class AppReferSDK with WidgetsBindingObserver {
       a.debug == b.debug &&
       a.logLevel == b.logLevel;
   static Future<Attribution?> configure(AppReferConfig config) async {
+    // Lifecycle engagement started without its own key follows this one.
+    unawaited(
+      engagement.configurationChanged(config.apiKey).catchError((Object _) {}),
+    );
     // Configuring for the next account restarts attribution after reset().
     AppReferRegistry.stoppedByReset = false;
     final accountEpoch = _accountGeneration;
@@ -278,6 +288,8 @@ class AppReferSDK with WidgetsBindingObserver {
     // Applied in memory above even when saving fails: err on not collecting.
     if (!enabled) await _ignoreStorage(clearPendingEvents);
     await _ignoreStorage(() => write);
+    // Lifecycle engagement keeps sending its own state; the server stops SDK-event journeys.
+    await _ignoreStorage(engagement.collectionChanged);
   }
 
   static Future<Attribution?> _configureEnabled(AppReferConfig config) {
@@ -577,6 +589,10 @@ class AppReferSDK with WidgetsBindingObserver {
         if (properties != null) 'properties': properties,
         if (revenue != null) 'revenue': revenue,
         if (currency != null) 'currency': currency,
+        // Only a stamp is queued; the credential is added at send time while current.
+        if (engagement.eventStamp(eventName, sdk._config.apiKey)
+            case final stamp?)
+          engagementStampKey: stamp,
       };
 
       sdk._logger.info('Tracking event: $eventName');
@@ -692,6 +708,7 @@ class AppReferSDK with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) support.api.resumeRevocations();
     if (state == AppLifecycleState.resumed) {
+      unawaited(engagement.becameActive().catchError((Object _) {}));
       unawaited(_conversion.refresh());
       unawaited(_events.flush());
       unawaited(

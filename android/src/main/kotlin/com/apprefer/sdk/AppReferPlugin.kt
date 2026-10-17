@@ -17,12 +17,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class AppReferPlugin : FlutterPlugin, MethodCallHandler, io.flutter.embedding.engine.plugins.activity.ActivityAware {
     private var support: SupportBridge? = null
+    private var engagement: EngagementBridge? = null
+    private var engagementChannel: MethodChannel? = null
     private var supportChannel: MethodChannel? = null
     private var activityBinding: io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding? = null
     override fun onAttachedToActivity(binding: io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding) {
         activityBinding = binding; support?.activity = binding.activity; support?.let { binding.addActivityResultListener(it) }
+        engagement?.let { binding.addOnNewIntentListener(it); it.attach(binding.activity) }
     }
-    override fun onDetachedFromActivity() { support?.let { activityBinding?.removeActivityResultListener(it) }; activityBinding = null; support?.detach() }
+    override fun onDetachedFromActivity() {
+        support?.let { activityBinding?.removeActivityResultListener(it) }
+        engagement?.let { activityBinding?.removeOnNewIntentListener(it) }
+        activityBinding = null; support?.detach()
+    }
     override fun onDetachedFromActivityForConfigChanges() = onDetachedFromActivity()
     override fun onReattachedToActivityForConfigChanges(binding: io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding) = onAttachedToActivity(binding)
 
@@ -34,6 +41,9 @@ class AppReferPlugin : FlutterPlugin, MethodCallHandler, io.flutter.embedding.en
         applicationContext = binding.applicationContext
         support = SupportBridge(binding.applicationContext)
         supportChannel = MethodChannel(binding.binaryMessenger, "com.apprefer.sdk/support").also { it.setMethodCallHandler(support) }
+        engagementChannel = MethodChannel(binding.binaryMessenger, "com.apprefer.sdk/engagement").also { channel ->
+            engagement = EngagementBridge(binding.applicationContext, channel).also { channel.setMethodCallHandler(it) }
+        }
 
         adServicesChannel = MethodChannel(binding.binaryMessenger, "com.apprefer.sdk/adservices")
         adServicesChannel.setMethodCallHandler(this)
@@ -199,6 +209,7 @@ class AppReferPlugin : FlutterPlugin, MethodCallHandler, io.flutter.embedding.en
         adServicesChannel.setMethodCallHandler(null)
         referrerChannel.setMethodCallHandler(null)
         supportChannel?.setMethodCallHandler(null)
+        engagementChannel?.setMethodCallHandler(null)
         support?.detach()
         applicationContext = null
     }

@@ -1,5 +1,28 @@
 # AppRefer Flutter SDK
 
+## 0.11.0 (unreleased): lifecycle notifications (engagement)
+
+**Not generally available.** AppRefer turns lifecycle engagement on per app; until then every engagement call answers "disabled" quietly and nothing is stored. The server side is dry-run only in this release: no notification is sent to anyone yet. This version is the client contract (wire schema 1) the live sender will use.
+
+Rules the SDK follows: nothing is registered until your app calls `start`; nothing asks for notification permission or tracking consent; the install secret lives only in secure storage (iOS Keychain / Android Keystore); an account is bound only with an assertion your backend gets from AppRefer (`POST /api/v1/apps/{appId}/engagement/assertions`, `engagement:identity` key), never a plain user id; Support sessions, tokens and `support_reply` pushes never enroll anyone, and Support's handlers ignore engagement pushes; a notification for another install or account, an expired one, or one that fails validation never navigates; each outcome (received, opened, button, snoozed, dismissed) is delivered once, and navigation waits for `setNavigationReady(true)`; a snooze is never a completion; receipts carry the message's own proof and are dropped after any account change; an account change also removes AppRefer's own snoozes and posted notifications for the previous account (on iOS a remote notification already on screen can't be withdrawn, but it never navigates or reports for the next account); queued events and identity changes carry the account epoch they were made under, so the server refuses one made for an account the install has left; destinations are in-app paths your app maps to screens, never URLs the SDK opens.
+
+```dart
+await AppReferSDK.engagement.start(options: const AppReferEngagementOptions(
+  trackedEvents: {'setup_started', 'setup_completed'},
+  allowedImageHosts: {'assets.example.com'},          // Android rendering
+  androidSmallIcon: 'ic_stat_notify',
+  appGroup: 'group.com.example.app',                    // iOS extension (optional)
+  notificationServiceExtension: true));
+await AppReferSDK.engagement.setPushToken(token);       // FCM token on Android, APNs hex on iOS
+// FCM handlers (foreground onMessage and the background handler):
+if (await AppReferSDK.engagement.handleMessage(message.data)) return;
+AppReferSDK.engagement.onNotificationEvent = (e) { if (e.isNavigation) router.go(e.destination ?? '/'); };
+AppReferSDK.engagement.setNavigationReady(true);
+await AppReferSDK.engagement.identify(assertionFromYourBackend);
+```
+
+iOS: make the Flutter app delegate the notification delegate (`UNUserNotificationCenter.current().delegate = self` in `AppDelegate`) so the plugin receives taps, or call `AppReferPlugin.handleEngagementResponse(response)` / `engagementPresentationOptions(for:)` from your own delegate. Images need the Notification Service Extension from the iOS SDK README (add the `AppReferNotifications` Swift package product to that target; Dart doesn't run there). Android: declare and request `POST_NOTIFICATIONS` yourself; the plugin renders AppRefer's data messages natively. Dart code may not run when the app was killed: outcomes wait natively and are delivered when Dart drains them (start, resume, `drain()`).
+
 ## 0.10.0 (unreleased): help centre in the chat; the help chat speaks 35 languages
 
 **Help centre.** When your app has published help articles in AppRefer, the help home
