@@ -443,6 +443,10 @@ AppReferSDK.support.navigatorKey = navigatorKey;
 // Register only once AppRefer has verified your APNs key / FCM service account:
 final status = await AppReferSDK.support.status();
 if (status.pushReady) await AppReferSDK.support.registerPushToken(fcmToken);
+// iOS: the APNs environment is read from the app's signing (development-signed builds,
+// Debug or Release, and the Simulator: sandbox; App Store, TestFlight, Ad Hoc,
+// Enterprise: production). To force one: AppReferSDK.support.pushEnvironment = 'sandbox'
+// (or registerPushToken(token, environment: 'sandbox')).
 // From a notification tap (not every foreground notification):
 if (AppReferSDK.support.handleNotification(message.data)) return;
 // On sign-out / token removal:

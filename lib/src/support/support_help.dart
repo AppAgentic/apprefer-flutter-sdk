@@ -168,6 +168,7 @@ class AppReferSupportStatus {
     required this.emailReceivesReplies,
     required this.helpCentreArticles,
     this.isIOS = false,
+    this.pushEnvironment,
   });
   final AppReferSupportPushChannel ios, android;
 
@@ -184,23 +185,48 @@ class AppReferSupportStatus {
   /// The platform [pushReady] answers for.
   final bool isIOS;
 
+  /// iOS: the APNs environment ('production' or 'sandbox') this build
+  /// registers tokens for (`AppReferSupport.pushEnvironment`, else read from
+  /// the app's signing); null when unknown.
+  final String? pushEnvironment;
+
   /// Register push tokens only when this is true: push is configured for this
-  /// platform and the store accepted the credentials (`verified == true`).
+  /// platform, the store accepted the credentials (`verified == true`) and,
+  /// on iOS, this build's APNs environment wasn't rejected.
   bool get pushReady {
     final channel = isIOS ? ios : android;
-    // Dart cannot infer the signed APNs environment; fail closed if either
-    // environment was explicitly rejected.
-    return channel.configured &&
-        channel.verified == true &&
-        (!isIOS ||
-            (ios.environments?['production'] != false &&
-                ios.environments?['sandbox'] != false));
+    if (!channel.configured || channel.verified != true) return false;
+    if (!isIOS) return true;
+    final env = pushEnvironment;
+    // Environment unknown: fail closed if either was explicitly rejected.
+    if (env != 'production' && env != 'sandbox') {
+      return ios.environments?['production'] != false &&
+          ios.environments?['sandbox'] != false;
+    }
+    return ios.environments?[env] != false;
   }
+
+  /// This status for [environment] (the cached server answer is reused).
+  AppReferSupportStatus withPushEnvironment(String? environment) =>
+      AppReferSupportStatus(
+        ios: ios,
+        android: android,
+        emailConfigured: emailConfigured,
+        emailVerified: emailVerified,
+        emailReceivesReplies: emailReceivesReplies,
+        helpCentreArticles: helpCentreArticles,
+        isIOS: isIOS,
+        pushEnvironment: environment,
+      );
 
   /// Customers can answer reply emails and their answer reaches the conversation.
   bool get emailReplies => emailReceivesReplies;
 
-  static AppReferSupportStatus fromJson(Object? json, {required bool isIOS}) {
+  static AppReferSupportStatus fromJson(
+    Object? json, {
+    required bool isIOS,
+    String? pushEnvironment,
+  }) {
     final m = json is Map ? json : const {};
     final push = m['push'] is Map ? m['push'] as Map : const {};
     final email = m['email'] is Map ? m['email'] as Map : const {};
@@ -217,6 +243,7 @@ class AppReferSupportStatus {
           ? (help['publishedArticles'] as num).toInt()
           : 0,
       isIOS: isIOS,
+      pushEnvironment: pushEnvironment,
     );
   }
 }
@@ -242,6 +269,7 @@ class SupportHelpClient {
     this.baseUrl = 'https://apprefer.com',
     DateTime Function()? now,
     this.isIOS = false,
+    this.pushEnvironment,
   }) : now = now ?? DateTime.now;
 
   /// The current HTTP client (Support swaps it on reset).
@@ -250,6 +278,10 @@ class SupportHelpClient {
   final String baseUrl;
   final DateTime Function() now;
   final bool isIOS;
+
+  /// The effective APNs environment (SupportAPI.pushEnvironment), applied
+  /// to every status returned, cached or not.
+  final Future<String> Function()? pushEnvironment;
 
   static const cacheDuration = Duration(minutes: 5);
 
@@ -403,7 +435,9 @@ class SupportHelpClient {
   Future<AppReferSupportStatus> status() async {
     final k = apiKey() ?? '';
     final hit = _statuses[k];
-    if (hit != null && hit.expiresAt.isAfter(now())) return hit.value;
+    if (hit != null && hit.expiresAt.isAfter(now())) {
+      return _withEnvironment(hit.value);
+    }
     final response = await _get('/api/support/v1/status');
     final status = AppReferSupportStatus.fromJson(
       _json(response),
@@ -411,7 +445,15 @@ class SupportHelpClient {
     );
     final age = maxAgeSeconds(response.headers['cache-control']) ?? 30;
     _statuses[k] = _Cached(status, now().add(Duration(seconds: age)));
-    return status;
+    return _withEnvironment(status);
+  }
+
+  Future<AppReferSupportStatus> _withEnvironment(
+    AppReferSupportStatus status,
+  ) async {
+    final resolve = pushEnvironment;
+    if (!isIOS || resolve == null) return status;
+    return status.withPushEnvironment(await resolve());
   }
 
   /// `max-age` from a Cache-Control header, capped at five minutes; null

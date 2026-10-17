@@ -1,3 +1,11 @@
+## 0.10.1 (unreleased)
+
+- Support push on iOS: `registerPushToken` without `environment` no longer defaults to production. The plugin reads the APNs environment from the app's signing (embedded profile's `aps-environment`: `development` = sandbox, `production` = production; no profile, as on App Store and TestFlight, or an unreadable one = production; Simulator = sandbox), so a development-signed Release build registers sandbox tokens. Android stays production. A failed native read falls back to production and is retried on the next call.
+- New `AppReferSDK.support.pushEnvironment` ('production' | 'sandbox' | null) to force it; `registerPushToken(token, environment: …)` still wins for that token.
+- `status().pushReady` on iOS checks the same effective environment (new `AppReferSupportStatus.pushEnvironment`); unknown still fails closed when either environment was rejected.
+- A reset, clearIdentity or account switch while the environment is being read throws a Support reset error and posts nothing.
+- Version 0.10.1.
+
 ## 0.10.0 (unreleased)
 
 - Help centre in the Support chat. With published articles, the help home shows a "Help articles" card (search entry, top three, "See all"); a help centre screen lists every article by category with search (instant local filter, then the server's search 300 ms after the last keystroke); an article reader renders markdown with a small internal parser, no new package (`SupportMarkdown`: headings, setext headings, ordered/unordered/nested/task lists, quotes, fenced code, rules, https images; inline bold, italic, code, strikethrough, links). HTML is stripped (script/style with their content) and links keep only http(s) and mailto. "Still need help? Message us" returns to the message field with the article's title as the subject. No articles: no section. The help screens live inside the chat view, so they share its theme, RTL and back handling. Concierge design, 35 languages.
