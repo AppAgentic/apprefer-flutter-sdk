@@ -76,8 +76,20 @@ class FakeServer {
       'purposes': (inst['prefs'] as Map).map(
         (k, v) => MapEntry(k, {'granted': v}),
       ),
+      'accountEpoch': inst['epoch'],
     };
-    switch ('${r.method} ${r.url.path}') {
+    // Identity mutations must state the epoch they were made under (web/lib/engagement/identity.ts).
+    final route = '${r.method} ${r.url.path}';
+    final expected = body['expectedEpoch'];
+    if (const [
+          'PUT /api/engagement/v1/installs/me/preferences',
+          'POST /api/engagement/v1/installs/me/logout',
+          'POST /api/engagement/v1/installs/me/account',
+        ].contains(route) &&
+        expected is! int)
+      return _err(400, 'INVALID_BODY');
+    final stale = _err(409, 'IDENTITY_CHANGED');
+    switch (route) {
       case 'GET /api/engagement/v1/installs/me':
         return (200, me());
       case 'PATCH /api/engagement/v1/installs/me':
@@ -90,6 +102,8 @@ class FakeServer {
         final a = body['assertion'];
         if (a is! String || !a.startsWith('ok:'))
           return _err(401, 'INVALID_ASSERTION');
+        if (inst['account'] != a.substring(3) && expected != inst['epoch'])
+          return stale;
         if (inst['account'] != a.substring(3)) {
           inst['account'] = a.substring(3);
           inst['epoch'] = (inst['epoch'] as int) + 1;
@@ -99,6 +113,7 @@ class FakeServer {
         }
         return (200, {'accountEpoch': inst['epoch']});
       case 'POST /api/engagement/v1/installs/me/logout':
+        if (expected != inst['epoch']) return stale;
         inst['account'] = null;
         inst['epoch'] = (inst['epoch'] as int) + 1;
         (inst['prefs'] as Map)
@@ -108,7 +123,10 @@ class FakeServer {
       case 'GET /api/engagement/v1/installs/me/preferences':
         return (200, prefs());
       case 'PUT /api/engagement/v1/installs/me/preferences':
-        body.forEach((k, v) => (inst['prefs'] as Map)[k] = v);
+        if (expected != inst['epoch']) return stale;
+        body.forEach((k, v) {
+          if (v is bool) (inst['prefs'] as Map)[k] = v;
+        });
         return (200, prefs());
       case 'POST /api/engagement/v1/installs/me/receipts':
         return (
@@ -126,6 +144,26 @@ class FakeServer {
 
   int count(String method, String path) =>
       calls.where((c) => c.method == method && c.url.path == path).length;
+
+  /// The app's backend binds (null: detaches) directly; the SDK isn't told.
+  void backendBind(String id, String? account) {
+    final inst = installs[id]!;
+    inst['account'] = account;
+    inst['epoch'] = (inst['epoch'] as int) + 1;
+    (inst['prefs'] as Map)
+      ..['marketing'] = false
+      ..['reminders'] = false;
+  }
+
+  Map<String, dynamic> lastBody(String method, String suffix) =>
+      jsonDecode(
+            calls
+                .lastWhere(
+                  (c) => c.method == method && c.url.path.endsWith(suffix),
+                )
+                .body,
+          )
+          as Map<String, dynamic>;
 }
 
 class MemPrefs implements EngagementPrefs {
@@ -339,6 +377,181 @@ void main() {
         expect(c.stateForTesting().epoch, server.installs[id]!['epoch']);
       },
     );
+
+    test(
+      'a cold restart after a backend change never reuses the old stamp',
+      () async {
+        final c = client();
+        final id = (await c.start(key, explicit: true)).installId!;
+        await c.identify('ok:user-a');
+        final underA = c.snapshot!;
+        server.backendBind(id, 'user-b'); // while the app isn't running
+        final restarted = client();
+        await restarted.start(key, explicit: true);
+        final underB = restarted.snapshot!;
+        expect(underB.accountEpoch, 2);
+        expect(underB.serial, greaterThan(underA.serial));
+        expect(underB.stamp, isNot(underA.stamp));
+        server.backendBind(id, null); // to anonymous
+        final again = client();
+        await again.start(key, explicit: true);
+        expect(again.snapshot!.serial, greaterThan(underB.serial));
+        expect(again.snapshot!.stamp, isNot(underB.stamp));
+        final same = client();
+        await same.start(key, explicit: true);
+        expect(
+          same.snapshot!.stamp,
+          again.snapshot!.stamp,
+          reason: 'nothing changed',
+        );
+        server.installs.remove(id); // erased: replaced
+        final replaced = client();
+        await replaced.start(key, explicit: true);
+        expect(replaced.snapshot!.installId, isNot(id));
+        expect(replaced.snapshot!.stamp, isNot(same.snapshot!.stamp));
+      },
+    );
+
+    test(
+      'preferences state their epoch and are refused for the next account',
+      () async {
+        final c = client();
+        final id = (await c.start(key, explicit: true)).installId!;
+        await c.identify('ok:user-a');
+        await c.preferences();
+        server.backendBind(id, 'user-b');
+        await expectLater(
+          c.setPreferences({'marketing': true}),
+          throwsA(
+            isA<AppReferEngagementException>().having(
+              (e) => e.reason,
+              'reason',
+              AppReferEngagementErrorReason.identityChanged,
+            ),
+          ),
+        );
+        expect(server.lastBody('PUT', '/preferences')['expectedEpoch'], 1);
+        expect(
+          (server.installs[id]!['prefs'] as Map)['marketing'],
+          isFalse,
+          reason: "A's cached choice never reaches B",
+        );
+        await c.setPreferences({'marketing': true});
+        expect(server.lastBody('PUT', '/preferences')['expectedEpoch'], 2);
+        expect((server.installs[id]!['prefs'] as Map)['marketing'], isTrue);
+      },
+    );
+
+    test('reading preferences learns their epoch', () async {
+      final c = client();
+      final id = (await c.start(key, explicit: true)).installId!;
+      final before = c.snapshot!.serial;
+      server.backendBind(id, 'user-b');
+      await c.preferences();
+      expect(c.snapshot!.accountEpoch, 1);
+      expect(c.snapshot!.serial, greaterThan(before));
+    });
+
+    test('a stale logout never detaches the next account', () async {
+      final c = client();
+      final id = (await c.start(key, explicit: true)).installId!;
+      await c.identify('ok:user-a');
+      server.offline = true;
+      await c.logout(); // saved for epoch 1
+      server.offline = false;
+      server.backendBind(id, 'user-b');
+      await client().start(key, explicit: true);
+      expect(server.lastBody('POST', '/logout')['expectedEpoch'], 1);
+      expect(
+        server.installs[id]!['account'],
+        'user-b',
+        reason: 'refused (409): B stays bound',
+      );
+      expect(
+        client().stateForTesting().pendingLogout,
+        isFalse,
+        reason: 'settled, not retried forever',
+      );
+    });
+
+    test(
+      'a sign-in started under an old identity does not replace the new one',
+      () async {
+        final c = client();
+        final id = (await c.start(key, explicit: true)).installId!;
+        server.backendBind(id, 'user-b');
+        await expectLater(
+          c.identify('ok:user-a'),
+          throwsA(
+            isA<AppReferEngagementException>().having(
+              (e) => e.reason,
+              'reason',
+              AppReferEngagementErrorReason.identityChanged,
+            ),
+          ),
+        );
+        expect(server.lastBody('POST', '/account')['expectedEpoch'], 0);
+        expect(server.installs[id]!['account'], 'user-b');
+        expect(c.snapshot!.accountEpoch, 1);
+      },
+    );
+
+    test('deferred events recheck the real clock and identity', () {
+      const snap = EngagementSnapshot('s', 'ei_x', 2, 1, 'h', null);
+      const open = AppReferEngagementNotificationEvent(
+        kind: 'opened',
+        messageId: 'm',
+        purpose: 'reminders',
+        destination: '/x',
+      );
+      const dismissed = AppReferEngagementNotificationEvent(
+        kind: 'dismissed',
+        messageId: 'm',
+        purpose: 'reminders',
+      );
+      Map raw(int? exp, [int epoch = 2]) => {
+        if (exp != null) 'expiresAt': exp,
+        'installId': 'ei_x',
+        'accountEpoch': epoch,
+      };
+      const now = 1000000;
+      expect(
+        AppReferEngagement.stillDeliverable(open, raw(now + 1), snap, now),
+        isTrue,
+      );
+      expect(
+        AppReferEngagement.stillDeliverable(open, raw(now + 1), snap, now + 1),
+        isFalse,
+        reason: 'expired while waiting',
+      );
+      expect(
+        AppReferEngagement.stillDeliverable(
+          dismissed,
+          raw(now + 1),
+          snap,
+          now + 2,
+        ),
+        isFalse,
+      );
+      expect(
+        AppReferEngagement.stillDeliverable(open, raw(null), snap, now),
+        isFalse,
+        reason: 'no expiry: never navigates',
+      );
+      expect(
+        AppReferEngagement.stillDeliverable(dismissed, raw(null), snap, now),
+        isTrue,
+        reason: 'extension markers carry no expiry',
+      );
+      expect(
+        AppReferEngagement.stillDeliverable(open, raw(now + 1, 1), snap, now),
+        isFalse,
+      );
+      expect(
+        AppReferEngagement.stillDeliverable(open, raw(now + 1), null, now),
+        isFalse,
+      );
+    });
 
     test('logout during registration is sent after it', () async {
       server.delays['POST /api/engagement/v1/installs'] = const Duration(
@@ -646,6 +859,8 @@ void main() {
       'accountEpoch': epoch,
       'receiptToken': token,
       'at': DateTime.now().millisecondsSinceEpoch,
+      // Both natives record the notification's expiry with every event.
+      'expiresAt': DateTime.now().millisecondsSinceEpoch + 3600000,
       if (dest != null) 'destination': dest,
     };
 
@@ -808,6 +1023,7 @@ void main() {
           }),
         );
         expect(sent.first.headers['X-AppRefer-Install'], startsWith('ei_'));
+        expect(sent.first.headers['X-AppRefer-Install-Epoch'], '0');
         expect(
           sent.last.headers['X-AppRefer-Install'],
           isNull,

@@ -103,7 +103,12 @@ class EngagementSnapshot {
   /// Advances on every reset, logout, sign-in, deletion and server-side account change.
   final int serial;
   final Set<String>? trackedEvents;
-  String get stamp => '$slot:$installId:$serial';
+
+  /// Queued events carry this and get the header only while it is current. The epoch is part
+  /// of it (and is sent as `X-AppRefer-Install-Epoch`), so an event queued under one account
+  /// never matches after a cold start that learned another, and the server refuses it if the
+  /// install moved on before the SDK knew.
+  String get stamp => '$slot:$installId:$serial:${accountEpoch ?? '-'}';
 }
 
 class EngagementDeviceState {
@@ -281,8 +286,37 @@ class EngagementClient {
   int get _serial => int.tryParse(prefs.get(_key('serial')) ?? '') ?? 0;
   Future<void> _setSerial(int v) => prefs.set(_key('serial'), '$v');
   bool get _pendingLogout => prefs.get(_key('pending_logout')) == '1';
-  Future<void> _setPendingLogout(bool v) =>
-      prefs.set(_key('pending_logout'), v ? '1' : null);
+  Future<void> _setPendingLogout(bool v) async {
+    await prefs.set(_key('pending_logout'), v ? '1' : null);
+    if (!v) await prefs.set(_key('pending_logout_epoch'), null);
+  }
+
+  /// The epoch a saved logout was made under (null: not known then).
+  int? get _pendingLogoutEpoch =>
+      int.tryParse(prefs.get(_key('pending_logout_epoch')) ?? '');
+
+  /// Sets the epoch and persists it with the install id, so a cold start sees an epoch the
+  /// server moved meanwhile.
+  Future<void> _setEpoch(int? epoch) async {
+    _accountEpoch = epoch;
+    final c = _credential;
+    if (epoch != null && c != null)
+      await prefs.set(_key('epoch'), '${c.installId}:$epoch');
+  }
+
+  /// The epoch in memory, else the last one persisted for this install.
+  int? get _knownEpoch {
+    if (_accountEpoch != null) return _accountEpoch;
+    final c = _credential;
+    final parts = prefs.get(_key('epoch'))?.split(':');
+    if (c == null ||
+        parts == null ||
+        parts.length != 2 ||
+        parts[0] != c.installId)
+      return null;
+    return int.tryParse(parts[1]);
+  }
+
   int get _disabledUntil =>
       int.tryParse(prefs.get(_key('disabled_until')) ?? '') ?? 0;
   static const _pendingLogoutAny = 'apprefer_engagement_pending_logout_any';
@@ -396,22 +430,47 @@ class EngagementClient {
     if (gen != _generation) return status;
     final c = _credential!;
     if (prefs.get(_pendingLogoutAny) == '1') {
+      // Saved before this slot started in that process: it signs out of the identity this
+      // slot last knew (persisted), never one the server moved to afterwards.
+      final epoch = _knownEpoch;
       await prefs.set(_pendingLogoutAny, null);
       await _setPendingLogout(true);
+      await prefs.set(_key('pending_logout_epoch'), epoch?.toString());
       await _setSerial(_serial + 1);
     }
     if (_pendingLogout) {
+      var expected = _pendingLogoutEpoch;
+      if (expected == null) {
+        // Nothing was known about this install's identity when it was saved: sign out of
+        // what is there now.
+        final me = await _send('GET', '/api/engagement/v1/installs/me', key, c);
+        if (gen != _generation) return status;
+        final install = me.body?['install'];
+        expected = me.status == 200 && install is Map
+            ? _intOf(install['accountEpoch'])
+            : null;
+        if (expected == null) {
+          if (!await _handleFailure(me))
+            status = AppReferEngagementStatus.pending;
+          await _publish();
+          return status;
+        }
+      }
       final r = await _send(
         'POST',
         '/api/engagement/v1/installs/me/logout',
         key,
         c,
-        body: const {},
+        body: {'expectedEpoch': expected},
       );
       if (gen != _generation) return status;
       if (r.status == 200) {
         await _setPendingLogout(false);
-        _accountEpoch = _intOf(r.body?['accountEpoch']);
+        await _setEpoch(_intOf(r.body?['accountEpoch']));
+      } else if (r.status == 409) {
+        // The install already left that identity (another sign-in or a backend change):
+        // done, and the newer one stays.
+        await _setPendingLogout(false);
       } else if (await _handleFailure(r)) {
         return status;
       } else {
@@ -447,6 +506,7 @@ class EngagementClient {
   Future<void> _forgetCredential() async {
     if (_slot != null)
       await secure.delete('apprefer_engagement_install_$_slot');
+    await prefs.set(_key('epoch'), null);
     _credential = null;
     _accountEpoch = null;
     await prefs.set(_key('sync_hash'), null);
@@ -489,16 +549,20 @@ class EngagementClient {
       return false;
     }
     _credential = minted;
-    _accountEpoch = 0;
+    await _setEpoch(0);
     await _setSerial(_serial + 1);
     await prefs.set(_key('sync_hash'), null);
     return true;
   }
 
+  /// Server-side account changes (backend bind/unbind) also move the epoch. Compared with the
+  /// last epoch known for this install, persisted across launches, so a change made while the
+  /// app wasn't running still advances the serial and nothing queued for the old identity
+  /// matches.
   Future<void> _observeEpoch(int? epoch) async {
-    if (epoch == null || epoch == _accountEpoch) return;
-    if (_accountEpoch != null) await _setSerial(_serial + 1);
-    _accountEpoch = epoch;
+    if (epoch == null) return;
+    if (_knownEpoch != epoch) await _setSerial(_serial + 1);
+    if (_accountEpoch != epoch) await _setEpoch(epoch);
   }
 
   /// True when handled as a terminal state (engagement disabled, invalid install).
@@ -584,6 +648,13 @@ class EngagementClient {
       throw AppReferEngagementException(
         AppReferEngagementErrorReason.notStarted,
       );
+    // The identity this sign-in replaces: the server refuses it (409) if that changed meanwhile.
+    if (_knownEpoch == null) await _reverify(_generation);
+    final expected = _knownEpoch;
+    if (expected == null)
+      throw AppReferEngagementException(
+        AppReferEngagementErrorReason.unavailable,
+      );
     await _beginIdentityChange();
     final gen = _generation;
     final r = await _send(
@@ -591,7 +662,7 @@ class EngagementClient {
       '/api/engagement/v1/installs/me/account',
       key,
       c,
-      body: {'assertion': assertion},
+      body: {'assertion': assertion, 'expectedEpoch': expected},
     );
     if (gen != _generation)
       throw AppReferEngagementException(
@@ -600,7 +671,7 @@ class EngagementClient {
     final epoch = _intOf(r.body?['accountEpoch']);
     if (r.status == 200 && epoch != null) {
       await _setPendingLogout(false);
-      _accountEpoch = epoch;
+      await _setEpoch(epoch);
       await prefs.set(_key('sync_hash'), null);
       await _publish();
       await _syncDevice(true);
@@ -635,24 +706,33 @@ class EngagementClient {
       _generation++;
       return;
     }
+    // Saved with the identity it signs out of (an older unsent logout keeps its own).
+    final expected = _knownEpoch;
     await _beginIdentityChange();
-    await _setPendingLogout(true);
-    final key = _apiKey, c = _credential;
-    if (!status.isActive || key == null || c == null) return;
+    if (!_pendingLogout || _pendingLogoutEpoch == null) {
+      await _setPendingLogout(true);
+      await prefs.set(_key('pending_logout_epoch'), expected?.toString());
+    }
+    final key = _apiKey, c = _credential, epoch = _pendingLogoutEpoch;
+    if (!status.isActive || key == null || c == null || epoch == null) return;
     final gen = _generation;
     final r = await _send(
       'POST',
       '/api/engagement/v1/installs/me/logout',
       key,
       c,
-      body: const {},
+      body: {'expectedEpoch': epoch},
     );
     if (gen != _generation) return;
     if (r.status == 200) {
       await _setPendingLogout(false);
-      _accountEpoch = _intOf(r.body?['accountEpoch']);
+      await _setEpoch(_intOf(r.body?['accountEpoch']));
       await prefs.set(_key('sync_hash'), null);
       await _publish();
+    } else if (r.status == 409) {
+      // Already signed out of that identity on the server (a newer one is there): done.
+      await _setPendingLogout(false);
+      await _reverify(gen);
     } else {
       await _handleFailure(r);
     }
@@ -671,6 +751,7 @@ class EngagementClient {
     final marked = _credential?.markDeleted();
     if (marked == null) return;
     await _beginIdentityChange();
+    await prefs.set(_key('epoch'), null);
     _credential = marked;
     await secure.write(
       'apprefer_engagement_install_${slotFor(key)}',
@@ -718,7 +799,14 @@ class EngagementClient {
         AppReferEngagementErrorReason.identityChanged,
       );
     final prefs = _parsePreferences(r.body);
-    if (r.status == 200 && prefs != null) return prefs;
+    final epoch = _intOf(r.body?['accountEpoch']);
+    if (r.status == 200 && prefs != null && epoch != null) {
+      // The choices are for the epoch they came with: learn it, so a later change is made for it.
+      final before = _serial;
+      await _observeEpoch(epoch);
+      if (before != _serial) await _publish();
+      return prefs;
+    }
     await _handleFailure(r);
     throw _failure(r);
   });
@@ -737,8 +825,10 @@ class EngagementClient {
       throw AppReferEngagementException(
         AppReferEngagementErrorReason.notStarted,
       );
-    // Only for the identity in use now: never mid sign-in or sign-out.
-    if (_accountEpoch == null)
+    // Only for the identity in use now: never mid sign-in or sign-out. The server refuses it
+    // (409) if the install's identity is no longer this epoch.
+    final epoch = _accountEpoch;
+    if (epoch == null)
       throw AppReferEngagementException(
         AppReferEngagementErrorReason.identityChanged,
       );
@@ -748,7 +838,7 @@ class EngagementClient {
       '/api/engagement/v1/installs/me/preferences',
       key,
       c,
-      body: choices,
+      body: {...choices, 'expectedEpoch': epoch},
     );
     if (gen != _generation)
       throw AppReferEngagementException(

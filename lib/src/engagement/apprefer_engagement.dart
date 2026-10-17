@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:ui' show PlatformDispatcher;
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -448,16 +449,33 @@ class AppReferEngagement {
       return true;
     });
     for (final (event, raw) in now) {
-      if (event.isNavigation) {
-        // Re-checked at delivery: an account change while it waited drops it.
-        final snap = _client?.snapshot;
-        if (snap == null ||
-            snap.installId != raw['installId'] ||
-            snap.accountEpoch != raw['accountEpoch'])
-          continue;
-      }
-      handler(event);
+      if (stillDeliverable(event, raw, _client?.snapshot, _clock()))
+        handler(event);
     }
+  }
+
+  /// The clock deferred events are checked with (tests replace it).
+  @visibleForTesting
+  DateTime Function() clock = DateTime.now;
+  int _clock() => clock().millisecondsSinceEpoch;
+
+  /// Re-checked at delivery, with the real clock: an event whose notification expired while it
+  /// waited (navigation not ready, no handler yet) is dropped, and navigation also needs a known
+  /// expiry and the same install and account it was tapped under.
+  @visibleForTesting
+  static bool stillDeliverable(
+    AppReferEngagementNotificationEvent event,
+    Map raw,
+    EngagementSnapshot? snap,
+    int nowMs,
+  ) {
+    final exp = raw['expiresAt'];
+    if (exp is num && nowMs >= exp) return false;
+    if (!event.isNavigation) return true;
+    return exp is num &&
+        snap != null &&
+        snap.installId == raw['installId'] &&
+        snap.accountEpoch == raw['accountEpoch'];
   }
 
   /// The stamp a new product event carries (never the credential).
@@ -473,14 +491,19 @@ class AppReferEngagement {
     return snap.stamp;
   }
 
-  /// The header for a queued event, only while its stamp is current.
-  String? headerFor(Object? stamp) {
+  /// The headers for a queued event, only while its stamp is current: the credential and the
+  /// account epoch the event was queued under.
+  Map<String, String>? headersFor(Object? stamp) {
     final snap = _client?.snapshot;
+    final epoch = snap?.accountEpoch;
     return stamp is String &&
             snap != null &&
-            snap.accountEpoch != null &&
+            epoch != null &&
             snap.stamp == stamp
-        ? snap.header
+        ? {
+            'X-AppRefer-Install': snap.header,
+            'X-AppRefer-Install-Epoch': '$epoch',
+          }
         : null;
   }
 

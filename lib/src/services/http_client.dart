@@ -81,9 +81,7 @@ class AppReferHttpClient {
         // The stamp never leaves the device; the credential goes only while it is current.
         headers: {
           ..._headers,
-          if (AppReferEngagement.instance.headerFor(body[engagementStampKey])
-              case final header?)
-            'X-AppRefer-Install': header,
+          ...?AppReferEngagement.instance.headersFor(body[engagementStampKey]),
         },
         body: jsonEncode(Map.of(body)..remove(engagementStampKey)),
       ).timeout(_requestTimeout);

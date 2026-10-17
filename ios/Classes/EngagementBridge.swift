@@ -18,6 +18,9 @@ final class EngagementBridge: NSObject, FlutterPlugin {
     private static let identityKey = "apprefer_engagement_flutter_identity"
     private static let labelsKey = "apprefer_engagement_flutter_labels"
     private static let groupKey = "apprefer_engagement_flutter_group"
+    /// AppRefer's local snoozes: removed on every identity change, fenced against late adds.
+    private lazy var snoozes = EngagementSnoozeGuard(center: LiveEngagementSnoozeCenter(), defaults: defaults,
+                                                     seenKey: "apprefer_engagement_flutter_seen_identity")
 
     static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "com.apprefer.sdk/engagement", binaryMessenger: registrar.messenger())
@@ -65,6 +68,8 @@ final class EngagementBridge: NSObject, FlutterPlugin {
             let iid = args["installId"] as? String
             let epoch = args["accountEpoch"] as? Int ?? -1
             if let iid { defaults.set(["iid": iid, "epoch": epoch], forKey: Self.identityKey) } else { defaults.removeObject(forKey: Self.identityKey) }
+            // A different confirmed install or epoch than before: the old identity's snoozes go.
+            snoozes.observe(installId: iid, epoch: epoch)
             // The extension reads the same keys as AppReferNotificationSharedState.
             if let group = (args["appGroup"] as? String) ?? defaults.string(forKey: Self.groupKey), let shared = UserDefaults(suiteName: group) {
                 if let iid { shared.set(epoch >= 0 ? ["iid": iid, "epoch": epoch] : ["iid": iid], forKey: "apprefer_engagement_identity") }
@@ -87,7 +92,11 @@ final class EngagementBridge: NSObject, FlutterPlugin {
         case "showNotification": result("not_android")
         case "takeEvents": result(takeEvents())
         case "clearForAccountChange":
+            // Called before an identity change is sent: nothing recorded for the old identity
+            // waits, its snoozes go, and nothing matches until Dart sets the new identity.
             defaults.removeObject(forKey: Self.eventsKey)
+            if var id = defaults.dictionary(forKey: Self.identityKey), id["iid"] != nil { id["epoch"] = -1; defaults.set(id, forKey: Self.identityKey) }
+            snoozes.invalidate()
             result(nil)
         default: result(FlutterMethodNotImplemented)
         }
@@ -183,8 +192,10 @@ final class EngagementBridge: NSObject, FlutterPlugin {
         let rest = p.actions.filter { $0.kind != .snooze }
         if !rest.isEmpty { content.categoryIdentifier = "apprefer.eng." + rest.map(\.kind.rawValue).joined(separator: ".") }
         if let ck = p.collapseKey { content.threadIdentifier = ck }
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "apprefer.eng.snooze.\(p.messageId)", content: content,
-                                                                     trigger: UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)))
+        snoozes.schedule(identifier: EngagementSnoozeGuard.prefix + p.messageId, content: content, after: delay) { [weak self] in
+            guard let self else { return false }
+            return !p.isExpired() && self.matchesIdentity(p)
+        }
     }
 
     // MARK: Outbox
@@ -199,7 +210,8 @@ final class EngagementBridge: NSObject, FlutterPlugin {
         let fresh = handled.filter { now - $0.value < 8 * 86_400 }.sorted { $0.value > $1.value }.prefix(300)
         defaults.set(Dictionary(uniqueKeysWithValues: fresh.map { ($0.key, $0.value) }), forKey: Self.handledKey)
         var event: [String: Any] = ["kind": kind, "messageId": p.messageId, "purpose": p.purpose.rawValue, "installId": p.installId,
-                                    "accountEpoch": p.accountEpoch, "receiptToken": p.receiptToken, "at": Int(now * 1000)]
+                                    "accountEpoch": p.accountEpoch, "receiptToken": p.receiptToken, "at": Int(now * 1000),
+                                    "expiresAt": Int(p.expiresAt.timeIntervalSince1970 * 1000)]
         let destination = kind == "opened" ? p.destination : (kind == "action" ? (action?.destination ?? p.destination) : nil)
         if let destination { event["destination"] = destination }
         if let action { event["actionId"] = action.id; event["actionKind"] = action.kind.rawValue }
