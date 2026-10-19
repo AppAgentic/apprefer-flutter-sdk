@@ -141,6 +141,7 @@ void main() {
       await flow.load();
       expect(flow.phase, TestimonialPhase.ready);
       flow.picked(photo);
+      flow.publish = false;
       t.failSubmit = const SocketException('connection reset');
       await flow.submit();
       expect(flow.phase, TestimonialPhase.failed);
@@ -169,6 +170,49 @@ void main() {
           'declined',
         ),
       );
+    },
+  );
+
+  test('public use starts on but only the final share records it', () async {
+    final t = FakeTransport(request());
+    final flow = TestimonialFlow(t.current.requestId, t);
+    expect(flow.publish, isTrue, reason: 'public use starts on');
+    await flow.load();
+    flow.picked(photo);
+    expect(flow.request?.permissionText, 'You may show this in the app.');
+    expect(t.submits, isEmpty, reason: 'opening and picking record nothing');
+    await flow.submit();
+    expect(t.submits.single.sublist(2), [true, '0123456789abcdef']);
+    expect(
+      flow.result,
+      AppReferTestimonialResult(
+        t.current.requestId,
+        'submitted',
+        'pending',
+        'granted',
+      ),
+    );
+    final declined = TestimonialFlow('tsr_x', FakeTransport(request()));
+    await declined.load();
+    declined.picked(photo);
+    expect(
+      (await declined.decline(false)).publication,
+      isNull,
+      reason: 'declining sends no permission answer',
+    );
+  });
+
+  test(
+    'a request without permission text is never submitted with an assumed answer',
+    () async {
+      final t = FakeTransport(request({...requestJson(), 'permission': null}));
+      final flow = TestimonialFlow(t.current.requestId, t);
+      await flow.load();
+      expect(flow.request?.permissionVersion, isNull);
+      flow.picked(photo);
+      await flow.submit();
+      expect(t.submits, isEmpty);
+      expect(t.slots, 0);
     },
   );
 
@@ -381,6 +425,19 @@ void main() {
       200,
     );
     expect(find.text('Allow public use'), findsOneWidget);
+    expect(
+      find.text(
+        'On unless you turn it off. The reward is the same either way, and you can withdraw this later.',
+      ),
+      findsOneWidget,
+    );
+    final toggle = find.byType(SwitchListTile);
+    expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+    expect(t.submits, isEmpty, reason: 'showing the switch records nothing');
+    await tester.ensureVisible(toggle);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
     await tester.scrollUntilVisible(find.text('Share'), 200);
     await tester.ensureVisible(find.text('Share'));
     await tester.pumpAndSettle();
@@ -397,7 +454,7 @@ void main() {
     expect(
       t.submits.single[2],
       false,
-      reason: 'public use stays off unless the customer switches it on',
+      reason: 'the customer turned public use off before sharing',
     );
     // The done screen checks the reward a few times; let those checks run out.
     await tester.pump(const Duration(seconds: 60));

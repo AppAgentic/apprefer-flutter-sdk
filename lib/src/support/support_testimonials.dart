@@ -19,8 +19,9 @@ import 'support_style.dart';
 // only answers one, for the account the support session is verified for
 // (`AppReferSDK.support.verifyIdentity`). The reward and the publication
 // permission text come from the request: the SDK never chooses a reward and
-// never ties it to what is said. Taking part earns the reward; allowing
-// public use is a separate, optional switch.
+// never ties it to what is said. Taking part earns the reward; public use is a
+// separate switch that starts on and the customer can turn off. Only the final
+// Share sends its value, with the permission version shown.
 
 /// A photo/video request as the server sends it.
 @immutable
@@ -361,7 +362,12 @@ class TestimonialFlow extends ChangeNotifier {
   double progress = 0;
   AppReferTestimonialRequest? request;
   TestimonialFile? file;
-  bool publish = false;
+
+  /// Public use starts on; the customer can turn it off. Nothing is recorded
+  /// until [submit] (opening, picking or cancelling sends no answer), and a
+  /// request without permission text (an older server) can't be submitted,
+  /// so no permission is ever assumed.
+  bool publish = true;
 
   /// The localized message for the last problem (null when none).
   String? notice;
@@ -686,7 +692,8 @@ Future<TestimonialFile?> pickTestimonialMedia({
 }
 
 /// The capture screen: what's asked, the reward, pick or record, preview,
-/// optional public use with the app's exact permission text, honest
+/// public use (on unless the customer turns it off) with the app's exact
+/// permission text, honest
 /// progress, then the result. Pops with an [AppReferTestimonialResult].
 class AppReferTestimonialScreen extends StatefulWidget {
   const AppReferTestimonialScreen({
