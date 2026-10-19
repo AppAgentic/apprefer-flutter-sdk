@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
 import 'support_help.dart';
+import 'support_offers.dart';
 
 String newSupportMessageId() => List.generate(
   16,
@@ -183,6 +184,7 @@ class SupportAPI {
     } catch (_) {}
     return null;
   }
+
   int _generation = 0;
   int get actionGeneration => _generation;
   final Future<List<String>> Function() keys;
@@ -651,6 +653,9 @@ class SupportAPI {
     );
     request.headers['X-AppRefer-Key'] = key;
     if (token != null) request.headers['X-AppRefer-Support-Session'] = token;
+    // This chat draws offer cards; with `onOffer` set the app also opens its paywall from them.
+    request.headers['X-AppRefer-Support-Features'] =
+        SupportOffers.featuresHeader;
     if (body != null) {
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
@@ -953,9 +958,10 @@ class SupportAPI {
 
   Future<Map<String, dynamic>> thread(String id, {String? after}) async {
     final epoch = _generation;
+    // The platform picks which store's products an offer card lists.
     final thread = await call(
       'GET',
-      '/conversations/${Uri.encodeComponent(id)}${after == null ? '' : '?after=${Uri.encodeQueryComponent(after)}'}',
+      '/conversations/${Uri.encodeComponent(id)}?platform=$_platform${after == null ? '' : '&after=${Uri.encodeQueryComponent(after)}'}',
     );
     if (epoch != _generation)
       throw SupportException(
@@ -965,6 +971,84 @@ class SupportAPI {
       );
     persona.value = AppReferSupportPersona.fromJson(thread['persona']);
     return thread;
+  }
+
+  String get _platform => isIOS ? 'ios' : 'android';
+
+  /// Every offer card in a conversation with its state now (after a
+  /// purchase, restore, sign-in, catalogue change or reopening the chat),
+  /// without reloading the messages.
+  Future<List<AppReferSupportOfferCard>> offerCards(String id) async {
+    final data = await call(
+      'GET',
+      '/conversations/${Uri.encodeComponent(id)}/offers?platform=$_platform',
+    );
+    return [
+      for (final o
+          in (data['offers'] is List ? data['offers'] as List : const []))
+        if (AppReferSupportOfferCard.fromJson(o) case final card?) card,
+    ];
+  }
+
+  /// Sends one receipt. Throws on network or server failure; a 4xx other
+  /// than 408/429 is final.
+  Future<AppReferSupportOfferCard?> sendOfferReceipt(
+    SupportOfferReceipt r,
+  ) async {
+    final data = await call(
+      'POST',
+      '/conversations/${Uri.encodeComponent(r.conversationId)}/offers/${Uri.encodeComponent(r.cardId)}/events?platform=$_platform',
+      {
+        'kind': r.kind,
+        'clientEventId': r.clientEventId,
+        'occurredAt': r.occurredAt,
+      },
+    );
+    return AppReferSupportOfferCard.fromJson(data['offer']);
+  }
+
+  /// Receipts waiting to be sent, kept with the session in the same store.
+  late final SupportOfferReceipts offerReceipts = SupportOfferReceipts(
+    read: read,
+    write: write,
+  );
+
+  /// Sends every queued receipt once; keeps the ones that failed for a
+  /// transient reason.
+  Future<void> flushOfferReceipts([SupportOfferReceipts? queue]) async {
+    final q = queue ?? offerReceipts;
+    final List<SupportOfferReceipt> waiting;
+    try {
+      waiting = await q.pending;
+    } catch (_) {
+      return; // Storage unavailable: tried again next time.
+    }
+    for (final r in waiting) {
+      Object? error;
+      try {
+        await sendOfferReceipt(r);
+      } catch (e) {
+        error = e;
+      }
+      try {
+        if (error is SupportException &&
+            error.reason == SupportErrorReason.reset)
+          return;
+        final finalRefusal =
+            error is SupportException &&
+            error.status >= 400 &&
+            error.status < 500 &&
+            error.status != 408 &&
+            error.status != 429;
+        if (error == null || finalRefusal) {
+          await q.remove(r);
+        } else {
+          await q.failed(r);
+        }
+      } catch (_) {
+        return; // Storage unavailable: tried again next time.
+      }
+    }
   }
 
   Future<Map<String, dynamic>> start(
