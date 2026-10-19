@@ -183,7 +183,8 @@ class SupportHeaderLook {
   final bool foregroundIsDark;
   final Color closeFill, closeBorder, pillFill, pillBorder;
 
-  /// Avatars in the presence pill; null keeps the accent's and per-person colours.
+  /// Avatars in the presence pill and on the Continue card; null keeps the
+  /// accent's and per-person colours.
   final List<Color>? avatars;
 
   /// The ring that separates overlapping avatars.
@@ -259,6 +260,9 @@ class SupportHeroPainter extends CustomPainter {
 }
 
 /// A round avatar: a person's initial, or an icon, on a gradient.
+/// The avatar on the home's Continue card (found by tests).
+const supportContinueAvatarKey = ValueKey('apprefer.support.continueAvatar');
+
 class SupportAvatar extends StatelessWidget {
   const SupportAvatar({
     super.key,
