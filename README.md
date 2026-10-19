@@ -442,6 +442,7 @@ await AppReferSDK.support.open(context: context);
 // Opens the home with the message field pre-filled and focused:
 await AppReferSDK.support.compose('Problem with my subscription', context: context);
 await AppReferSDK.support.identify(name: 'María', email: 'maria@example.com');
+final check = await AppReferSDK.support.verifyIdentity(tokenFromYourBackend); // 0.12.0: confirms the account (see "Verified identity" below)
 AppReferSDK.support.accentColor = Colors.deepPurple; // hero, bubbles, send button
 AppReferSDK.support.headerStyle = AppReferSupportHeaderStyle.plain; // 0.11.1: flat neutral grey header (default .accent); 0.11.2: Continue card avatar too
 AppReferSDK.support.title = 'My app support'; // defaults to "<App name> support", translated
@@ -511,6 +512,86 @@ Push transport stays in the host app: forward APNs/FCM registration and notifica
 taps to these APIs. On Android registration creates `apprefer_support`; configure
 FCM to use that channel for support replies. iOS payloads use `apprefer: {type:
 support_reply, conversationId: ...}`; Android uses those fields directly in data.
+
+### Verified identity (0.12.0)
+
+The app user id the SDK sends with Support is only a claim from the device. To let your team and
+the AI assistant use the account's private details (plan, purchases, orders, credits your backend
+shares), confirm it:
+
+1. Your backend, after signing the user in, calls
+   `POST https://apprefer.com/api/v1/apps/{appId}/support/identity-tokens` with your **private**
+   organisation key (`support:context` scope) and `{ "appUserId": "<the signed-in user>" }`. It
+   returns a single-use `identityToken` valid for up to 10 minutes. Never put the private key in
+   the app.
+2. The app passes that token to ``await AppReferSDK.support.verifyIdentity(token)`` after `setUserId` with the same user.
+
+It verifies the current Support session, so conversations already started on it count too; no new
+conversation is needed. Network and server failures are retried with the same token and then
+thrown (sending the same token again is safe: the server acknowledges a retry from the same session).
+A refusal comes back as `verified: false` with a `reason` (`expired`, `already_used`,
+`user_mismatch`, `session_replaced`… get a new token), or `account_changed` when a reset,
+`clearIdentity()` or another user id happened while it ran. The token is never stored or logged.
+`reset()`, `clearIdentity()` and another account signing in end the verification. Until an app
+verifies, the AI assistant gets no account data at all, and your team sees the claimed account
+marked "Not verified". `identify` is unchanged.
+
+### Option cards (0.12.0)
+
+Your team or AI assistant can attach one of your AppRefer Billing offerings to a reply. Tapping
+**See options** on the card calls your code with the offering, so you open **your own** paywall:
+
+```dart
+AppReferSDK.support.onOffer = (offer) {
+  // offer.offeringId, offer.packageId (nullable), offer.cardId, offer.conversationId
+  navigatorKey.currentState?.push(PaywallRoute(offer.offeringId, offer.packageId));
+};
+```
+
+The card reads "Options for you" (never "offer"): it can hold ordinary full-price plans, credit packs
+or one-off purchases. Each price shows the store's own billing period ("£29.99/year"), never a
+free-trial or introductory price; an owned one-off is tagged "Purchased", a current subscription
+"Current plan".
+
+The card lists the offering's packages with the store's own formatted prices (the store's price via `AppReferBilling.offerings()` (Google Play's regular recurring price, never a trial phase), when Billing is configured; otherwise no prices) and
+tags the customer's current plan; switching plans is never blocked. The SDK never shows a paywall,
+never starts a purchase and never shows a price, discount or deadline of its own: your paywall does
+the buying and AppRefer Billing confirms it from the store as usual. A tap is reported as an
+`opened` receipt (never a purchase); receipts made offline are kept on the device for up to 7 days
+and sent again with the same id. Before calling you, the SDK asks AppRefer for up to 3 seconds
+whether the card can still be opened: a withdrawn, expired or changed card redraws instead, and no
+answer calls you anyway (the store is the real gate).
+
+- `closesChatOnOffer` (default `true`) closes the chat route opened with `open()`/`compose()` before `onOffer` runs.
+- Without `onOffer`, cards say "Update the app to open this".
+- Cards refresh when the chat opens, every 30 seconds while it is open, after a purchase, restore or
+  sign-in reported by AppRefer Billing, and when the app comes back to the foreground.
+- Your team sends cards from the inbox (＋ Offer); the AI assistant can attach one only for a
+  verified customer. Offerings that aren't public in your catalogue (current, placement, targeting
+  rule, running experiment) also need the customer verified (see Verified identity).
+- `reset()` and `clearIdentity()` drop pending receipts with the old session.
+- Older SDK versions show your text plus a line asking the customer to update the app.
+
+### Review cards (0.12.0)
+
+Your team can attach an optional **Write a review** card to a reply (inbox: ＋ Review link). The card
+says "Share your experience" and opens the App Store write-review page on iOS and the Google Play listing on Android, through the SDK's existing `openUrl` channel (no new plugin). There is nothing to set up: AppRefer builds the link
+from the App Store id or package name your app already has in AppRefer (Billing or the store URL in app settings).
+
+- Neutral and optional: no stars, no "do you like the app?" question, no reward, never sent
+  automatically and never only to happy customers. The AI assistant can only suggest one in a draft
+  for a person to send.
+- The SDK opens only `https://apps.apple.com/app/id<digits>?action=write-review` on iOS and `https://play.google.com/store/apps/details?id=<package>` on Android; anything else is shown as "no store page" and never opened.
+- The SDK never calls the store's in-app review prompt from the card: that prompt is limited by the
+  store and can silently show nothing, so both Apple and Google recommend a link for a button.
+- A tap records an `opened` receipt (same queue as offer cards; dropped by `reset()`/`clearIdentity()`).
+  It is never a review, a rating or a star count, and the chat never says a review was written.
+- A withdrawn, expired or changed card (store page or settings changed) shows "This review link is no
+  longer available"; a device with no store page for the app shows "There's no store page for this
+  device". AppRefer sends at most one card per customer every 120 days (configurable, 30–365).
+- Older SDK versions show your text plus a line asking the customer to update the app.
+
+0.12.0 is unreleased source (not tagged). Once tagged, install it from Git only: a pubspec `git:` dependency on `https://github.com/AppAgentic/apprefer-flutter-sdk.git` with `ref: 0.12.0` (not published to pub.dev).
 
 ### Languages and your own wording
 

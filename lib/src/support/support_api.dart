@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, SocketException;
 import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
@@ -8,6 +8,8 @@ import 'package:flutter/services.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
 import 'support_help.dart';
+import 'support_offers.dart';
+import 'support_reviews.dart';
 
 String newSupportMessageId() => List.generate(
   16,
@@ -34,6 +36,40 @@ class SupportException implements Exception {
   });
   @override
   String toString() => message;
+}
+
+/// The answer of `AppReferSDK.support.verifyIdentity`. [verified] true:
+/// Support may use this account's private details (plan, orders, credits) for
+/// this session. Otherwise [reason] says why: the server's `malformed`,
+/// `bad_signature`, `other_app`, `other_environment`, `expired`, `bad_times`,
+/// `already_used`, `user_mismatch`, `session_replaced`, `session_gone` (ask
+/// your backend for a new token), or the SDK's `account_changed` (the account
+/// changed while it ran) and `identity_cleared` (after `clearIdentity()`).
+@immutable
+class AppReferSupportIdentityVerification {
+  const AppReferSupportIdentityVerification({
+    required this.verified,
+    this.reason,
+    this.appUserId,
+  });
+  const AppReferSupportIdentityVerification.refused(String this.reason)
+    : verified = false,
+      appUserId = null;
+  final bool verified;
+  final String? reason;
+  final String? appUserId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AppReferSupportIdentityVerification &&
+      other.verified == verified &&
+      other.reason == reason &&
+      other.appUserId == appUserId;
+  @override
+  int get hashCode => Object.hash(verified, reason, appUserId);
+  @override
+  String toString() =>
+      'AppReferSupportIdentityVerification(verified: $verified, reason: $reason, appUserId: $appUserId)';
 }
 
 /// The app's AI support assistant, set in AppRefer. Every message from it is tagged "AI".
@@ -149,6 +185,7 @@ class SupportAPI {
     } catch (_) {}
     return null;
   }
+
   int _generation = 0;
   int get actionGeneration => _generation;
   final Future<List<String>> Function() keys;
@@ -617,6 +654,9 @@ class SupportAPI {
     );
     request.headers['X-AppRefer-Key'] = key;
     if (token != null) request.headers['X-AppRefer-Support-Session'] = token;
+    // This chat draws offer cards; with `onOffer` set the app also opens its paywall from them.
+    request.headers['X-AppRefer-Support-Features'] =
+        SupportOffers.featuresHeader;
     if (body != null) {
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
@@ -644,6 +684,87 @@ class SupportAPI {
       );
     }
     return data;
+  }
+
+  /// Waits between verification attempts after a network or server failure
+  /// (tests shorten it).
+  @visibleForTesting
+  List<Duration> verifyRetryDelays = const [
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 1500),
+  ];
+
+  /// Verifies the current session for the app user id the app's backend
+  /// vouched for with [identityToken] (single use). The token is only sent,
+  /// never stored or logged. Network and server failures are retried with the
+  /// same token (the server acknowledges a retry from the same session), then
+  /// thrown. A reset(), clearIdentity() or another stored user id while it
+  /// runs answers `account_changed`, never a verification for the new account.
+  Future<AppReferSupportIdentityVerification> verifyIdentity(
+    String identityToken,
+  ) async {
+    final token = identityToken.trim();
+    if (token.isEmpty || token.length > 2048) {
+      return const AppReferSupportIdentityVerification.refused('malformed');
+    }
+    if (await identityCleared()) {
+      return const AppReferSupportIdentityVerification.refused(
+        'identity_cleared',
+      );
+    }
+    const changed = AppReferSupportIdentityVerification.refused(
+      'account_changed',
+    );
+    final epoch = _generation;
+    final user = (await profile())['appUserId'];
+    for (var attempt = 0; ; attempt++) {
+      Map<String, dynamic> response;
+      try {
+        response = await call('POST', '/session/identity', {
+          'identityToken': token,
+        }, epoch);
+      } on SupportException catch (e) {
+        if (epoch != _generation) return changed;
+        final transient =
+            e.status == 0 ||
+            e.status == 408 ||
+            e.status == 429 ||
+            e.status >= 500;
+        if (!transient || attempt >= verifyRetryDelays.length) rethrow;
+        await Future<void>.delayed(verifyRetryDelays[attempt]);
+        continue;
+      } on Exception catch (e) {
+        if (epoch != _generation) return changed;
+        final network =
+            e is http.ClientException ||
+            e is TimeoutException ||
+            e is SocketException;
+        if (!network) rethrow;
+        if (attempt >= verifyRetryDelays.length) {
+          throw SupportException(
+            0,
+            'Network error: $e',
+            reason: SupportErrorReason.unavailable,
+          );
+        }
+        await Future<void>.delayed(verifyRetryDelays[attempt]);
+        continue;
+      }
+      if (epoch != _generation ||
+          await identityCleared() ||
+          (await profile())['appUserId'] != user) {
+        return changed;
+      }
+      final identity = response['identity'] is Map
+          ? Map<String, dynamic>.from(response['identity'] as Map)
+          : const <String, dynamic>{};
+      final verified = identity['verified'] == true;
+      return AppReferSupportIdentityVerification(
+        verified: verified,
+        reason: verified ? null : (identity['reason'] as String? ?? 'unknown'),
+        appUserId: identity['appUserId'] as String?,
+      );
+    }
   }
 
   Future<void> ensureSession() async {
@@ -838,9 +959,10 @@ class SupportAPI {
 
   Future<Map<String, dynamic>> thread(String id, {String? after}) async {
     final epoch = _generation;
+    // The platform picks which store's products an offer card lists.
     final thread = await call(
       'GET',
-      '/conversations/${Uri.encodeComponent(id)}${after == null ? '' : '?after=${Uri.encodeQueryComponent(after)}'}',
+      '/conversations/${Uri.encodeComponent(id)}?platform=$_platform${after == null ? '' : '&after=${Uri.encodeQueryComponent(after)}'}',
     );
     if (epoch != _generation)
       throw SupportException(
@@ -850,6 +972,100 @@ class SupportAPI {
       );
     persona.value = AppReferSupportPersona.fromJson(thread['persona']);
     return thread;
+  }
+
+  String get _platform => isIOS ? 'ios' : 'android';
+
+  /// Every offer card in a conversation with its state now (after a
+  /// purchase, restore, sign-in, catalogue change or reopening the chat),
+  /// without reloading the messages.
+  Future<List<AppReferSupportOfferCard>> offerCards(String id) async {
+    final data = await call(
+      'GET',
+      '/conversations/${Uri.encodeComponent(id)}/offers?platform=$_platform',
+    );
+    return [
+      for (final o
+          in (data['offers'] is List ? data['offers'] as List : const []))
+        if (AppReferSupportOfferCard.fromJson(o) case final card?) card,
+    ];
+  }
+
+  /// Every review card in a conversation with its state now (withdrawn,
+  /// expired, store page changed).
+  Future<List<AppReferSupportReviewCard>> reviewCards(String id) async {
+    final data = await call(
+      'GET',
+      '/conversations/${Uri.encodeComponent(id)}/reviews?platform=$_platform',
+    );
+    return [
+      for (final o
+          in (data['reviews'] is List ? data['reviews'] as List : const []))
+        if (AppReferSupportReviewCard.fromJson(o) case final card?) card,
+    ];
+  }
+
+  /// Sends one receipt. Throws on network or server failure; a 4xx other
+  /// than 408/429 is final. Review cards (`rvc_…`) share this queue and post
+  /// to their own route.
+  Future<AppReferSupportOfferCard?> sendOfferReceipt(
+    SupportOfferReceipt r,
+  ) async {
+    final kind = r.cardId.startsWith('rvc_') ? 'reviews' : 'offers';
+    final data = await call(
+      'POST',
+      '/conversations/${Uri.encodeComponent(r.conversationId)}/$kind/${Uri.encodeComponent(r.cardId)}/events?platform=$_platform',
+      {
+        'kind': r.kind,
+        'clientEventId': r.clientEventId,
+        'occurredAt': r.occurredAt,
+      },
+    );
+    return AppReferSupportOfferCard.fromJson(data['offer']);
+  }
+
+  /// Receipts waiting to be sent, kept with the session in the same store.
+  late final SupportOfferReceipts offerReceipts = SupportOfferReceipts(
+    read: read,
+    write: write,
+  );
+
+  /// Sends every queued receipt once; keeps the ones that failed for a
+  /// transient reason.
+  Future<void> flushOfferReceipts([SupportOfferReceipts? queue]) async {
+    final q = queue ?? offerReceipts;
+    final List<SupportOfferReceipt> waiting;
+    try {
+      waiting = await q.pending;
+    } catch (_) {
+      return; // Storage unavailable: tried again next time.
+    }
+    for (final r in waiting) {
+      Object? error;
+      try {
+        await sendOfferReceipt(r);
+      } catch (e) {
+        error = e;
+      }
+      try {
+        if (error is SupportException &&
+            error.reason == SupportErrorReason.reset)
+          return;
+        final finalRefusal =
+            error is SupportException &&
+            error.status >= 400 &&
+            error.status < 500 &&
+            error.status != 408 &&
+            error.status != 429;
+        if (error == null || finalRefusal) {
+          await q.remove(r);
+        } else {
+          await q.failed(r);
+        }
+      } catch (_) {
+        return; // Storage unavailable: tried again next time.
+      }
+    }
   }
 
   Future<Map<String, dynamic>> start(

@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
-import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/foundation.dart'
+    show listEquals, mapEquals, visibleForTesting;
+import '../billing/apprefer_billing.dart' show AppReferBilling;
 import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -13,11 +15,23 @@ import '../services/storage.dart';
 import '../services/logger.dart';
 import 'support_api.dart';
 import 'support_help.dart';
+import 'support_offers.dart';
+import 'support_reviews.dart';
 import 'support_strings.dart';
 import 'support_style.dart';
 
 export 'support_api.dart'
-    show AppReferSupportPersona, SupportException, SupportErrorReason;
+    show
+        AppReferSupportPersona,
+        AppReferSupportIdentityVerification,
+        SupportException,
+        SupportErrorReason;
+export 'support_offers.dart'
+    show
+        AppReferSupportOffer,
+        AppReferSupportOfferCard,
+        AppReferSupportOfferPackage;
+export 'support_reviews.dart' show AppReferSupportReviewCard;
 export 'support_help.dart'
     show
         AppReferHelpArticle,
@@ -33,7 +47,12 @@ class AppReferSupport with WidgetsBindingObserver {
   }
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) api.resumeRevocations();
+    if (state == AppLifecycleState.resumed) {
+      api.resumeRevocations();
+      // Offer-card receipts made offline go out when the app is back.
+      if (api.apiKey() != null)
+        unawaited(api.flushOfferReceipts().catchError((_) {}));
+    }
   }
 
   static final instance = AppReferSupport._();
@@ -48,6 +67,8 @@ class AppReferSupport with WidgetsBindingObserver {
 
   Future<void> reset() async {
     await api.reset();
+    // Offer-card receipts belong to the retired session; never sent for another account.
+    await _clearOfferReceipts();
     final route = _presented;
     if (route != null && route.isActive)
       _presentingNavigator?.removeRoute(route);
@@ -70,6 +91,7 @@ class AppReferSupport with WidgetsBindingObserver {
     await storage.init();
     await storage.setSupportIdentityCleared(true);
     await api.clearIdentity();
+    await _clearOfferReceipts();
     final route = _presented;
     if (route != null && route.isActive)
       _presentingNavigator?.removeRoute(route);
@@ -83,8 +105,58 @@ class AppReferSupport with WidgetsBindingObserver {
     }
   }
 
+  /// Clearing receipts never blocks reset() or clearIdentity(): a store that
+  /// can't be written leaves at most a few receipts the server refuses (404),
+  /// since they name the retired session's conversations.
+  Future<void> _clearOfferReceipts() async {
+    try {
+      await api.offerReceipts.clear();
+    } catch (_) {}
+  }
+
   /// Set this to the host MaterialApp navigatorKey for context-free push routing.
   GlobalKey<NavigatorState>? navigatorKey;
+
+  /// Opens your app's own paywall when the customer taps an offer card your
+  /// team (or AI assistant) sent in the chat. Set it once at startup:
+  ///
+  /// ```dart
+  /// AppReferSDK.support.onOffer = (offer) =>
+  ///     navigatorKey.currentState?.push(PaywallRoute(offer.offeringId, offer.packageId));
+  /// ```
+  ///
+  /// The card shows your offering's packages with the store's own prices; the
+  /// SDK never shows a paywall or starts a purchase itself. Without `onOffer`,
+  /// cards say they can't be opened in this version of the app. With
+  /// [closesChatOnOffer] (the default) the chat opened with `open()` or
+  /// `compose()` closes first.
+  void Function(AppReferSupportOffer offer)? get onOffer => _onOffer;
+  set onOffer(void Function(AppReferSupportOffer offer)? value) {
+    _onOffer = value;
+    SupportOffers.hasHandler = value != null;
+  }
+
+  void Function(AppReferSupportOffer offer)? _onOffer;
+
+  /// Close the chat before [onOffer] runs (default true). Set false when your
+  /// paywall can show over the chat, or you embed `AppReferSupportView`.
+  bool closesChatOnOffer = true;
+
+  /// Hands a tapped card to [onOffer], closing the chat first when it was
+  /// opened by the SDK and [closesChatOnOffer] is on. False when the app set
+  /// no `onOffer`.
+  @visibleForTesting
+  bool deliverOffer(AppReferSupportOffer offer) {
+    final handler = _onOffer;
+    if (handler == null) return false;
+    final route = _presented;
+    if (closesChatOnOffer && route != null && route.isActive) {
+      _presentingNavigator?.removeRoute(route);
+      _presented = null;
+    }
+    handler(offer);
+    return true;
+  }
 
   /// Bubble and button colour. Defaults to the host theme's primary colour.
   Color? accentColor;
@@ -184,6 +256,21 @@ class AppReferSupport with WidgetsBindingObserver {
   /// isn't published.
   Future<AppReferHelpArticleDetail> article(String slug) =>
       api.help.article(slug, SupportStrings.language);
+
+  /// Confirms who the customer is, so your team and the AI assistant may use
+  /// the account's private details (plan, orders, credits). Your backend,
+  /// after signing the user in, asks AppRefer for a short-lived single-use
+  /// token (`POST /api/v1/apps/{appId}/support/identity-tokens` with your
+  /// private key; never ship that key in the app) and passes it here. It
+  /// verifies the current Support session, so conversations already started
+  /// on it count too. Call it after `AppReferSDK.setUserId` with the same
+  /// user; `reset()`, `clearIdentity()` or another account ends it. Network
+  /// failures are retried with the same token and then thrown (retrying the
+  /// same token later is safe); a refusal returns `verified == false` with a
+  /// reason. `identify(name:, email:)` is unchanged.
+  Future<AppReferSupportIdentityVerification> verifyIdentity(
+    String identityToken,
+  ) => api.verifyIdentity(identityToken);
 
   /// What Support can do for this app: whether reply notifications work on
   /// this platform (`pushReady`), whether customers can answer by email
@@ -457,6 +544,19 @@ class _SupportViewState extends State<AppReferSupportView>
   /// How the team's reply will reach the customer.
   SupportReplyNotice notice = SupportReplyNotice.push;
 
+  // Offer cards: each card's latest state, store prices by offering then
+  // package, the card being opened and the cards already reported as shown.
+  final Map<String, AppReferSupportOfferCard> offerCards = {};
+  Map<String, Map<String, SupportOfferPrice>> offerPrices = const {};
+  String? openingCard;
+  final Set<String> shownCards = {};
+  DateTime _lastOfferRefresh = DateTime.fromMillisecondsSinceEpoch(0);
+  StreamSubscription<Object?>? _billingChanges;
+  late final SupportOfferOpener offerOpener = SupportOfferOpener(
+    queue: api.offerReceipts,
+    send: api.sendOfferReceipt,
+  );
+
   @override
   void initState() {
     super.initState();
@@ -492,6 +592,12 @@ class _SupportViewState extends State<AppReferSupportView>
     }
     _refresh();
     _timer();
+    // Offer cards follow purchases, restores and sign-ins as Billing reports them.
+    if (AppReferBilling.isConfigured) {
+      _billingChanges = AppReferBilling.customerInfoStream.listen(
+        (_) => _refreshOffers(),
+      );
+    }
   }
 
   void _accountReset() {
@@ -521,6 +627,11 @@ class _SupportViewState extends State<AppReferSupportView>
       articleDetail = null;
       articleBlocks = [];
       notice = SupportReplyNotice.push;
+      offerCards.clear();
+      offerPrices = const {};
+      openingCard = null;
+      shownCards.clear();
+      reviewCards.clear();
     });
   }
 
@@ -569,11 +680,566 @@ class _SupportViewState extends State<AppReferSupportView>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     active = state == AppLifecycleState.resumed;
     _timer();
-    if (active) _refresh();
+    if (active) {
+      _refresh();
+      _refreshOffers();
+    }
+  }
+
+  /// Prices for the offerings on screen, from AppRefer Billing when the app
+  /// uses it.
+  Future<void> _loadOfferPrices() async {
+    final ids = {for (final c in offerCards.values) c.offeringId};
+    final loaded = await supportOfferPrices(ids);
+    if (!mounted || mapEquals(loaded, offerPrices)) return;
+    final same =
+        loaded.length == offerPrices.length &&
+        loaded.entries.every((e) => mapEquals(e.value, offerPrices[e.key]));
+    if (!same) setState(() => offerPrices = loaded);
+  }
+
+  /// Fresh states for every card here, after a purchase, restore, sign-in,
+  /// catalogue change or coming back to the app (and every 30 s while the
+  /// chat is open); also re-reads store prices.
+  Future<void> _refreshOffers({bool force = true}) async {
+    final current = id;
+    if (current == null || (offerCards.isEmpty && reviewCards.isEmpty)) return;
+    if (!force &&
+        DateTime.now().difference(_lastOfferRefresh) <
+            const Duration(seconds: 30))
+      return;
+    _lastOfferRefresh = DateTime.now();
+    await _refreshReviews();
+    if (offerCards.isEmpty) return;
+    final epoch = generation;
+    try {
+      final cards = await api.offerCards(current);
+      if (!mounted || id != current || generation != epoch) return;
+      setState(() {
+        for (final c in cards) {
+          offerCards[c.cardId] = c;
+        }
+      });
+      await _loadOfferPrices();
+    } catch (_) {
+      // Shown as last read; the next refresh tries again.
+    }
+  }
+
+  /// "View offer": checked with the server, then handed to the app's paywall.
+  /// A refusal redraws the card instead.
+  Future<void> _openOffer(AppReferSupportOfferCard card) async {
+    final conversation = id;
+    if (conversation == null ||
+        openingCard != null ||
+        !card.isAvailable ||
+        !SupportOffers.hasHandler)
+      return;
+    final epoch = generation, account = api.actionGeneration;
+    setState(() => openingCard = card.cardId);
+    final SupportOfferOpenCheck outcome;
+    try {
+      outcome = await offerOpener.check(
+        offerOpener.receipt(card, conversation),
+      );
+    } finally {
+      if (mounted) setState(() => openingCard = null);
+    }
+    if (!mounted ||
+        generation != epoch ||
+        account != api.actionGeneration ||
+        id != conversation)
+      return;
+    switch (outcome) {
+      case SupportOfferRefused():
+        await _refreshOffers();
+        return;
+      case SupportOfferRecorded(:final card?):
+        setState(() => offerCards[card.cardId] = card);
+      case _:
+        break;
+    }
+    config.deliverOffer(
+      AppReferSupportOffer(
+        cardId: card.cardId,
+        conversationId: conversation,
+        offeringId: card.offeringId,
+        packageId: card.packageId,
+      ),
+    );
+  }
+
+  // Review cards: each card's latest state by card id.
+  final Map<String, AppReferSupportReviewCard> reviewCards = {};
+
+  /// Fresh review card states (withdrawn, expired, store page changed).
+  Future<void> _refreshReviews() async {
+    final current = id;
+    if (current == null || reviewCards.isEmpty) return;
+    final epoch = generation;
+    try {
+      final cards = await api.reviewCards(current);
+      if (!mounted || id != current || generation != epoch) return;
+      setState(() {
+        for (final c in cards) {
+          reviewCards[c.cardId] = c;
+        }
+      });
+    } catch (_) {
+      // Shown as last read; the next refresh tries again.
+    }
+  }
+
+  /// "Write a review": checked with the server (at most 3 s), then the store
+  /// page opens through the system URL opener. A refusal redraws instead.
+  Future<void> _openReview(AppReferSupportReviewCard card) async {
+    final conversation = id;
+    final look = SupportReviewLook.of(card, ios: api.isIOS);
+    if (conversation == null ||
+        openingCard != null ||
+        look is! SupportReviewOpen)
+      return;
+    final epoch = generation, account = api.actionGeneration;
+    setState(() => openingCard = card.cardId);
+    final SupportOfferOpenCheck outcome;
+    try {
+      outcome = await offerOpener.check(
+        offerOpener.receiptFor(card.cardId, conversation),
+      );
+    } finally {
+      if (mounted) setState(() => openingCard = null);
+    }
+    if (!mounted ||
+        generation != epoch ||
+        account != api.actionGeneration ||
+        id != conversation)
+      return;
+    if (outcome is SupportOfferRefused) {
+      await _refreshReviews();
+      return;
+    }
+    unawaited(
+      supportChannel
+          .invokeMethod<bool>('openUrl', look.url)
+          .then<void>((_) {}, onError: (_) {}),
+    );
+  }
+
+  void _reviewShown(AppReferSupportReviewCard card) {
+    final conversation = id;
+    if (conversation == null || !shownCards.add(card.cardId)) return;
+    unawaited(() async {
+      try {
+        await api.offerReceipts.enqueue(
+          SupportOfferReceipt(
+            conversationId: conversation,
+            cardId: card.cardId,
+            kind: 'shown',
+            clientEventId: SupportReviewLink.shownId(card.cardId),
+            occurredAt: SupportOfferReceipt.iso(DateTime.now()),
+          ),
+        );
+        await api.flushOfferReceipts();
+      } catch (_) {
+        // A receipt is reporting only; the card works without it.
+      }
+    }());
+  }
+
+  /// A review card under a team message: heading, one neutral line naming the
+  /// store, and "Write a review". No stars, no rating question.
+  Widget _reviewCard(AppReferSupportReviewCard card) {
+    final look = SupportReviewLook.of(card, ios: api.isIOS);
+    final active = look is SupportReviewOpen;
+    final tint = active ? palette.accent : colors.muted;
+    final store = SupportReviewLink.storeKey(
+      card.store ?? (api.isIOS ? 'app_store' : 'play_store'),
+    );
+    final opening = openingCard == card.cardId;
+    if (!shownCards.contains(card.cardId)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _reviewShown(card);
+      });
+    }
+    return Opacity(
+      opacity: active ? 1 : 0.85,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: colors.card,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: active
+                ? palette.accent.withValues(alpha: 0.22)
+                : colors.primary.withValues(alpha: 0.06),
+          ),
+          boxShadow: _shadow(0.07, 10, 3),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                ExcludeSemantics(
+                  child: Container(
+                    width: 26,
+                    height: 26,
+                    decoration: BoxDecoration(
+                      color: tint.withValues(alpha: 0.13),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.rate_review_outlined,
+                      size: 14,
+                      color: tint,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Semantics(
+                    header: true,
+                    child: Text(
+                      SupportStrings.text('support.review.title'),
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: colors.primary,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (active) ...[
+              Text(
+                SupportStrings.text('support.review.body.$store'),
+                style: TextStyle(
+                  fontSize: 14.5,
+                  color: colors.primary.withValues(alpha: 0.85),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Semantics(
+                button: true,
+                enabled: !opening,
+                hint: SupportStrings.text('support.review.a11y.hint.$store'),
+                child: _Pressable(
+                  onTap: opening ? () {} : () => _openReview(card),
+                  child: Container(
+                    height: 46,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      gradient: palette.bubble,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (opening) ...[
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: palette.onAccent,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        Text(
+                          SupportStrings.text('support.review.open'),
+                          style: TextStyle(
+                            fontSize: 15.5,
+                            fontWeight: FontWeight.w600,
+                            color: palette.onAccent,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ] else
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ExcludeSemantics(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Icon(
+                        Icons.info_outline_rounded,
+                        size: 14,
+                        color: colors.muted,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      SupportStrings.text(
+                        look is SupportReviewUnavailable
+                            ? 'support.review.unavailable'
+                            : 'support.review.unsupported',
+                      ),
+                      style: TextStyle(fontSize: 13.5, color: colors.muted),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _cardShown(AppReferSupportOfferCard card) {
+    final conversation = id;
+    if (conversation == null || !shownCards.add(card.cardId)) return;
+    unawaited(() async {
+      try {
+        await api.offerReceipts.enqueue(
+          SupportOfferReceipt(
+            conversationId: conversation,
+            cardId: card.cardId,
+            kind: 'shown',
+            clientEventId: SupportOfferReceipt.shownId(card.cardId),
+            occurredAt: SupportOfferReceipt.iso(DateTime.now()),
+          ),
+        );
+        await api.flushOfferReceipts();
+      } catch (_) {
+        // A receipt is reporting only; the card works without it.
+      }
+    }());
+  }
+
+  /// An offer card under a team or AI message: heading, the packages with
+  /// the store's prices (and "Current plan"), and one button that hands the
+  /// offer to the app's paywall. Disabled cards say why.
+  Widget _offerCard(AppReferSupportOfferCard card) {
+    final look = SupportOfferLook.of(card, SupportOffers.hasHandler);
+    final active = look == SupportOfferLook.open;
+    final tint = active ? palette.accent : colors.muted;
+    final rows = card.status == 'unavailable'
+        ? const <AppReferSupportOfferPackage>[]
+        : card.shownPackages;
+    final prices = offerPrices[card.offeringId] ?? const {};
+    final opening = openingCard == card.cardId;
+    if (!shownCards.contains(card.cardId)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _cardShown(card);
+      });
+    }
+    return Opacity(
+      opacity: look == SupportOfferLook.unavailable ? 0.85 : 1,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: colors.card,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: active
+                ? palette.accent.withValues(alpha: 0.22)
+                : colors.primary.withValues(alpha: 0.06),
+          ),
+          boxShadow: _shadow(0.07, 10, 3),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                ExcludeSemantics(
+                  child: Container(
+                    width: 26,
+                    height: 26,
+                    decoration: BoxDecoration(
+                      color: tint.withValues(alpha: 0.13),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.local_offer_rounded,
+                      size: 14,
+                      color: tint,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Semantics(
+                    header: true,
+                    child: Text(
+                      SupportStrings.text('support.offer.title'),
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: colors.primary,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (rows.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  color: colors.primary.withValues(
+                    alpha: colors.dark ? 0.06 : 0.035,
+                  ),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Column(
+                  children: [
+                    for (final (i, p) in rows.indexed) ...[
+                      if (i > 0)
+                        Divider(
+                          height: 1,
+                          thickness: 1,
+                          color: colors.primary.withValues(alpha: 0.08),
+                        ),
+                      _offerRow(p, prices[p.id]),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            if (look.notice case final notice?)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ExcludeSemantics(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Icon(
+                        look == SupportOfferLook.owned
+                            ? Icons.check_circle_rounded
+                            : Icons.info_outline_rounded,
+                        size: 14,
+                        color: colors.muted,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      notice,
+                      style: TextStyle(fontSize: 13.5, color: colors.muted),
+                    ),
+                  ),
+                ],
+              )
+            else
+              Semantics(
+                button: true,
+                enabled: !opening,
+                hint: SupportStrings.text('support.offer.a11y.hint'),
+                child: _Pressable(
+                  onTap: opening ? () {} : () => _openOffer(card),
+                  child: Container(
+                    height: 46,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      gradient: palette.bubble,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (opening) ...[
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: palette.onAccent,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        Text(
+                          SupportStrings.text('support.offer.open'),
+                          style: TextStyle(
+                            fontSize: 15.5,
+                            fontWeight: FontWeight.w600,
+                            color: palette.onAccent,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _offerRow(AppReferSupportOfferPackage p, SupportOfferPrice? price) {
+    final label = supportOfferLabel(p, price?.name);
+    final tag = supportOfferOwnedTag(p, price);
+    return MergeSemantics(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 11),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
+                  color: colors.primary,
+                ),
+              ),
+            ),
+            if (tag != null) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: palette.accent.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(99),
+                ),
+                child: Text(
+                  tag,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: palette.accent,
+                  ),
+                ),
+              ),
+            ],
+            if (price != null) ...[
+              const SizedBox(width: 8),
+              Text(
+                supportOfferPriceText(price),
+                textAlign: TextAlign.end,
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: colors.primary,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   void dispose() {
+    _billingChanges?.cancel();
     timer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     api.persona.removeListener(_changed);
@@ -631,12 +1297,21 @@ class _SupportViewState extends State<AppReferSupportView>
                 pollCursor = timestamp;
               }
               if (!messages.any((old) => old['id'] == m['id'])) messages.add(m);
+              final card = AppReferSupportOfferCard.fromJson(m['offer']);
+              if (card != null) offerCards[card.cardId] = card;
+              final review = AppReferSupportReviewCard.fromJson(m['review']);
+              if (review != null) reviewCards[review.cardId] = review;
             }
             messages.sort(
               (a, b) => '${a['createdAt']}'.compareTo('${b['createdAt']}'),
             );
           });
           if (messages.length != count) _bottom();
+          if (count == 0) unawaited(api.flushOfferReceipts());
+          if (offerCards.isNotEmpty) unawaited(_loadOfferPrices());
+          if (offerCards.isNotEmpty || reviewCards.isNotEmpty) {
+            unawaited(_refreshOffers(force: false));
+          }
         }
       }
       if (mounted) setState(() => loadError = '');
@@ -3160,6 +3835,56 @@ class _SupportViewState extends State<AppReferSupportView>
   }
 
   Widget _message(int i) {
+    final m = messages[i];
+    final raw = AppReferSupportOfferCard.fromJson(m['offer']);
+    final rawReview = raw == null
+        ? AppReferSupportReviewCard.fromJson(m['review'])
+        : null;
+    if (raw == null && rawReview == null) return _bubble(i);
+    if (rawReview != null) {
+      final review = reviewCards[rawReview.cardId] ?? rawReview;
+      final words = '${m['text'] ?? ''}';
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (words.isNotEmpty) ...[_bubble(i), const SizedBox(height: 8)],
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 38),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 340),
+                child: _reviewCard(review),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    final card = offerCards[raw!.cardId] ?? raw;
+    final text = '${m['text'] ?? ''}';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (text.isNotEmpty || m['from'] == 'bot') ...[
+          _bubble(i),
+          const SizedBox(height: 8),
+        ],
+        Padding(
+          padding: const EdgeInsetsDirectional.only(start: 38),
+          child: Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 340),
+              child: _offerCard(card),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _bubble(int i) {
     final m = messages[i];
     final lastOfGroup =
         i == messages.length - 1 || !_sameSide(i, i + 1) || _showsTime(i + 1);
