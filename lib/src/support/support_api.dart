@@ -9,6 +9,7 @@ import '../services/registry.dart';
 import '../services/storage.dart';
 import 'support_help.dart';
 import 'support_offers.dart';
+import 'support_reviews.dart';
 
 String newSupportMessageId() => List.generate(
   16,
@@ -990,14 +991,30 @@ class SupportAPI {
     ];
   }
 
+  /// Every review card in a conversation with its state now (withdrawn,
+  /// expired, store page changed).
+  Future<List<AppReferSupportReviewCard>> reviewCards(String id) async {
+    final data = await call(
+      'GET',
+      '/conversations/${Uri.encodeComponent(id)}/reviews?platform=$_platform',
+    );
+    return [
+      for (final o
+          in (data['reviews'] is List ? data['reviews'] as List : const []))
+        if (AppReferSupportReviewCard.fromJson(o) case final card?) card,
+    ];
+  }
+
   /// Sends one receipt. Throws on network or server failure; a 4xx other
-  /// than 408/429 is final.
+  /// than 408/429 is final. Review cards (`rvc_…`) share this queue and post
+  /// to their own route.
   Future<AppReferSupportOfferCard?> sendOfferReceipt(
     SupportOfferReceipt r,
   ) async {
+    final kind = r.cardId.startsWith('rvc_') ? 'reviews' : 'offers';
     final data = await call(
       'POST',
-      '/conversations/${Uri.encodeComponent(r.conversationId)}/offers/${Uri.encodeComponent(r.cardId)}/events?platform=$_platform',
+      '/conversations/${Uri.encodeComponent(r.conversationId)}/$kind/${Uri.encodeComponent(r.cardId)}/events?platform=$_platform',
       {
         'kind': r.kind,
         'clientEventId': r.clientEventId,

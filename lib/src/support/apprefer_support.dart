@@ -16,6 +16,7 @@ import '../services/logger.dart';
 import 'support_api.dart';
 import 'support_help.dart';
 import 'support_offers.dart';
+import 'support_reviews.dart';
 import 'support_strings.dart';
 import 'support_style.dart';
 
@@ -30,6 +31,7 @@ export 'support_offers.dart'
         AppReferSupportOffer,
         AppReferSupportOfferCard,
         AppReferSupportOfferPackage;
+export 'support_reviews.dart' show AppReferSupportReviewCard;
 export 'support_help.dart'
     show
         AppReferHelpArticle,
@@ -629,6 +631,7 @@ class _SupportViewState extends State<AppReferSupportView>
       offerPrices = const {};
       openingCard = null;
       shownCards.clear();
+      reviewCards.clear();
     });
   }
 
@@ -700,12 +703,14 @@ class _SupportViewState extends State<AppReferSupportView>
   /// chat is open); also re-reads store prices.
   Future<void> _refreshOffers({bool force = true}) async {
     final current = id;
-    if (current == null || offerCards.isEmpty) return;
+    if (current == null || (offerCards.isEmpty && reviewCards.isEmpty)) return;
     if (!force &&
         DateTime.now().difference(_lastOfferRefresh) <
             const Duration(seconds: 30))
       return;
     _lastOfferRefresh = DateTime.now();
+    await _refreshReviews();
+    if (offerCards.isEmpty) return;
     final epoch = generation;
     try {
       final cards = await api.offerCards(current);
@@ -760,6 +765,231 @@ class _SupportViewState extends State<AppReferSupportView>
         conversationId: conversation,
         offeringId: card.offeringId,
         packageId: card.packageId,
+      ),
+    );
+  }
+
+  // Review cards: each card's latest state by card id.
+  final Map<String, AppReferSupportReviewCard> reviewCards = {};
+
+  /// Fresh review card states (withdrawn, expired, store page changed).
+  Future<void> _refreshReviews() async {
+    final current = id;
+    if (current == null || reviewCards.isEmpty) return;
+    final epoch = generation;
+    try {
+      final cards = await api.reviewCards(current);
+      if (!mounted || id != current || generation != epoch) return;
+      setState(() {
+        for (final c in cards) {
+          reviewCards[c.cardId] = c;
+        }
+      });
+    } catch (_) {
+      // Shown as last read; the next refresh tries again.
+    }
+  }
+
+  /// "Write a review": checked with the server (at most 3 s), then the store
+  /// page opens through the system URL opener. A refusal redraws instead.
+  Future<void> _openReview(AppReferSupportReviewCard card) async {
+    final conversation = id;
+    final look = SupportReviewLook.of(card, ios: api.isIOS);
+    if (conversation == null ||
+        openingCard != null ||
+        look is! SupportReviewOpen)
+      return;
+    final epoch = generation, account = api.actionGeneration;
+    setState(() => openingCard = card.cardId);
+    final SupportOfferOpenCheck outcome;
+    try {
+      outcome = await offerOpener.check(
+        offerOpener.receiptFor(card.cardId, conversation),
+      );
+    } finally {
+      if (mounted) setState(() => openingCard = null);
+    }
+    if (!mounted ||
+        generation != epoch ||
+        account != api.actionGeneration ||
+        id != conversation)
+      return;
+    if (outcome is SupportOfferRefused) {
+      await _refreshReviews();
+      return;
+    }
+    unawaited(
+      supportChannel
+          .invokeMethod<bool>('openUrl', look.url)
+          .then<void>((_) {}, onError: (_) {}),
+    );
+  }
+
+  void _reviewShown(AppReferSupportReviewCard card) {
+    final conversation = id;
+    if (conversation == null || !shownCards.add(card.cardId)) return;
+    unawaited(() async {
+      try {
+        await api.offerReceipts.enqueue(
+          SupportOfferReceipt(
+            conversationId: conversation,
+            cardId: card.cardId,
+            kind: 'shown',
+            clientEventId: SupportReviewLink.shownId(card.cardId),
+            occurredAt: SupportOfferReceipt.iso(DateTime.now()),
+          ),
+        );
+        await api.flushOfferReceipts();
+      } catch (_) {
+        // A receipt is reporting only; the card works without it.
+      }
+    }());
+  }
+
+  /// A review card under a team message: heading, one neutral line naming the
+  /// store, and "Write a review". No stars, no rating question.
+  Widget _reviewCard(AppReferSupportReviewCard card) {
+    final look = SupportReviewLook.of(card, ios: api.isIOS);
+    final active = look is SupportReviewOpen;
+    final tint = active ? palette.accent : colors.muted;
+    final store = SupportReviewLink.storeKey(
+      card.store ?? (api.isIOS ? 'app_store' : 'play_store'),
+    );
+    final opening = openingCard == card.cardId;
+    if (!shownCards.contains(card.cardId)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _reviewShown(card);
+      });
+    }
+    return Opacity(
+      opacity: active ? 1 : 0.85,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: colors.card,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: active
+                ? palette.accent.withValues(alpha: 0.22)
+                : colors.primary.withValues(alpha: 0.06),
+          ),
+          boxShadow: _shadow(0.07, 10, 3),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                ExcludeSemantics(
+                  child: Container(
+                    width: 26,
+                    height: 26,
+                    decoration: BoxDecoration(
+                      color: tint.withValues(alpha: 0.13),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.rate_review_outlined,
+                      size: 14,
+                      color: tint,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Semantics(
+                    header: true,
+                    child: Text(
+                      SupportStrings.text('support.review.title'),
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: colors.primary,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (active) ...[
+              Text(
+                SupportStrings.text('support.review.body.$store'),
+                style: TextStyle(
+                  fontSize: 14.5,
+                  color: colors.primary.withValues(alpha: 0.85),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Semantics(
+                button: true,
+                enabled: !opening,
+                hint: SupportStrings.text('support.review.a11y.hint.$store'),
+                child: _Pressable(
+                  onTap: opening ? () {} : () => _openReview(card),
+                  child: Container(
+                    height: 46,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      gradient: palette.bubble,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (opening) ...[
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: palette.onAccent,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        Text(
+                          SupportStrings.text('support.review.open'),
+                          style: TextStyle(
+                            fontSize: 15.5,
+                            fontWeight: FontWeight.w600,
+                            color: palette.onAccent,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ] else
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ExcludeSemantics(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Icon(
+                        Icons.info_outline_rounded,
+                        size: 14,
+                        color: colors.muted,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      SupportStrings.text(
+                        look is SupportReviewUnavailable
+                            ? 'support.review.unavailable'
+                            : 'support.review.unsupported',
+                      ),
+                      style: TextStyle(fontSize: 13.5, color: colors.muted),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1067,6 +1297,8 @@ class _SupportViewState extends State<AppReferSupportView>
               if (!messages.any((old) => old['id'] == m['id'])) messages.add(m);
               final card = AppReferSupportOfferCard.fromJson(m['offer']);
               if (card != null) offerCards[card.cardId] = card;
+              final review = AppReferSupportReviewCard.fromJson(m['review']);
+              if (review != null) reviewCards[review.cardId] = review;
             }
             messages.sort(
               (a, b) => '${a['createdAt']}'.compareTo('${b['createdAt']}'),
@@ -1074,8 +1306,8 @@ class _SupportViewState extends State<AppReferSupportView>
           });
           if (messages.length != count) _bottom();
           if (count == 0) unawaited(api.flushOfferReceipts());
-          if (offerCards.isNotEmpty) {
-            unawaited(_loadOfferPrices());
+          if (offerCards.isNotEmpty) unawaited(_loadOfferPrices());
+          if (offerCards.isNotEmpty || reviewCards.isNotEmpty) {
             unawaited(_refreshOffers(force: false));
           }
         }
@@ -3603,8 +3835,31 @@ class _SupportViewState extends State<AppReferSupportView>
   Widget _message(int i) {
     final m = messages[i];
     final raw = AppReferSupportOfferCard.fromJson(m['offer']);
-    if (raw == null) return _bubble(i);
-    final card = offerCards[raw.cardId] ?? raw;
+    final rawReview = raw == null
+        ? AppReferSupportReviewCard.fromJson(m['review'])
+        : null;
+    if (raw == null && rawReview == null) return _bubble(i);
+    if (rawReview != null) {
+      final review = reviewCards[rawReview.cardId] ?? rawReview;
+      final words = '${m['text'] ?? ''}';
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (words.isNotEmpty) ...[_bubble(i), const SizedBox(height: 8)],
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 38),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 340),
+                child: _reviewCard(review),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    final card = offerCards[raw!.cardId] ?? raw;
     final text = '${m['text'] ?? ''}';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

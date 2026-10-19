@@ -273,7 +273,7 @@ void main() {
       final calls = requests
           .where((r) => r.url.path != '/api/support/v1/session')
           .toList();
-      expect(calls[0].headers['X-AppRefer-Support-Features'], 'offers');
+      expect(calls[0].headers['X-AppRefer-Support-Features'], 'offers, reviews');
       expect(calls[0].url.queryParameters, {
         'platform': 'android',
         'after': '2026-10-19T12:00:00.000Z',
@@ -282,7 +282,7 @@ void main() {
       expect(calls[1].url.queryParameters, {'platform': 'android'});
       expect(
         calls[1].headers['X-AppRefer-Support-Features'],
-        'offers, offer-handler',
+        'offers, offer-handler, reviews',
       );
       expect(SupportOffers.hasHandler, isFalse);
     },

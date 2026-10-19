@@ -493,13 +493,16 @@ class SupportOfferOpener {
   SupportOfferReceipt receipt(
     AppReferSupportOfferCard card,
     String conversationId,
-  ) => SupportOfferReceipt(
-    conversationId: conversationId,
-    cardId: card.cardId,
-    kind: 'opened',
-    clientEventId: SupportOfferReceipt.eventId('open'),
-    occurredAt: SupportOfferReceipt.iso(_now()),
-  );
+  ) => receiptFor(card.cardId, conversationId);
+
+  SupportOfferReceipt receiptFor(String cardId, String conversationId) =>
+      SupportOfferReceipt(
+        conversationId: conversationId,
+        cardId: cardId,
+        kind: 'opened',
+        clientEventId: SupportOfferReceipt.eventId('open'),
+        occurredAt: SupportOfferReceipt.iso(_now()),
+      );
 
   Future<SupportOfferOpenCheck> check(SupportOfferReceipt r) async {
     // Kept on the device first so an offline tap still counts; a store that can't be written
@@ -526,8 +529,9 @@ class SupportOffers {
   SupportOffers._();
   static bool hasHandler = false;
 
-  /// `offers` (this SDK draws cards) and `offer-handler` (the app opens its
-  /// paywall from them).
+  /// `offers` (this SDK draws cards), `offer-handler` (the app opens its
+  /// paywall from them) and `reviews` (this SDK draws review cards and opens
+  /// the store page itself).
   static String get featuresHeader =>
-      hasHandler ? 'offers, offer-handler' : 'offers';
+      hasHandler ? 'offers, offer-handler, reviews' : 'offers, reviews';
 }
