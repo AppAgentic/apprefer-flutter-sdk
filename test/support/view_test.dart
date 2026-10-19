@@ -5,7 +5,8 @@ import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'dart:convert';
 import 'package:apprefer/apprefer.dart';
-import 'package:apprefer/src/support/support_style.dart' show SupportHeroPainter;
+import 'package:apprefer/src/support/support_style.dart'
+    show SupportAvatar, SupportHeroPainter, supportContinueAvatarKey;
 import 'package:apprefer/src/support/support_api.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -399,14 +400,23 @@ void main() {
           .whereType<SupportHeroPainter>()
           .single;
       final greeting = tester.widget<Text>(find.text('Hi María 👋'));
+      // The Continue card's avatar (0.11.2): neutral greys in plain, the
+      // accent's neighbours (tinted for white) in accent.
+      final avatar = tester.widget<SupportAvatar>(
+        find.byKey(supportContinueAvatarKey),
+      );
+      bool neutral(Color c) => c.r == c.g && c.g == c.b;
       if (style == AppReferSupportHeaderStyle.plain) {
         expect(painter.look.glows, isFalse);
         expect(painter.look.background, const Color(0xff1c1c1c));
         expect(greeting.style!.color, Colors.white);
+        expect(avatar.colors, const [Color(0xff6b6b6b), Color(0xff3a3a3a)]);
       } else {
         expect(painter.look.glows, isTrue);
         expect(painter.look.background, Colors.white);
         expect(greeting.style!.color, const Color(0xff141414));
+        expect(avatar.colors, [painter.palette.warm, painter.palette.hot]);
+        expect(avatar.colors.every(neutral), isFalse);
       }
       expect(
         find.text('Jay and the team · usually under an hour'),
@@ -589,6 +599,44 @@ void main() {
               },
       ),
     )..name = 'María';
+
+    for (final style in AppReferSupportHeaderStyle.values) {
+      testWidgets('continue card keeps the portrait (${style.name})', (
+        tester,
+      ) async {
+        final support = AppReferSupport.instance;
+        support.accentColor = Colors.white;
+        support.headerStyle = style;
+        addTearDown(
+          () => support.headerStyle = AppReferSupportHeaderStyle.accent,
+        );
+        const portrait = 'https://example.com/sam.png';
+        final api = fake(
+          (r) async => response({
+            'conversations': [botConversation],
+            'persona': {...persona, 'avatarUrl': portrait},
+          }),
+        )..name = 'María';
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(brightness: Brightness.dark),
+            home: AppReferSupportView(api: api),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final avatar = tester.widget<SupportAvatar>(
+          find.byKey(supportContinueAvatarKey),
+        );
+        expect(avatar.imageUrl, portrait);
+        expect(avatar.name, 'Sam');
+        if (style == AppReferSupportHeaderStyle.plain) {
+          expect(avatar.colors, const [Color(0xff6b6b6b), Color(0xff3a3a3a)]);
+        } else {
+          expect(avatar.colors.every((c) => c.r == c.g && c.g == c.b), isFalse);
+        }
+        await tester.pumpWidget(const SizedBox());
+      });
+    }
 
     testWidgets('home names the assistant', (tester) async {
       tester.view.physicalSize = const Size(400, 840);

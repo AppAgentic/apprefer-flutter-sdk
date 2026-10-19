@@ -1557,18 +1557,21 @@ class _SupportViewState extends State<AppReferSupportView>
               const SizedBox(height: 12),
               Row(
                 children: [
+                  // Plain draws it in the header's neutral greys; a portrait still covers them.
                   if (persona != null)
                     SupportAvatar(
+                      key: supportContinueAvatarKey,
                       name: persona.name,
                       size: 46,
-                      colors: [palette.warm, palette.hot],
+                      colors: header.avatars ?? [palette.warm, palette.hot],
                       imageUrl: persona.avatarUrl,
                     )
                   else
                     SupportAvatar(
+                      key: supportContinueAvatarKey,
                       name: firstTeam.firstOrNull,
                       size: 46,
-                      colors: [palette.warm, palette.hot],
+                      colors: header.avatars ?? [palette.warm, palette.hot],
                       icon: firstTeam.isEmpty ? Icons.forum_rounded : null,
                     ),
                   const SizedBox(width: 12),
