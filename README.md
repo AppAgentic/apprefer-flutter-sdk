@@ -635,9 +635,23 @@ final result = await AppReferSDK.support.testimonials.present(context, requestId
   150 MB per video. The server checks the stored bytes and video length again.
 - Requests from Support show as a card in the chat ("Share a photo or video"); older SDK versions
   show your text and a line asking the customer to update the app.
+- The Support home shows the newest open request for the verified account as a card each time it
+  opens (never a pop-up). Requests your backend, coach or automation made appear there by
+  themselves; shared, declined, withdrawn or ended ones leave it, and another account's never show.
+- Automated asks (a campaign `automation`, switched on separately in Support): the invitation is that
+  home card. The SDK declares the `testimonials` engagement capability and opens a tapped
+  invitation notification (`/apprefer/testimonials/<requestId>`) as the capture screen itself on
+  `AppReferSDK.support.navigatorKey`, never through `onNotificationEvent`. AppRefer only records
+  push invitations as dry runs in this release: no notification is sent yet.
+- The reward line after sharing is honest about who confirms it: "earned" until your backend
+  reports its receipt; then "added to your account" for credits, coach answers and subscription
+  time, or "confirmed" for anything else (no shipping or email promise); a failed or late one says
+  Support can see it and send it again.
 - iOS camera (optional): offered only when your app declares `NSCameraUsageDescription` (and,
-  for video, `NSMicrophoneUsageDescription`). Android needs no new permission (photo picker and the
-  camera app for a video). The plugin does the picking and normalising natively; no new Dart
+  for video, `NSMicrophoneUsageDescription`). Android needs no new permission: the photo picker,
+  and the camera app for "Take a photo" (into a private cache file through the plugin's
+  non-exported provider) or "Record a video"; if your app itself declares `CAMERA`, it is asked for
+  at the moment of capture. The plugin does the picking and normalising natively; no new Dart
   package.
 
 0.13.0 is unreleased source (not tagged). Once tagged, install it from Git only: `git: url: https://github.com/AppAgentic/apprefer-flutter-sdk, ref: 0.13.0` (not on pub.dev).

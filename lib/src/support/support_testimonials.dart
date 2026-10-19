@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -78,6 +80,20 @@ class AppReferTestimonialRequest {
   bool get isOpen => status == 'open';
   bool get allowsImages => media.contains('image');
   bool get allowsVideos => media.contains('video');
+
+  /// The table key for the reward line after sharing. Confirmed only once the
+  /// app's backend reported its receipt (`fulfilled`); in-account rewards say
+  /// "added to your account", anything else just "confirmed" (no delivery or
+  /// email promise).
+  String get rewardStatusKey => switch (rewardStatus) {
+    'fulfilled' =>
+      const {'credits', 'coach_usage', 'subscription_time'}.contains(rewardType)
+          ? 'support.testimonial.rewardDone.account'
+          : 'support.testimonial.rewardDone',
+    'failed' || 'timed_out' => 'support.testimonial.rewardDelayed',
+    'not_eligible' => 'support.testimonial.rewardNotEligible',
+    _ => 'support.testimonial.rewardPending',
+  };
 
   /// Null when the value isn't a request: no broken card is drawn.
   static AppReferTestimonialRequest? fromJson(Object? raw) {
@@ -393,12 +409,17 @@ class TestimonialFlow extends ChangeNotifier {
   }
 
   void pickFailed(String code, int seconds) {
-    if (code == 'cancelled') return;
+    // Nothing chosen, or the camera went away between showing the button and
+    // the tap: no message (the library is still offered).
+    if (code == 'cancelled' || code == 'unavailable') return;
     notice = switch (code) {
       'too_long' => SupportStrings.text('support.testimonial.tooLong', {
         'seconds': '$seconds',
       }),
       'too_large' => SupportStrings.text('support.testimonial.tooLarge'),
+      'camera_denied' => SupportStrings.text(
+        'support.testimonial.cameraDenied',
+      ),
       _ => SupportStrings.text('support.error.imageUnreadable'),
     };
     _changed();
@@ -557,7 +578,9 @@ class AppReferTestimonials {
   SupportAPI get _api =>
       (api ?? (throw StateError('Configure AppRefer first')))();
 
-  /// Whether the camera can be offered (the photo library always is).
+  /// Whether the camera can take a photo (`video: false`) or record a video
+  /// (`video: true`) now. The photo library is always offered. On Android a
+  /// CAMERA permission the app declares is asked for at the moment of capture.
   Future<bool> cameraAvailable({bool video = true}) async =>
       await supportChannel.invokeMethod<bool>('testimonialCameraAvailable', {
         'video': video,
@@ -566,8 +589,11 @@ class AppReferTestimonials {
 
   /// Open requests for the verified account (empty when the session isn't
   /// verified).
-  Future<List<AppReferTestimonialRequest>> pending() async {
-    final data = await _api.call('GET', '/testimonials');
+  Future<List<AppReferTestimonialRequest>> pending() => pendingWith(_api);
+
+  /// The same through a given Support API (the chat view's own).
+  Future<List<AppReferTestimonialRequest>> pendingWith(SupportAPI api) async {
+    final data = await api.call('GET', '/testimonials');
     return [
       for (final r
           in (data['requests'] is List ? data['requests'] as List : const []))
@@ -601,7 +627,14 @@ class AppReferTestimonials {
   Future<AppReferTestimonialResult?> present(
     BuildContext context,
     String requestId,
-  ) => Navigator.of(context).push<AppReferTestimonialResult>(
+  ) => presentOn(Navigator.of(context), requestId);
+
+  /// The same on a navigator (used for invitation notifications, through
+  /// `AppReferSDK.support.navigatorKey`).
+  Future<AppReferTestimonialResult?> presentOn(
+    NavigatorState navigator,
+    String requestId,
+  ) => navigator.push<AppReferTestimonialResult>(
     MaterialPageRoute(
       fullscreenDialog: true,
       builder: (_) => AppReferTestimonialScreen(requestId: requestId),
@@ -625,21 +658,24 @@ class AppReferTestimonials {
 
 /// Native photo/video picking (system photo picker or camera), normalised by
 /// the plugin: JPEG without metadata for photos, metadata-free MP4 for
-/// videos, refused when longer than allowed.
+/// videos, refused when longer than allowed. With the camera, [capture] is
+/// `image` (a still photo) or `video`.
 Future<TestimonialFile?> pickTestimonialMedia({
   required bool camera,
   required bool images,
   required bool videos,
   required int maxSeconds,
   required void Function(String code, int seconds) failed,
+  String? capture,
 }) async {
   try {
     final raw = await supportChannel
         .invokeMethod<Map<Object?, Object?>>('testimonialPick', {
           'source': camera ? 'camera' : 'library',
-          'images': images,
-          'videos': videos,
+          'images': capture == null ? images : capture == 'image',
+          'videos': capture == null ? videos : capture == 'video',
           'maxSeconds': maxSeconds,
+          if (capture != null) 'capture': capture,
         });
     return TestimonialFile.fromMap(raw);
   } on PlatformException catch (e) {
@@ -675,7 +711,9 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
     widget.transport ??
         LiveTestimonialTransport(AppReferTestimonials.instance._api),
   )..addListener(_update);
-  bool camera = false;
+
+  /// The camera can take a still photo / record a video on this device.
+  bool cameraPhoto = false, cameraVideo = false;
   bool _following = false;
 
   void _update() {
@@ -688,14 +726,17 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
     unawaited(flow.load());
     final known = widget.cameraAvailable;
     if (known != null) {
-      camera = known;
+      cameraPhoto = cameraVideo = known;
     } else {
-      AppReferTestimonials.instance
-          .cameraAvailable()
-          .then((v) {
-            if (mounted) setState(() => camera = v);
-          })
-          .catchError((_) {});
+      for (final video in [false, true]) {
+        AppReferTestimonials.instance
+            .cameraAvailable(video: video)
+            .then((v) {
+              if (!mounted) return;
+              setState(() => video ? cameraVideo = v : cameraPhoto = v);
+            })
+            .catchError((_) {});
+      }
     }
   }
 
@@ -720,17 +761,68 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
   void _close([AppReferTestimonialResult? result]) =>
       Navigator.of(context).pop(result ?? flow.result);
 
-  Future<void> _pick(bool useCamera) async {
+  /// [capture]: null = the photo library; `camera` = the iOS camera (photo or
+  /// video in one screen); `image` / `video` = Android's camera app for one kind.
+  Future<void> _pick([String? capture]) async {
     final r = flow.request;
     if (r == null) return;
     final f = await pickTestimonialMedia(
-      camera: useCamera,
-      images: r.allowsImages,
-      videos: r.allowsVideos,
+      camera: capture != null,
+      images: r.allowsImages && (capture != 'camera' || cameraPhoto),
+      videos: r.allowsVideos && (capture != 'camera' || cameraVideo),
       maxSeconds: r.maxVideoSeconds ?? 30,
       failed: flow.pickFailed,
+      capture: capture == 'image' || capture == 'video' ? capture : null,
     );
     if (f != null) flow.picked(f);
+  }
+
+  /// Camera buttons: Android's camera app takes either a photo or a video, so
+  /// each allowed kind gets its own; iOS offers both in one camera screen.
+  List<Widget> _cameraButtons(
+    AppReferTestimonialRequest r,
+    SupportPalette palette,
+  ) {
+    final photo = r.allowsImages && cameraPhoto;
+    final video = r.allowsVideos && cameraVideo;
+    Widget gap(Widget w) =>
+        Padding(padding: const EdgeInsets.only(top: 10), child: w);
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return [
+        if (photo || video)
+          gap(
+            _button(
+              SupportStrings.text('support.testimonial.camera'),
+              palette,
+              false,
+              () => _pick('camera'),
+              Icons.photo_camera_outlined,
+            ),
+          ),
+      ];
+    }
+    return [
+      if (photo)
+        gap(
+          _button(
+            SupportStrings.text('support.testimonial.takePhoto'),
+            palette,
+            false,
+            () => _pick('image'),
+            Icons.photo_camera_outlined,
+          ),
+        ),
+      if (video)
+        gap(
+          _button(
+            SupportStrings.text('support.testimonial.recordVideo'),
+            palette,
+            false,
+            () => _pick('video'),
+            Icons.videocam_outlined,
+          ),
+        ),
+    ];
   }
 
   @override
@@ -808,11 +900,8 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
             _rewardBox(reward, colors),
             const SizedBox(height: 10),
             Text(
-              SupportStrings.text(
-                r?.rewardStatus == 'fulfilled'
-                    ? 'support.testimonial.rewardDone'
-                    : 'support.testimonial.rewardPending',
-              ),
+              SupportStrings.text(r!.rewardStatusKey),
+              key: const ValueKey('supportTestimonialRewardStatus'),
               style: const TextStyle(fontSize: 15),
             ),
           ],
@@ -863,6 +952,8 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
         const SizedBox(height: 8),
         Text(prompt, style: const TextStyle(fontSize: 16)),
       ],
+      const SizedBox(height: 6),
+      _muted(SupportStrings.text('support.testimonial.honest'), colors, 14),
       if (r.rewardDescription case final reward?) ...[
         const SizedBox(height: 14),
         _rewardBox(reward, colors),
@@ -894,7 +985,7 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
             SupportStrings.text('support.testimonial.retake'),
             palette,
             false,
-            () => _pick(false),
+            () => _pick(),
           ),
         ],
         if (r.permissionText case final text?) ...[
@@ -927,19 +1018,10 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
           SupportStrings.text('support.testimonial.choose'),
           palette,
           true,
-          () => _pick(false),
+          () => _pick(),
           Icons.photo_library_outlined,
         ),
-        if (camera && r.allowsVideos) ...[
-          const SizedBox(height: 10),
-          _button(
-            SupportStrings.text('support.testimonial.camera'),
-            palette,
-            false,
-            () => _pick(true),
-            Icons.videocam_outlined,
-          ),
-        ],
+        ..._cameraButtons(r, palette),
         if (r.allowsVideos && r.maxVideoSeconds != null) ...[
           const SizedBox(height: 8),
           _muted(
@@ -1074,7 +1156,11 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
   );
 }
 
-/// The request card under a team message in the chat.
+/// Key of the invitation card on the Support home.
+const supportTestimonialInviteKey = ValueKey('supportTestimonialInvite');
+
+/// The request card under a team message in the chat, and the invitation card
+/// on the Support home.
 class SupportTestimonialCard extends StatelessWidget {
   const SupportTestimonialCard({
     super.key,
@@ -1124,6 +1210,11 @@ class SupportTestimonialCard extends StatelessWidget {
                 style: TextStyle(fontSize: 14.5, color: colors.primary),
               ),
             ],
+            const SizedBox(height: 6),
+            Text(
+              SupportStrings.text('support.testimonial.honest'),
+              style: TextStyle(fontSize: 13, color: colors.muted),
+            ),
             if (request.rewardDescription case final reward?) ...[
               const SizedBox(height: 8),
               Text(

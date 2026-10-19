@@ -279,12 +279,18 @@ class EngagementClient {
 
   bool get isStarted => _started;
 
+  /// Whether this app can open Support testimonial invitations from a
+  /// notification (the Support module sets it); declared to the server as the
+  /// `testimonials` capability so only such installs are sent one.
+  static bool Function() testimonialsCapable = () => false;
+
   static String slotFor(String apiKey) =>
       sha256.convert(utf8.encode(apiKey)).toString().substring(0, 16);
   String? get _slot => _apiKey == null ? null : slotFor(_apiKey!);
   String _key(String name) => 'apprefer_engagement_${name}_${_slot ?? 'none'}';
   int get _serial => int.tryParse(prefs.get(_key('serial')) ?? '') ?? 0;
   Future<void> _setSerial(int v) => prefs.set(_key('serial'), '$v');
+
   /// An unsent logout: the epoch it signs out of, saved as one value `<installId>:<epoch>` in a
   /// single write, so a crash can never leave a logout without its target. It only applies to
   /// the install it was made for. A logout whose epoch was not known is never saved: it could
@@ -619,7 +625,12 @@ class EngagementClient {
       'timezone': state.timezone,
       'collectionEnabled': state.collectionEnabled,
       'notificationPermission': state.permission,
-      'capabilities': {'schema': 1, 'images': _images, 'actions': true},
+      'capabilities': {
+        'schema': 1,
+        'images': _images,
+        'actions': true,
+        if (testimonialsCapable()) 'testimonials': true,
+      },
       if (state.locale != null) 'locale': state.locale,
       if (_pushToken != null) 'pushToken': _pushToken,
       if (_pushToken != null && pushEnvironment != null)

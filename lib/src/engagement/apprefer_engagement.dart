@@ -439,18 +439,45 @@ class AppReferEngagement {
     _deliver();
   }
 
+  static final _testimonialPath = RegExp(
+    r'^/apprefer/testimonials/(tsr_[0-9a-f]{32})$',
+  );
+
+  /// The request id when [destination] is a Support testimonial invitation
+  /// (`/apprefer/testimonials/<requestId>`): the SDK opens its own capture
+  /// screen for it and never passes it to the app's router.
+  @visibleForTesting
+  static String? testimonialRequestId(String? destination) =>
+      destination == null
+      ? null
+      : _testimonialPath.firstMatch(destination)?.group(1);
+
+  /// Opens the capture screen for a tapped invitation. Set by the Support
+  /// module (it uses `AppReferSDK.support.navigatorKey`); apps don't set it.
+  static void Function(String requestId)? openTestimonial;
+
   void _deliver() {
     final handler = _handler;
-    if (handler == null) return;
     final now = <(AppReferEngagementNotificationEvent, Map)>[];
     _pending.removeWhere((item) {
+      final sdkOwned =
+          item.$1.isNavigation &&
+          testimonialRequestId(item.$1.destination) != null;
+      if (handler == null && !sdkOwned) return false;
       if (item.$1.isNavigation && !_ready) return false;
       now.add(item);
       return true;
     });
     for (final (event, raw) in now) {
-      if (stillDeliverable(event, raw, _client?.snapshot, _clock()))
-        handler(event);
+      if (!stillDeliverable(event, raw, _client?.snapshot, _clock())) continue;
+      final requestId = event.isNavigation
+          ? testimonialRequestId(event.destination)
+          : null;
+      if (requestId != null) {
+        openTestimonial?.call(requestId);
+      } else {
+        handler?.call(event);
+      }
     }
   }
 

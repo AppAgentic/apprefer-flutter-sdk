@@ -13,6 +13,8 @@ import '../services/device_info.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
 import '../services/logger.dart';
+import '../engagement/apprefer_engagement.dart' show AppReferEngagement;
+import '../engagement/engagement_client.dart' show EngagementClient;
 import 'support_api.dart';
 import 'support_help.dart';
 import 'support_offers.dart';
@@ -53,6 +55,14 @@ class AppReferSupport with WidgetsBindingObserver {
     WidgetsFlutterBinding.ensureInitialized().addObserver(this);
     api.resumeRevocations();
     AppReferTestimonials.instance.api = () => api;
+    // A tapped testimonial invitation opens the capture screen on the app's
+    // navigator; without navigatorKey the invitation waits on the Support home.
+    AppReferEngagement.openTestimonial = (requestId) {
+      final nav = navigatorKey?.currentState;
+      if (nav != null)
+        unawaited(AppReferTestimonials.instance.presentOn(nav, requestId));
+    };
+    EngagementClient.testimonialsCapable = () => true;
   }
 
   /// Photo/video testimonials: show a request your backend (or its coach
@@ -649,7 +659,10 @@ class _SupportViewState extends State<AppReferSupportView>
       shownCards.clear();
       reviewCards.clear();
       testimonials.clear();
+      invitations = [];
     });
+    // The new account's own invitations (an anonymous or unverified one has none).
+    unawaited(_refreshInvitations(force: true));
   }
 
   void _changed() {
@@ -700,6 +713,7 @@ class _SupportViewState extends State<AppReferSupportView>
     if (active) {
       _refresh();
       _refreshOffers();
+      unawaited(_refreshInvitations(force: true));
     }
   }
 
@@ -790,6 +804,64 @@ class _SupportViewState extends State<AppReferSupportView>
   final Map<String, AppReferSupportReviewCard> reviewCards = {};
   // Photo/video requests: each request's latest state by request id.
   final Map<String, AppReferTestimonialRequest> testimonials = {};
+
+  /// Open photo/video requests for the account verified on this device now
+  /// (from the app's backend, its coach, automation or a Support reply),
+  /// newest first; the home shows the newest. Loaded when the chat opens, comes
+  /// back to the foreground and after the capture screen closes; never shown
+  /// for another account (the list is the server's, for this session).
+  @visibleForTesting
+  List<AppReferTestimonialRequest> invitations = [];
+  bool _invitationsLoading = false;
+  DateTime? _invitationsAt;
+
+  /// Only while the home is showing; at most once a minute unless [force]d.
+  Future<void> _refreshInvitations({bool force = false}) async {
+    if (_invitationsLoading || id != null) return;
+    final last = _invitationsAt;
+    if (!force &&
+        last != null &&
+        DateTime.now().difference(last) < const Duration(minutes: 1))
+      return;
+    _invitationsAt = DateTime.now();
+    _invitationsLoading = true;
+    final currentGeneration = generation;
+    try {
+      final open = await AppReferTestimonials.instance.pendingWith(api);
+      if (mounted && generation == currentGeneration) {
+        setState(() => invitations = open.where((r) => r.isOpen).toList());
+      }
+    } catch (_) {
+      // Offline or not configured: keep what is shown (an account change already cleared it).
+    } finally {
+      _invitationsLoading = false;
+    }
+  }
+
+  /// Opens the capture screen from the home card, then shows the new state
+  /// (shared, declined or no longer available all remove the card).
+  Future<void> _openInvitation(AppReferTestimonialRequest request) async {
+    final currentGeneration = generation;
+    await AppReferTestimonials.instance.present(context, request.requestId);
+    if (!mounted || generation != currentGeneration) return;
+    setState(
+      () => invitations = [
+        for (final r in invitations)
+          if (r.requestId != request.requestId) r,
+      ],
+    );
+    await _refreshInvitations(force: true);
+  }
+
+  Widget _invitationCard(AppReferTestimonialRequest request) => KeyedSubtree(
+    key: supportTestimonialInviteKey,
+    child: SupportTestimonialCard(
+      request: request,
+      palette: palette,
+      colors: colors,
+      open: () => _openInvitation(request),
+    ),
+  );
 
   /// Opens the capture screen for a request card, then shows its new state.
   Future<void> _openTestimonial(AppReferTestimonialRequest request) async {
@@ -1293,7 +1365,10 @@ class _SupportViewState extends State<AppReferSupportView>
   }
 
   Future<void> _refresh() async {
-    if (id == null) unawaited(_refreshArticles());
+    if (id == null) {
+      unawaited(_refreshArticles());
+      unawaited(_refreshInvitations());
+    }
     if (refreshing) return;
     refreshing = true;
     final current = id;
@@ -1975,6 +2050,8 @@ class _SupportViewState extends State<AppReferSupportView>
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         for (final section in [
+                          if (invitations.isNotEmpty)
+                            _invitationCard(invitations.first),
                           if (current != null) _continueCard(current),
                           // Hidden entirely when the app has no published articles.
                           if (articles.isNotEmpty)

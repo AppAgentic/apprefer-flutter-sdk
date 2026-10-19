@@ -4,8 +4,10 @@ import 'dart:io';
 import 'package:apprefer/apprefer.dart';
 import 'package:apprefer/src/support/support_api.dart';
 import 'package:apprefer/src/support/support_strings.dart';
+import 'package:apprefer/src/support/support_strings_table.g.dart';
 import 'package:apprefer/src/support/support_style.dart';
 import 'package:apprefer/src/support/support_testimonials.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -144,7 +146,7 @@ void main() {
       expect(flow.phase, TestimonialPhase.failed);
       expect(
         flow.notice,
-        "Couldn't share it. Check your connection and try again.",
+        "Couldn't share it, nothing was sent. Check your connection and try again.",
       );
       await flow.submit();
       expect(flow.phase, TestimonialPhase.done);
@@ -325,71 +327,341 @@ void main() {
     expect(opened, 1);
   });
 
-  testWidgets(
-    'the capture screen picks, asks permission separately and shares',
-    (tester) async {
+  testWidgets('the capture screen picks, asks permission separately and shares', (
+    tester,
+  ) async {
+    final t = FakeTransport(request());
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      supportChannel,
+      (call) async {
+        calls.add(call);
+        if (call.method == 'testimonialPick')
+          return {
+            'path': '/tmp/apprefer-testimonial-a.jpg',
+            'contentType': 'image/jpeg',
+            'kind': 'image',
+            'size': 2000,
+          };
+        return null;
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppReferTestimonialScreen(
+          requestId: t.current.requestId,
+          transport: t,
+          cameraAvailable: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Share your progress'), findsOneWidget);
+    expect(
+      find.text('Good, bad or mixed: we want your honest take.'),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'You get it for taking part, whatever you say and whether or not you allow reuse.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Use camera'), findsNothing);
+    await tester.tap(find.text('Choose from library'));
+    await tester.pumpAndSettle();
+    expect(calls.where((c) => c.method == 'testimonialPick').single.arguments, {
+      'source': 'library',
+      'images': true,
+      'videos': true,
+      'maxSeconds': 30,
+    });
+    await tester.scrollUntilVisible(
+      find.text('You may show this in the app.'),
+      200,
+    );
+    expect(find.text('Allow public use'), findsOneWidget);
+    await tester.scrollUntilVisible(find.text('Share'), 200);
+    await tester.ensureVisible(find.text('Share'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Share'));
+    await tester.pumpAndSettle();
+    expect(find.text('Thanks for sharing!'), findsOneWidget);
+    // Earned, not yet confirmed by the app's backend: no delivery promise.
+    expect(
+      find.text(
+        "You've earned it. It shows as confirmed here once it has been applied.",
+      ),
+      findsOneWidget,
+    );
+    expect(
+      t.submits.single[2],
+      false,
+      reason: 'public use stays off unless the customer switches it on',
+    );
+    // The done screen checks the reward a few times; let those checks run out.
+    await tester.pump(const Duration(seconds: 60));
+    await tester.pumpWidget(const SizedBox());
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      supportChannel,
+      null,
+    );
+  });
+
+  test('the reward line follows the backend\'s receipt and the reward type', () {
+    String line(String status, String type) => SupportStrings.text(
+      request({
+        ...requestJson(status: 'submitted', rewardStatus: status),
+        'reward': {'type': type, 'description': 'x'},
+      }).rewardStatusKey,
+    );
+    // Earned but unconfirmed (pending, or handed to the backend): never "added".
+    for (final s in ['pending', 'delivered', 'none']) {
+      expect(
+        line(s, 'credits'),
+        "You've earned it. It shows as confirmed here once it has been applied.",
+      );
+    }
+    expect(
+      line('fulfilled', 'credits'),
+      'Your reward has been added to your account.',
+    );
+    expect(
+      line('fulfilled', 'coach_usage'),
+      'Your reward has been added to your account.',
+    );
+    expect(
+      line('fulfilled', 'subscription_time'),
+      'Your reward has been added to your account.',
+    );
+    // Goods, gifts and discounts are handled by the app: confirmed, no shipping or email promise.
+    for (final type in ['merch', 'gift', 'discount', 'manual']) {
+      expect(line('fulfilled', type), 'Your reward is confirmed.');
+    }
+    expect(
+      line('failed', 'merch'),
+      "Your reward hasn't been confirmed yet. Support can see this and can send it again.",
+    );
+    expect(line('timed_out', 'credits'), line('failed', 'merch'));
+    expect(
+      line('not_eligible', 'credits'),
+      "You've already taken part in this, so there's no new reward this time.",
+    );
+    // Every new key exists in every language.
+    for (final lang in supportLanguages) {
+      for (final key in [
+        'support.testimonial.honest',
+        'support.testimonial.rewardDone.account',
+        'support.testimonial.rewardDelayed',
+        'support.testimonial.rewardNotEligible',
+        'support.testimonial.takePhoto',
+        'support.testimonial.recordVideo',
+        'support.testimonial.cameraDenied',
+      ]) {
+        expect(
+          supportStringsTable[lang]?[key],
+          isNotEmpty,
+          reason: '$lang $key',
+        );
+      }
+    }
+  });
+
+  test(
+    'a declined camera prompt is explained; a vanished camera is not an error',
+    () async {
       final t = FakeTransport(request());
-      final calls = <MethodCall>[];
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        supportChannel,
-        (call) async {
-          calls.add(call);
-          if (call.method == 'testimonialPick')
-            return {
-              'path': '/tmp/apprefer-testimonial-a.jpg',
-              'contentType': 'image/jpeg',
-              'kind': 'image',
-              'size': 2000,
-            };
-          return null;
-        },
-      );
-      await tester.pumpWidget(
-        MaterialApp(
-          home: AppReferTestimonialScreen(
-            requestId: t.current.requestId,
-            transport: t,
-            cameraAvailable: false,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('Share your progress'), findsOneWidget);
+      final flow = TestimonialFlow(t.current.requestId, t);
+      await flow.load();
+      flow.pickFailed('unavailable', 0);
+      expect(flow.notice, isNull);
+      flow.pickFailed('camera_denied', 0);
       expect(
-        find.text(
-          'The reward doesn\'t depend on what you share or whether it\'s used.',
-        ),
-        findsOneWidget,
-      );
-      expect(find.text('Use camera'), findsNothing);
-      await tester.tap(find.text('Choose from library'));
-      await tester.pumpAndSettle();
-      expect(
-        calls.where((c) => c.method == 'testimonialPick').single.arguments,
-        {'source': 'library', 'images': true, 'videos': true, 'maxSeconds': 30},
-      );
-      await tester.scrollUntilVisible(
-        find.text('You may show this in the app.'),
-        200,
-      );
-      expect(find.text('Allow public use'), findsOneWidget);
-      await tester.scrollUntilVisible(find.text('Share'), 200);
-      await tester.tap(find.text('Share'));
-      await tester.pumpAndSettle();
-      expect(find.text('Thanks for sharing!'), findsOneWidget);
-      expect(find.text('Your reward is on its way.'), findsOneWidget);
-      expect(
-        t.submits.single[2],
-        false,
-        reason: 'public use stays off unless the customer switches it on',
-      );
-      // The done screen checks the reward a few times; let those checks run out.
-      await tester.pump(const Duration(seconds: 60));
-      await tester.pumpWidget(const SizedBox());
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        supportChannel,
-        null,
+        flow.notice,
+        'Camera access is off. You can choose from your library instead.',
       );
     },
   );
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets('camera buttons on ${platform.name}', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      try {
+        final t = FakeTransport(request());
+        final calls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          supportChannel,
+          (call) async {
+            calls.add(call);
+            if (call.method == 'testimonialPick')
+              throw PlatformException(code: 'camera_denied', details: 0);
+            return null;
+          },
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AppReferTestimonialScreen(
+              requestId: t.current.requestId,
+              transport: t,
+              cameraAvailable: true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (platform == TargetPlatform.android) {
+          // The camera app takes one kind at a time: a still photo, or a video.
+          expect(find.text('Use camera'), findsNothing);
+          await tester.tap(find.text('Take a photo'));
+          await tester.pumpAndSettle();
+          expect(calls.last.arguments, {
+            'source': 'camera',
+            'images': true,
+            'videos': false,
+            'maxSeconds': 30,
+            'capture': 'image',
+          });
+          expect(find.text('Record a video'), findsOneWidget);
+        } else {
+          expect(find.text('Take a photo'), findsNothing);
+          await tester.tap(find.text('Use camera'));
+          await tester.pumpAndSettle();
+          expect(calls.last.arguments, {
+            'source': 'camera',
+            'images': true,
+            'videos': true,
+            'maxSeconds': 30,
+          });
+        }
+        // Permission declined: told plainly, the library stays offered.
+        expect(
+          find.text(
+            'Camera access is off. You can choose from your library instead.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Choose from library'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          supportChannel,
+          null,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+  }
+
+  group('Support home invitations', () {
+    late List<Map<String, Object?>> open;
+    late List<String> paths;
+    SupportAPI api() => SupportAPI(
+      client: MockClient((r) async {
+        paths.add('${r.method} ${r.url.path}');
+        final path = r.url.path;
+        Object body = const {};
+        if (path.endsWith('/session')) body = {'session': 's'};
+        if (path.endsWith('/conversations')) body = {'conversations': []};
+        if (path == '/api/support/v1/testimonials') body = {'requests': open};
+        if (path.startsWith('/api/support/v1/testimonials/tsr_'))
+          body = {'request': requestJson()};
+        if (path.endsWith('/status') ||
+            path.startsWith('/api/support/v1/articles'))
+          return http.Response('{"error":"not here"}', 404);
+        return http.Response.bytes(
+          utf8.encode(jsonEncode(body)),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+      apiKey: () => 'key',
+      read: (_) async => 's',
+      write: (_, __) async {},
+      profile: () async => {},
+    );
+
+    setUp(() {
+      open = [requestJson()];
+      paths = [];
+    });
+
+    testWidgets(
+      'opening Support shows the verified account\'s open ask; it leads to the capture screen and leaves once answered',
+      (tester) async {
+        final client = api();
+        AppReferTestimonials.instance.api = () => client;
+        await tester.pumpWidget(
+          MaterialApp(home: AppReferSupportView(api: client)),
+        );
+        await tester.pumpAndSettle();
+        expect(paths, contains('GET /api/support/v1/testimonials'));
+        final card = find.byKey(supportTestimonialInviteKey);
+        expect(card, findsOneWidget);
+        expect(
+          find.descendant(of: card, matching: find.text('Share your progress')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: card,
+            matching: find.text(
+              'Good, bad or mixed: we want your honest take.',
+            ),
+          ),
+          findsOneWidget,
+        );
+        // No modal: the capture screen opens only from the card.
+        expect(find.byType(AppReferTestimonialScreen), findsNothing);
+        await tester.tap(
+          find.descendant(
+            of: card,
+            matching: find.byKey(const ValueKey('supportTestimonialOpen')),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(AppReferTestimonialScreen), findsOneWidget);
+        // Shared elsewhere (or declined, or the campaign switched off): the
+        // server no longer lists it, and closing the screen removes the card.
+        open = [];
+        await tester.tap(find.byTooltip('Cancel'));
+        await tester.pumpAndSettle();
+        expect(find.byKey(supportTestimonialInviteKey), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
+      'an account switch clears the card before the next account loads',
+      (tester) async {
+        final client = api();
+        AppReferTestimonials.instance.api = () => client;
+        await tester.pumpWidget(
+          MaterialApp(home: AppReferSupportView(api: client)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(supportTestimonialInviteKey), findsOneWidget);
+        // Signed into another account (unverified yet): the server lists nothing for it.
+        open = [];
+        AppReferSupport.instance.accountGeneration.value++;
+        await tester.pump();
+        expect(find.byKey(supportTestimonialInviteKey), findsNothing);
+        await tester.pumpAndSettle();
+        expect(find.byKey(supportTestimonialInviteKey), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+
+    testWidgets(
+      'offline keeps the card that was shown; a non-open entry is never drawn',
+      (tester) async {
+        open = [requestJson(status: 'submitted')];
+        final client = api();
+        await tester.pumpWidget(
+          MaterialApp(home: AppReferSupportView(api: client)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(supportTestimonialInviteKey), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  });
 }
