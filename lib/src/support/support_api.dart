@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, SocketException;
 import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
@@ -34,6 +34,40 @@ class SupportException implements Exception {
   });
   @override
   String toString() => message;
+}
+
+/// The answer of `AppReferSDK.support.verifyIdentity`. [verified] true:
+/// Support may use this account's private details (plan, orders, credits) for
+/// this session. Otherwise [reason] says why: the server's `malformed`,
+/// `bad_signature`, `other_app`, `other_environment`, `expired`, `bad_times`,
+/// `already_used`, `user_mismatch`, `session_replaced`, `session_gone` (ask
+/// your backend for a new token), or the SDK's `account_changed` (the account
+/// changed while it ran) and `identity_cleared` (after `clearIdentity()`).
+@immutable
+class AppReferSupportIdentityVerification {
+  const AppReferSupportIdentityVerification({
+    required this.verified,
+    this.reason,
+    this.appUserId,
+  });
+  const AppReferSupportIdentityVerification.refused(String this.reason)
+    : verified = false,
+      appUserId = null;
+  final bool verified;
+  final String? reason;
+  final String? appUserId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AppReferSupportIdentityVerification &&
+      other.verified == verified &&
+      other.reason == reason &&
+      other.appUserId == appUserId;
+  @override
+  int get hashCode => Object.hash(verified, reason, appUserId);
+  @override
+  String toString() =>
+      'AppReferSupportIdentityVerification(verified: $verified, reason: $reason, appUserId: $appUserId)';
 }
 
 /// The app's AI support assistant, set in AppRefer. Every message from it is tagged "AI".
@@ -644,6 +678,87 @@ class SupportAPI {
       );
     }
     return data;
+  }
+
+  /// Waits between verification attempts after a network or server failure
+  /// (tests shorten it).
+  @visibleForTesting
+  List<Duration> verifyRetryDelays = const [
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 1500),
+  ];
+
+  /// Verifies the current session for the app user id the app's backend
+  /// vouched for with [identityToken] (single use). The token is only sent,
+  /// never stored or logged. Network and server failures are retried with the
+  /// same token (the server acknowledges a retry from the same session), then
+  /// thrown. A reset(), clearIdentity() or another stored user id while it
+  /// runs answers `account_changed`, never a verification for the new account.
+  Future<AppReferSupportIdentityVerification> verifyIdentity(
+    String identityToken,
+  ) async {
+    final token = identityToken.trim();
+    if (token.isEmpty || token.length > 2048) {
+      return const AppReferSupportIdentityVerification.refused('malformed');
+    }
+    if (await identityCleared()) {
+      return const AppReferSupportIdentityVerification.refused(
+        'identity_cleared',
+      );
+    }
+    const changed = AppReferSupportIdentityVerification.refused(
+      'account_changed',
+    );
+    final epoch = _generation;
+    final user = (await profile())['appUserId'];
+    for (var attempt = 0; ; attempt++) {
+      Map<String, dynamic> response;
+      try {
+        response = await call('POST', '/session/identity', {
+          'identityToken': token,
+        }, epoch);
+      } on SupportException catch (e) {
+        if (epoch != _generation) return changed;
+        final transient =
+            e.status == 0 ||
+            e.status == 408 ||
+            e.status == 429 ||
+            e.status >= 500;
+        if (!transient || attempt >= verifyRetryDelays.length) rethrow;
+        await Future<void>.delayed(verifyRetryDelays[attempt]);
+        continue;
+      } on Exception catch (e) {
+        if (epoch != _generation) return changed;
+        final network =
+            e is http.ClientException ||
+            e is TimeoutException ||
+            e is SocketException;
+        if (!network) rethrow;
+        if (attempt >= verifyRetryDelays.length) {
+          throw SupportException(
+            0,
+            'Network error: $e',
+            reason: SupportErrorReason.unavailable,
+          );
+        }
+        await Future<void>.delayed(verifyRetryDelays[attempt]);
+        continue;
+      }
+      if (epoch != _generation ||
+          await identityCleared() ||
+          (await profile())['appUserId'] != user) {
+        return changed;
+      }
+      final identity = response['identity'] is Map
+          ? Map<String, dynamic>.from(response['identity'] as Map)
+          : const <String, dynamic>{};
+      final verified = identity['verified'] == true;
+      return AppReferSupportIdentityVerification(
+        verified: verified,
+        reason: verified ? null : (identity['reason'] as String? ?? 'unknown'),
+        appUserId: identity['appUserId'] as String?,
+      );
+    }
   }
 
   Future<void> ensureSession() async {

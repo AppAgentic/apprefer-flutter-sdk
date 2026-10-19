@@ -1,3 +1,3 @@
 /// Single source of truth for the SDK version.
 /// Update this constant when cutting a new release.
-const String appReferVersion = '0.11.2';
+const String appReferVersion = '0.12.0';
