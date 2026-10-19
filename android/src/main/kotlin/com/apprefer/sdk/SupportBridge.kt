@@ -20,12 +20,15 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import com.apprefer.flutter.testimonial.TestimonialMedia
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 internal class SupportBridge(private val context: Context) : MethodChannel.MethodCallHandler, PluginRegistry.ActivityResultListener {
     var activity: Activity? = null
     private var pending: MethodChannel.Result? = null
+    private var testimonialReply: MethodChannel.Result? = null
+    private var testimonialArgs = Triple(true, false, 30)
     private var limit = 4
     private val prefs = context.getSharedPreferences("apprefer_support_secure", Context.MODE_PRIVATE)
     private fun key(): SecretKey {
@@ -118,6 +121,20 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
                     bitmap.recycle()
                     result.success(out.toByteArray())
                 }
+                // Photo/video testimonials: the shared TestimonialMedia helper (system picker or camera app).
+                "testimonialCameraAvailable" -> result.success(TestimonialMedia.cameraAvailable(context))
+                "testimonialDiscard" -> { TestimonialMedia.discard(context, call.arguments as? String); result.success(null) }
+                "testimonialPick" -> {
+                    check(testimonialReply == null) { "Picker already open" }
+                    val host = activity ?: error("No foreground activity")
+                    val args = call.arguments as? Map<*, *> ?: emptyMap<String, Any>()
+                    val camera = args["source"] == "camera"
+                    testimonialArgs = Triple(args["images"] != false, args["videos"] == true, (args["maxSeconds"] as? Int) ?: 30)
+                    val intent = if (camera) TestimonialMedia.videoCaptureIntent(testimonialArgs.third) else TestimonialMedia.libraryIntent(testimonialArgs.first, testimonialArgs.second)
+                    testimonialReply = result
+                    @Suppress("DEPRECATION")
+                    try { host.startActivityForResult(intent, TESTIMONIAL_REQUEST) } catch (e: Exception) { testimonialReply = null; throw e }
+                }
                 "pick" -> {
                     check(pending == null) { "Photo picker already open" }
                     val host = activity ?: error("No foreground activity")
@@ -132,6 +149,24 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
         } catch(e: Exception) { result.error("support_native", e.message, null) }
     }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode == TESTIMONIAL_REQUEST) {
+            val reply = testimonialReply ?: return true; testimonialReply = null
+            val uri = data?.data
+            if (resultCode != Activity.RESULT_OK || uri == null) { reply.error("cancelled", "No photo or video chosen", null); return true }
+            val (images, videos, maxSeconds) = testimonialArgs
+            Thread {
+                val main = android.os.Handler(android.os.Looper.getMainLooper())
+                try {
+                    val p = TestimonialMedia.normalize(context, uri, images, videos, maxSeconds)
+                    main.post { reply.success(mapOf("path" to p.path, "contentType" to p.contentType, "kind" to p.kind, "size" to p.size, "durationMs" to p.durationMs)) }
+                } catch (e: TestimonialMedia.MediaException) {
+                    main.post { reply.error(e.code, e.code, e.seconds) }
+                } catch (e: Exception) {
+                    main.post { reply.error("unreadable", e.message, 0) }
+                }
+            }.start()
+            return true
+        }
         if (requestCode != 51931) return false
         val reply = pending ?: return true; pending = null
         if (resultCode != Activity.RESULT_OK) { reply.success(emptyList<ByteArray>()); return true }
@@ -170,8 +205,13 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
         }.start()
         return true
     }
-    fun detach() { pending?.error("activity_detached", "Photo selection interrupted. Try again.", null); pending = null; activity = null }
+    fun detach() {
+        pending?.error("activity_detached", "Photo selection interrupted. Try again.", null); pending = null
+        testimonialReply?.error("cancelled", "Selection interrupted", null); testimonialReply = null
+        activity = null
+    }
     companion object {
+        const val TESTIMONIAL_REQUEST = 51932
         fun jpeg(source: Bitmap): ByteArray {
             var scale = minOf(1.0, 1600.0 / max(source.width, source.height))
             while (true) {

@@ -428,7 +428,7 @@ void main() {
           .toList();
       expect(
         calls[0].headers['X-AppRefer-Support-Features'],
-        'offers, reviews',
+        'offers, reviews, testimonials',
       );
       expect(calls[0].url.queryParameters, {
         'platform': 'android',
@@ -438,7 +438,7 @@ void main() {
       expect(calls[1].url.queryParameters, {'platform': 'android'});
       expect(
         calls[1].headers['X-AppRefer-Support-Features'],
-        'offers, offer-handler, reviews',
+        'offers, offer-handler, reviews, testimonials',
       );
       expect(SupportOffers.hasHandler, isFalse);
     },

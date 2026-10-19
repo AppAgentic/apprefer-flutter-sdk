@@ -646,6 +646,7 @@ class SupportOffers {
   /// `offers` (this SDK draws cards), `offer-handler` (the app opens its
   /// paywall from them) and `reviews` (this SDK draws review cards and opens
   /// the store page itself).
-  static String get featuresHeader =>
-      hasHandler ? 'offers, offer-handler, reviews' : 'offers, reviews';
+  static String get featuresHeader => hasHandler
+      ? 'offers, offer-handler, reviews, testimonials'
+      : 'offers, reviews, testimonials';
 }

@@ -63,6 +63,42 @@ final class SupportBridge: NSObject, FlutterPlugin, PHPickerViewControllerDelega
                   let name = (primary["CFBundleIconFiles"] as? [String])?.last,
                   let png = UIImage(named: name)?.pngData() else { result(nil); return }
             result(FlutterStandardTypedData(bytes: png))
+        // Photo/video testimonials: the shared TestimonialMedia helper (system picker or camera).
+        case "testimonialCameraAvailable":
+            let video = (call.arguments as? [String: Any])?["video"] as? Bool ?? true
+            result(TestimonialMedia.cameraAvailable(video: video))
+        case "testimonialDiscard":
+            if let path = call.arguments as? String, URL(fileURLWithPath: path).lastPathComponent.hasPrefix("apprefer-testimonial-"),
+               path.hasPrefix(FileManager.default.temporaryDirectory.path) {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+            result(nil)
+        case "testimonialPick":
+            let args = call.arguments as? [String: Any] ?? [:]
+            let images = args["images"] as? Bool ?? true, videos = args["videos"] as? Bool ?? false
+            let seconds = args["maxSeconds"] as? Int ?? 30
+            var top = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }.first { $0.isKeyWindow }?.rootViewController
+            while let next = top?.presentedViewController { top = next }
+            guard let host = top else { result(FlutterError(code: "no_activity", message: "No presentation window", details: nil)); return }
+            let done: TestimonialPicker.Completion = { outcome in
+                switch outcome {
+                case .success(let f):
+                    result(["path": f.url.path, "contentType": f.contentType, "kind": f.kind, "size": f.size, "durationMs": f.durationMs as Any])
+                case .failure(.tooLong(let s)): result(FlutterError(code: "too_long", message: "too_long", details: s))
+                case .failure(.tooLarge): result(FlutterError(code: "too_large", message: "too_large", details: 0))
+                case .failure(.cancelled): result(FlutterError(code: "cancelled", message: "cancelled", details: 0))
+                case .failure(.unreadable): result(FlutterError(code: "unreadable", message: "unreadable", details: 0))
+                }
+            }
+            let camera = args["source"] as? String == "camera"
+            let cameraImages = TestimonialMedia.cameraAvailable(video: false), cameraVideos = TestimonialMedia.cameraAvailable(video: true)
+            Task { @MainActor in
+                if camera {
+                    TestimonialPicker.camera(from: host, images: images && cameraImages, videos: videos && cameraVideos, maxSeconds: seconds, completion: done)
+                } else {
+                    TestimonialPicker.library(from: host, images: images, videos: videos, maxSeconds: seconds, completion: done)
+                }
+            }
         case "pick":
             guard reply == nil else { result(FlutterError(code: "picker_busy", message: "Photo picker already open", details: nil)); return }
             var config = PHPickerConfiguration(); config.filter = .images; config.selectionLimit = max(1, min(4, call.arguments as? Int ?? 4))

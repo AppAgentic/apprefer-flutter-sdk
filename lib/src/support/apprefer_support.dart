@@ -19,7 +19,15 @@ import 'support_offers.dart';
 import 'support_reviews.dart';
 import 'support_strings.dart';
 import 'support_style.dart';
+import 'support_testimonials.dart';
 
+export 'support_testimonials.dart'
+    show
+        AppReferTestimonials,
+        AppReferTestimonialRequest,
+        AppReferTestimonialResult,
+        AppReferTestimonialRewardUpdate,
+        AppReferTestimonialScreen;
 export 'support_api.dart'
     show
         AppReferSupportPersona,
@@ -44,7 +52,14 @@ class AppReferSupport with WidgetsBindingObserver {
   AppReferSupport._() {
     WidgetsFlutterBinding.ensureInitialized().addObserver(this);
     api.resumeRevocations();
+    AppReferTestimonials.instance.api = () => api;
   }
+
+  /// Photo/video testimonials: show a request your backend (or its coach
+  /// tool) made with `present(context, requestId)`, list open ones with
+  /// `pending()`, and refresh credits in `onRewardUpdate` once your backend
+  /// confirms the reward.
+  AppReferTestimonials get testimonials => AppReferTestimonials.instance;
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
@@ -67,6 +82,7 @@ class AppReferSupport with WidgetsBindingObserver {
 
   Future<void> reset() async {
     await api.reset();
+    AppReferTestimonials.instance.reset();
     // Offer-card receipts belong to the retired session; never sent for another account.
     await _clearOfferReceipts();
     final route = _presented;
@@ -632,6 +648,7 @@ class _SupportViewState extends State<AppReferSupportView>
       openingCard = null;
       shownCards.clear();
       reviewCards.clear();
+      testimonials.clear();
     });
   }
 
@@ -771,6 +788,19 @@ class _SupportViewState extends State<AppReferSupportView>
 
   // Review cards: each card's latest state by card id.
   final Map<String, AppReferSupportReviewCard> reviewCards = {};
+  // Photo/video requests: each request's latest state by request id.
+  final Map<String, AppReferTestimonialRequest> testimonials = {};
+
+  /// Opens the capture screen for a request card, then shows its new state.
+  Future<void> _openTestimonial(AppReferTestimonialRequest request) async {
+    await AppReferTestimonials.instance.present(context, request.requestId);
+    try {
+      final fresh = await AppReferTestimonials.instance.request(
+        request.requestId,
+      );
+      if (mounted) setState(() => testimonials[fresh.requestId] = fresh);
+    } catch (_) {}
+  }
 
   /// Fresh review card states (withdrawn, expired, store page changed).
   Future<void> _refreshReviews() async {
@@ -1301,6 +1331,10 @@ class _SupportViewState extends State<AppReferSupportView>
               if (card != null) offerCards[card.cardId] = card;
               final review = AppReferSupportReviewCard.fromJson(m['review']);
               if (review != null) reviewCards[review.cardId] = review;
+              final request = AppReferTestimonialRequest.fromJson(
+                m['testimonial'],
+              );
+              if (request != null) testimonials[request.requestId] = request;
             }
             messages.sort(
               (a, b) => '${a['createdAt']}'.compareTo('${b['createdAt']}'),
@@ -3840,6 +3874,37 @@ class _SupportViewState extends State<AppReferSupportView>
     final rawReview = raw == null
         ? AppReferSupportReviewCard.fromJson(m['review'])
         : null;
+    final rawRequest = raw == null && rawReview == null
+        ? AppReferTestimonialRequest.fromJson(m['testimonial'])
+        : null;
+    if (rawRequest != null) {
+      final request = testimonials[rawRequest.requestId] ?? rawRequest;
+      final words = '${m['text'] ?? ''}';
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (words.isNotEmpty || m['from'] == 'bot') ...[
+            _bubble(i),
+            const SizedBox(height: 8),
+          ],
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 38),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 340),
+                child: SupportTestimonialCard(
+                  request: request,
+                  palette: palette,
+                  colors: colors,
+                  open: () => _openTestimonial(request),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
     if (raw == null && rawReview == null) return _bubble(i);
     if (rawReview != null) {
       final review = reviewCards[rawReview.cardId] ?? rawReview;
