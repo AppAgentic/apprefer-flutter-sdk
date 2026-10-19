@@ -443,6 +443,7 @@ await AppReferSDK.support.open(context: context);
 await AppReferSDK.support.compose('Problem with my subscription', context: context);
 await AppReferSDK.support.identify(name: 'María', email: 'maria@example.com');
 AppReferSDK.support.accentColor = Colors.deepPurple; // hero, bubbles, send button
+AppReferSDK.support.headerStyle = AppReferSupportHeaderStyle.plain; // 0.11.1: flat neutral grey header (default .accent)
 AppReferSDK.support.title = 'My app support'; // defaults to "<App name> support", translated
 AppReferSDK.support.replyTime = 'a few hours'; // "We usually reply in …"; defaults to "under an hour", translated
 AppReferSDK.support.teamNames = ['Jay']; // first names shown on the home
@@ -487,7 +488,10 @@ an idea (`AppReferSupportTopic.billing`, `.restore`, `.bug`, `.idea`; their `id`
 message field's hint to the topic's `prompt` and sends its `title` as the conversation
 subject. `replyTimeText` was removed: use
 `replyTime`. The home's colours (hero glows, bubbles, avatars) are derived from
-`accentColor`; on a bright accent such as yellow, text on it turns dark.
+`accentColor`; on a bright accent such as yellow, text on it turns dark. With
+`headerStyle = AppReferSupportHeaderStyle.plain` (0.11.1) the home's header is a
+flat neutral grey with white / near-black text: no accent, glow or coloured
+presence avatar. Bubbles and buttons keep `accentColor`.
 
 Customers can attach up to four screenshots per message. Native system photo
 pickers need no photo-library permission. Images are reduced to at most 1600 px

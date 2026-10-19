@@ -1,3 +1,4 @@
+import 'package:apprefer/apprefer.dart';
 import 'package:apprefer/src/support/support_style.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -94,5 +95,125 @@ void main() {
     expect(supportFirstName('Jay Smith'), 'Jay');
     expect(supportFirstName('jay@example.com'), isNull);
     expect(supportFirstName('  '), isNull);
+  });
+
+  group('header style (0.11.1)', () {
+    bool neutral(Color c) =>
+        (c.r - c.g).abs() < 0.002 && (c.g - c.b).abs() < 0.002;
+    double contrast(Color a, Color b) {
+      final x = a.computeLuminance(), y = b.computeLuminance();
+      return ((x > y ? x : y) + 0.05) / ((x > y ? y : x) + 0.05);
+    }
+
+    const accents = [
+      Color(0xff7852ff),
+      Colors.white,
+      Color(0xffffd60a),
+      Color(0xff1fb866),
+    ];
+
+    test('defaults to accent and is exported', () {
+      expect(
+        AppReferSupport.instance.headerStyle,
+        AppReferSupportHeaderStyle.accent,
+      );
+      expect(AppReferSupportHeaderStyle.values, [
+        AppReferSupportHeaderStyle.accent,
+        AppReferSupportHeaderStyle.plain,
+      ]);
+    });
+
+    test('accent keeps the existing look', () {
+      for (final accent in accents) {
+        final p = SupportPalette(accent);
+        for (final dark in [true, false]) {
+          final h = SupportHeaderLook(
+            AppReferSupportHeaderStyle.accent,
+            p,
+            dark: dark,
+          );
+          expect(h.plain, isFalse);
+          expect(h.glows, isTrue);
+          expect(h.background, p.accent);
+          expect(h.foreground, p.onAccent);
+          expect(h.foregroundIsDark, p.darkOnAccent);
+          expect(
+            h.pillFill,
+            Colors.black.withValues(alpha: p.darkOnAccent ? 0.06 : 0.16),
+          );
+          expect(h.pillBorder, p.onAccent.withValues(alpha: 0.3));
+          expect(h.avatars, isNull);
+          expect(h.iconText, p.light);
+          expect(h.iconTile, const [Color(0xff29205c), Color(0xff0f0a1f)]);
+        }
+      }
+    });
+
+    test('a white accent glows tinted, which is why plain exists', () {
+      final p = SupportPalette(Colors.white);
+      expect(neutral(p.hot) && neutral(p.warm), isFalse);
+    });
+
+    test('plain is neutral, glow-free and readable', () {
+      for (final accent in accents) {
+        final p = SupportPalette(accent);
+        for (final dark in [true, false]) {
+          final h = SupportHeaderLook(
+            AppReferSupportHeaderStyle.plain,
+            p,
+            dark: dark,
+          );
+          expect(h.plain, isTrue);
+          expect(h.glows, isFalse);
+          expect(h.background, SupportHeaderLook.plainBackground(dark));
+          expect(h.foreground, SupportHeaderLook.plainInk(dark));
+          expect(h.foregroundIsDark, !dark);
+          for (final c in [
+            h.background,
+            h.foreground,
+            h.closeFill,
+            h.closeBorder,
+            h.pillFill,
+            h.pillBorder,
+            h.avatarRing,
+            h.iconText,
+            ...h.avatars!,
+            ...h.iconTile,
+          ]) {
+            expect(neutral(c), isTrue, reason: '$c');
+          }
+          expect(
+            contrast(h.foreground, h.background),
+            greaterThanOrEqualTo(4.5),
+          );
+          for (final a in h.avatars!) {
+            expect(contrast(Colors.white, a), greaterThanOrEqualTo(4.5));
+          }
+        }
+      }
+    });
+
+    test('the hero painter skips the glows for plain', () {
+      final p = SupportPalette(Colors.white);
+      final plain = SupportHeaderLook(
+        AppReferSupportHeaderStyle.plain,
+        p,
+        dark: true,
+      );
+      final accent = SupportHeaderLook(
+        AppReferSupportHeaderStyle.accent,
+        p,
+        dark: true,
+      );
+      expect(
+        SupportHeroPainter(
+          p,
+          null,
+          plain,
+        ).shouldRepaint(SupportHeroPainter(p, null, accent)),
+        isTrue,
+      );
+      expect(SupportHeroPainter(p, null).look.glows, isTrue);
+    });
   });
 }

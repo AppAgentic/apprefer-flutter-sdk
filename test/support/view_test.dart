@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'dart:convert';
 import 'package:apprefer/apprefer.dart';
+import 'package:apprefer/src/support/support_style.dart' show SupportHeroPainter;
 import 'package:apprefer/src/support/support_api.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -368,6 +369,55 @@ void main() {
     expect(find.text('CONTINUE'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
+  for (final style in AppReferSupportHeaderStyle.values) {
+    testWidgets('home header style ${style.name} (white accent, dark)', (
+      tester,
+    ) async {
+      final support = AppReferSupport.instance;
+      support.accentColor = Colors.white;
+      support.headerStyle = style;
+      addTearDown(
+        () => support.headerStyle = AppReferSupportHeaderStyle.accent,
+      );
+      tester.view.physicalSize = const Size(400, 840);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        root(
+          MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: ThemeData(brightness: Brightness.dark),
+            home: AppReferSupportView(api: api()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final painter = tester
+          .widgetList<CustomPaint>(find.byType(CustomPaint))
+          .map((p) => p.painter)
+          .whereType<SupportHeroPainter>()
+          .single;
+      final greeting = tester.widget<Text>(find.text('Hi María 👋'));
+      if (style == AppReferSupportHeaderStyle.plain) {
+        expect(painter.look.glows, isFalse);
+        expect(painter.look.background, const Color(0xff1c1c1c));
+        expect(greeting.style!.color, Colors.white);
+      } else {
+        expect(painter.look.glows, isTrue);
+        expect(painter.look.background, Colors.white);
+        expect(greeting.style!.color, const Color(0xff141414));
+      }
+      expect(
+        find.text('Jay and the team · usually under an hour'),
+        findsOneWidget,
+      );
+      expect(find.bySemanticsLabel('Close'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await capture(tester, 'home-header-${style.name}');
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
   testWidgets('presence line follows the team names', (tester) async {
     final support = AppReferSupport.instance;
     for (final (names, line) in [
