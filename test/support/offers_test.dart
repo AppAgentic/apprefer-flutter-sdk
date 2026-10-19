@@ -74,10 +74,7 @@ void main() {
   test('look follows the server state and whether the app set onOffer', () {
     expect(SupportOfferLook.of(card(), true), SupportOfferLook.open);
     expect(SupportOfferLook.of(card(), false), SupportOfferLook.unsupported);
-    expect(
-      SupportOfferLook.unsupported.notice,
-      "This offer can't be opened in this version of the app",
-    );
+    expect(SupportOfferLook.unsupported.notice, 'Update the app to open this');
     expect(
       SupportOfferLook.of(card({'status': 'owned'}), true),
       SupportOfferLook.owned,
@@ -88,7 +85,7 @@ void main() {
     );
     expect(
       SupportOfferLook.unavailable.notice,
-      'This offer is no longer available',
+      'These options are no longer available',
     );
     expect(
       SupportOfferLook.of(card({'status': 'paused'}), true),
@@ -109,8 +106,164 @@ void main() {
     expect(supportOfferLabel(custom, null), 'Option');
     SupportStrings.forcedLanguage = 'de';
     expect(supportOfferLabel(c.packages[0], null), 'Jährlich');
-    expect(SupportStrings.text('support.offer.open'), 'Angebot ansehen');
+    expect(SupportStrings.text('support.offer.open'), 'Optionen ansehen');
   });
+
+  test('ordinary full-price cards never read like a deal, in any language', () {
+    const deal = [
+      'offer',
+      'angebot',
+      'offre',
+      'oferta',
+      'offerta',
+      'deal',
+      'discount',
+      'rabatt',
+      'скидк',
+      'предложени',
+      'オファー',
+      '優惠',
+      '优惠',
+      '折扣',
+      '할인',
+      '割引',
+    ];
+    for (final language in [
+      'en',
+      'de',
+      'fr',
+      'es',
+      'it',
+      'pt-BR',
+      'nl',
+      'ru',
+      'ja',
+      'ko',
+      'zh-Hans',
+      'zh-Hant',
+    ]) {
+      SupportStrings.forcedLanguage = language;
+      for (final key in [
+        'support.offer.title',
+        'support.offer.open',
+        'support.offer.unavailable',
+        'support.offer.unsupported',
+        'support.offer.a11y.hint',
+      ]) {
+        final text = SupportStrings.text(key).toLowerCase();
+        expect(
+          deal.where(text.contains),
+          isEmpty,
+          reason: '$language $key: $text',
+        );
+      }
+    }
+  });
+
+  test(
+    'prices carry the store\'s own period; one-time and unusual periods show the bare price',
+    () {
+      expect(
+        supportOfferPriceText(
+          const SupportOfferPrice('£29.99', null, period: 'P1Y'),
+        ),
+        '£29.99/year',
+      );
+      expect(
+        supportOfferPriceText(
+          const SupportOfferPrice('£4.99', null, period: 'P1M'),
+        ),
+        '£4.99/month',
+      );
+      expect(
+        supportOfferPriceText(
+          const SupportOfferPrice('£2.99', null, period: 'P7D'),
+        ),
+        '£2.99/week',
+      );
+      expect(
+        supportOfferPriceText(
+          const SupportOfferPrice('£9.99', null, period: 'P6M'),
+        ),
+        '£9.99 every 6 months',
+      );
+      expect(
+        supportOfferPriceText(
+          const SupportOfferPrice('£4.99', null, oneTime: true),
+        ),
+        '£4.99',
+      );
+      expect(
+        supportOfferPriceText(
+          const SupportOfferPrice('£1.99', null, period: 'P3D'),
+        ),
+        '£1.99',
+      );
+      SupportStrings.forcedLanguage = 'fr';
+      expect(
+        supportOfferPriceText(
+          const SupportOfferPrice('29,99 €', null, period: 'P1Y'),
+        ),
+        '29,99 €/an',
+      );
+    },
+  );
+
+  test(
+    'owned subscriptions are the current plan, owned one-offs are purchased',
+    () {
+      const sub = AppReferSupportOfferPackage(
+        id: r'$ar_annual',
+        packageType: 'annual',
+        productId: 'p',
+        current: true,
+      );
+      const life = AppReferSupportOfferPackage(
+        id: r'$ar_lifetime',
+        packageType: 'lifetime',
+        productId: 'l',
+        current: true,
+      );
+      const pack = AppReferSupportOfferPackage(
+        id: 'gold',
+        packageType: 'custom',
+        productId: 'g',
+        current: true,
+      );
+      expect(
+        supportOfferOwnedTag(
+          sub,
+          const SupportOfferPrice(
+            '£29.99',
+            null,
+            period: 'P1Y',
+            oneTime: false,
+          ),
+        ),
+        'Current plan',
+      );
+      expect(supportOfferOwnedTag(sub, null), 'Current plan');
+      expect(supportOfferOwnedTag(life, null), 'Purchased');
+      expect(
+        supportOfferOwnedTag(
+          pack,
+          const SupportOfferPrice('£4.99', null, oneTime: true),
+        ),
+        'Purchased',
+      );
+      expect(
+        supportOfferOwnedTag(
+          const AppReferSupportOfferPackage(
+            id: 'm',
+            packageType: 'monthly',
+            productId: 'm',
+          ),
+          null,
+        ),
+        isNull,
+      );
+    },
+  );
 
   test(
     'receipt queue persists, dedupes, drops old or over-retried ones',
@@ -273,7 +426,10 @@ void main() {
       final calls = requests
           .where((r) => r.url.path != '/api/support/v1/session')
           .toList();
-      expect(calls[0].headers['X-AppRefer-Support-Features'], 'offers, reviews');
+      expect(
+        calls[0].headers['X-AppRefer-Support-Features'],
+        'offers, reviews',
+      );
       expect(calls[0].url.queryParameters, {
         'platform': 'android',
         'after': '2026-10-19T12:00:00.000Z',
@@ -500,14 +656,14 @@ void main() {
         final got = <AppReferSupportOffer>[];
         AppReferSDK.support.onOffer = got.add;
         await open(tester);
-        expect(find.text('An offer for you'), findsOneWidget);
+        expect(find.text('Options for you'), findsOneWidget);
         expect(find.text('Yearly'), findsOneWidget);
         expect(find.text('Monthly Pro'), findsOneWidget);
         expect(find.text('Current plan'), findsOneWidget);
         // No prices without AppRefer Billing: never made up.
         expect(find.textContaining(r'$'), findsNothing);
         await capture(tester, 'offer-card-light');
-        await tester.tap(find.text('View offer'));
+        await tester.tap(find.text('See options'));
         await tester.pumpAndSettle();
         expect(got.map((o) => (o.offeringId, o.conversationId, o.cardId)), [
           ('main', 'c', 'ofc_0123456789abcdef01234567'),
@@ -529,11 +685,14 @@ void main() {
       await open(tester);
       eventStatus = 409;
       current = {...cardJson, 'status': 'unavailable', 'reason': 'revoked'};
-      await tester.tap(find.text('View offer'));
+      await tester.tap(find.text('See options'));
       await tester.pumpAndSettle();
       expect(got, isEmpty);
-      expect(find.text('This offer is no longer available'), findsOneWidget);
-      expect(find.text('View offer'), findsNothing);
+      expect(
+        find.text('These options are no longer available'),
+        findsOneWidget,
+      );
+      expect(find.text('See options'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -541,11 +700,8 @@ void main() {
       'without onOffer the card says so honestly; disabled states in dark',
       (tester) async {
         await open(tester, brightness: Brightness.dark);
-        expect(
-          find.text("This offer can't be opened in this version of the app"),
-          findsOneWidget,
-        );
-        expect(find.text('View offer'), findsNothing);
+        expect(find.text('Update the app to open this'), findsOneWidget);
+        expect(find.text('See options'), findsNothing);
         await capture(tester, 'offer-card-unsupported-dark');
         await tester.pumpWidget(const SizedBox());
         current = {

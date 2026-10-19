@@ -1182,6 +1182,7 @@ class _SupportViewState extends State<AppReferSupportView>
 
   Widget _offerRow(AppReferSupportOfferPackage p, SupportOfferPrice? price) {
     final label = supportOfferLabel(p, price?.name);
+    final tag = supportOfferOwnedTag(p, price);
     return MergeSemantics(
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 11),
@@ -1199,7 +1200,7 @@ class _SupportViewState extends State<AppReferSupportView>
                 ),
               ),
             ),
-            if (p.current) ...[
+            if (tag != null) ...[
               const SizedBox(width: 8),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -1208,7 +1209,7 @@ class _SupportViewState extends State<AppReferSupportView>
                   borderRadius: BorderRadius.circular(99),
                 ),
                 child: Text(
-                  SupportStrings.text('support.offer.current'),
+                  tag,
                   style: TextStyle(
                     fontSize: 11.5,
                     fontWeight: FontWeight.w600,
@@ -1220,7 +1221,8 @@ class _SupportViewState extends State<AppReferSupportView>
             if (price != null) ...[
               const SizedBox(width: 8),
               Text(
-                price.price,
+                supportOfferPriceText(price),
+                textAlign: TextAlign.end,
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w600,

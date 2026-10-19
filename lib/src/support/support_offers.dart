@@ -10,6 +10,12 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:in_app_purchase/in_app_purchase.dart' show ProductDetails;
 import 'package:in_app_purchase_android/in_app_purchase_android.dart';
+import 'package:in_app_purchase_storekit/in_app_purchase_storekit.dart'
+    show AppStoreProduct2Details, AppStoreProductDetails;
+import 'package:in_app_purchase_storekit/store_kit_2_wrappers.dart'
+    show SK2SubscriptionPeriodUnit;
+import 'package:in_app_purchase_storekit/store_kit_wrappers.dart'
+    show SKSubscriptionPeriodUnit;
 
 import '../billing/apprefer_billing.dart';
 import 'support_api.dart';
@@ -228,19 +234,71 @@ String supportOfferLabel(AppReferSupportOfferPackage p, String? storeName) {
   return SupportStrings.text('support.offer.package.custom');
 }
 
-/// A store price and product name for one package, from AppRefer Billing.
+/// The `support.offer.price.*` key for a store billing period (ISO 8601,
+/// e.g. `P1Y`), or null for one-time purchases and periods the table doesn't
+/// word (the bare store price is shown).
+String? supportOfferPeriodKey(String? iso) {
+  final m = RegExp(r'^P(\d+)([DWMY])$').firstMatch(iso?.toUpperCase() ?? '');
+  final n = int.tryParse(m?.group(1) ?? '');
+  if (m == null || n == null) return null;
+  return switch ((m.group(2), n)) {
+    ('D', 7) || ('W', 1) => 'week',
+    ('D', 28) || ('W', 4) => 'fourWeeks',
+    ('M', 1) => 'month',
+    ('M', 2) => 'twoMonths',
+    ('M', 3) => 'threeMonths',
+    ('M', 6) => 'sixMonths',
+    ('M', 12) || ('Y', 1) => 'year',
+    _ => null,
+  };
+}
+
+/// The store's own regular price with the store's own billing period, e.g.
+/// "£29.99/year".
+String supportOfferPriceText(SupportOfferPrice p) {
+  final key = supportOfferPeriodKey(p.period);
+  return key == null
+      ? p.price
+      : SupportStrings.text('support.offer.price.$key', {'price': p.price});
+}
+
+/// The tag on a row the customer already has: "Purchased" for a one-off,
+/// "Current plan" for a subscription.
+String? supportOfferOwnedTag(
+  AppReferSupportOfferPackage p,
+  SupportOfferPrice? price,
+) {
+  if (!p.current) return null;
+  final oneOff = price?.oneTime ?? p.packageType == 'lifetime';
+  return SupportStrings.text(
+    oneOff ? 'support.offer.purchased' : 'support.offer.current',
+  );
+}
+
+/// A store price and product name for one package, from AppRefer Billing:
+/// the regular price (never a trial or introductory phase) with the store's
+/// billing period (ISO 8601; null for one-time purchases).
 @immutable
 class SupportOfferPrice {
-  const SupportOfferPrice(this.price, this.name);
+  const SupportOfferPrice(this.price, this.name, {this.period, this.oneTime});
   final String price;
   final String? name;
+  final String? period;
+
+  /// A one-time purchase (credit pack, lifetime unlock); null when the store
+  /// didn't say.
+  final bool? oneTime;
 
   @override
   bool operator ==(Object other) =>
-      other is SupportOfferPrice && other.price == price && other.name == name;
+      other is SupportOfferPrice &&
+      other.price == price &&
+      other.name == name &&
+      other.period == period &&
+      other.oneTime == oneTime;
 
   @override
-  int get hashCode => Object.hash(price, name);
+  int get hashCode => Object.hash(price, name, period, oneTime);
 }
 
 /// Store prices for the offerings on screen, from AppRefer Billing (the
@@ -261,6 +319,8 @@ Future<Map<String, Map<String, SupportOfferPrice>>> supportOfferPrices(
               p.identifier: SupportOfferPrice(
                 supportStorePrice(p.storeProduct),
                 p.storeProduct.title,
+                period: supportStorePeriod(p.storeProduct),
+                oneTime: supportStoreOneTime(p.storeProduct),
               ),
           },
     };
@@ -284,6 +344,60 @@ String supportStorePrice(ProductDetails product) {
     return product.price;
   }
   return product.price;
+}
+
+/// The store's billing period of the price [supportStorePrice] shows (ISO
+/// 8601): Google Play's recurring phase, StoreKit's subscription period.
+String? supportStorePeriod(ProductDetails product) {
+  if (product is GooglePlayProductDetails) {
+    final index = product.subscriptionIndex;
+    final offers = product.productDetails.subscriptionOfferDetails;
+    if (index == null ||
+        offers == null ||
+        index >= offers.length ||
+        offers[index].pricingPhases.isEmpty) {
+      return null;
+    }
+    final period = offers[index].pricingPhases.last.billingPeriod;
+    return period.isEmpty ? null : period;
+  }
+  if (product is AppStoreProduct2Details) {
+    final period = product.sk2Product.subscription?.subscriptionPeriod;
+    if (period == null) return null;
+    final unit = switch (period.unit) {
+      SK2SubscriptionPeriodUnit.day => 'D',
+      SK2SubscriptionPeriodUnit.week => 'W',
+      SK2SubscriptionPeriodUnit.month => 'M',
+      SK2SubscriptionPeriodUnit.year => 'Y',
+    };
+    return 'P${period.value}$unit';
+  }
+  if (product is AppStoreProductDetails) {
+    final period = product.skProduct.subscriptionPeriod;
+    if (period == null || period.numberOfUnits <= 0) return null;
+    final unit = switch (period.unit) {
+      SKSubscriptionPeriodUnit.day => 'D',
+      SKSubscriptionPeriodUnit.week => 'W',
+      SKSubscriptionPeriodUnit.month => 'M',
+      SKSubscriptionPeriodUnit.year => 'Y',
+    };
+    return 'P${period.numberOfUnits}$unit';
+  }
+  return null;
+}
+
+/// Whether the product is a one-time purchase; null when the store type
+/// doesn't say.
+bool? supportStoreOneTime(ProductDetails product) {
+  if (product is GooglePlayProductDetails)
+    return product.subscriptionIndex == null;
+  if (product is AppStoreProduct2Details) {
+    return product.sk2Product.subscription == null;
+  }
+  if (product is AppStoreProductDetails) {
+    return product.skProduct.subscriptionPeriod == null;
+  }
+  return null;
 }
 
 /// A receipt the server hasn't confirmed yet. Same id on every retry, so
