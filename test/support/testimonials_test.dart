@@ -202,6 +202,42 @@ void main() {
     );
   });
 
+  test('the submit button says whether it allows sharing', () async {
+    final t = FakeTransport(request());
+    final flow = TestimonialFlow(t.current.requestId, t);
+    await flow.load();
+    flow.picked(photo);
+    expect(flow.submitLabelKey, 'support.testimonial.submitPublic');
+    expect(SupportStrings.text(flow.submitLabelKey), 'Send and allow sharing');
+    flow.publish = false;
+    expect(SupportStrings.text(flow.submitLabelKey), 'Send privately');
+    t.failSubmit = const SocketException('connection reset');
+    await flow.submit();
+    expect(flow.phase, TestimonialPhase.failed);
+    expect(
+      SupportStrings.text(flow.submitLabelKey),
+      'Send privately',
+      reason: 'a retry still names what it sends',
+    );
+    await flow.submit();
+    expect(t.submits.map((s) => s[2]), [
+      false,
+      false,
+    ], reason: 'the label matches the answer sent');
+    for (final language in supportLanguages) {
+      for (final key in [
+        'support.testimonial.submitPublic',
+        'support.testimonial.submitPrivate',
+      ]) {
+        expect(
+          supportStringsTable[language]?[key],
+          isNotEmpty,
+          reason: '$key in $language',
+        );
+      }
+    }
+  });
+
   test(
     'a request without permission text is never submitted with an assumed answer',
     () async {
@@ -209,6 +245,11 @@ void main() {
       final flow = TestimonialFlow(t.current.requestId, t);
       await flow.load();
       expect(flow.request?.permissionVersion, isNull);
+      expect(
+        flow.submitLabelKey,
+        'support.testimonial.submit',
+        reason: 'no switch, so the button claims neither sharing nor privacy',
+      );
       flow.picked(photo);
       await flow.submit();
       expect(t.submits, isEmpty);
@@ -434,14 +475,22 @@ void main() {
     final toggle = find.byType(SwitchListTile);
     expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
     expect(t.submits, isEmpty, reason: 'showing the switch records nothing');
+    await tester.scrollUntilVisible(find.text('Send and allow sharing'), 200);
+    expect(find.text('Send privately'), findsNothing);
+    expect(
+      find.text('Share'),
+      findsNothing,
+      reason: 'the button names what it sends',
+    );
     await tester.ensureVisible(toggle);
     await tester.tap(toggle);
     await tester.pumpAndSettle();
     expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
-    await tester.scrollUntilVisible(find.text('Share'), 200);
-    await tester.ensureVisible(find.text('Share'));
+    expect(find.text('Send and allow sharing'), findsNothing);
+    await tester.scrollUntilVisible(find.text('Send privately'), 200);
+    await tester.ensureVisible(find.text('Send privately'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Share'));
+    await tester.tap(find.text('Send privately'));
     await tester.pumpAndSettle();
     expect(find.text('Thanks for sharing!'), findsOneWidget);
     // Earned, not yet confirmed by the app's backend: no delivery promise.

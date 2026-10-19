@@ -21,7 +21,8 @@ import 'support_style.dart';
 // permission text come from the request: the SDK never chooses a reward and
 // never ties it to what is said. Taking part earns the reward; public use is a
 // separate switch that starts on and the customer can turn off. Only the final
-// Share sends its value, with the permission version shown.
+// button sends its value ("Send and allow sharing" / "Send privately"), with the
+// permission version shown.
 
 /// A photo/video request as the server sends it.
 @immutable
@@ -368,6 +369,17 @@ class TestimonialFlow extends ChangeNotifier {
   /// request without permission text (an older server) can't be submitted,
   /// so no permission is ever assumed.
   bool publish = true;
+
+  /// The final button says what it sends: "Send and allow sharing" while the
+  /// switch is on, "Send privately" while it is off (also on retry). Without
+  /// permission text there is no switch and nothing can be submitted, so it
+  /// keeps the plain label.
+  String get submitLabelKey =>
+      request?.permissionText == null || request?.permissionVersion == null
+      ? 'support.testimonial.submit'
+      : publish
+      ? 'support.testimonial.submitPublic'
+      : 'support.testimonial.submitPrivate';
 
   /// The localized message for the last problem (null when none).
   String? notice;
@@ -1067,11 +1079,7 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
         _ => [
           if (f != null)
             _button(
-              SupportStrings.text(
-                flow.phase == TestimonialPhase.failed
-                    ? 'support.action.tryAgain'
-                    : 'support.testimonial.submit',
-              ),
+              SupportStrings.text(flow.submitLabelKey),
               palette,
               true,
               () => flow.submit(),
