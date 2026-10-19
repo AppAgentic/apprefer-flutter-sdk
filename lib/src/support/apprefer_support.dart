@@ -89,6 +89,13 @@ class AppReferSupport with WidgetsBindingObserver {
   /// Bubble and button colour. Defaults to the host theme's primary colour.
   Color? accentColor;
 
+  /// The home screen's header. [AppReferSupportHeaderStyle.accent] (the
+  /// default) fills it with the accent and soft coloured glows;
+  /// [AppReferSupportHeaderStyle.plain] is a flat neutral grey with the page's
+  /// text colour, for apps whose design has no colour accents. Bubbles and
+  /// buttons keep [accentColor] either way.
+  AppReferSupportHeaderStyle headerStyle = AppReferSupportHeaderStyle.accent;
+
   /// Hero title. Defaults to "<App name> support" in the chat's language.
   String? title;
 
@@ -421,6 +428,7 @@ class _SupportViewState extends State<AppReferSupportView>
   Timer? timer;
   late SupportPalette palette;
   late SupportColors colors;
+  late SupportHeaderLook header;
   ThemeData? _theme;
   Object? _themeKey;
   String get title =>
@@ -1305,9 +1313,9 @@ class _SupportViewState extends State<AppReferSupportView>
   }
 
   Widget _hero() {
-    final on = palette.onAccent;
+    final on = header.foreground;
     return CustomPaint(
-      painter: SupportHeroPainter(palette, homeScroll),
+      painter: SupportHeroPainter(palette, homeScroll, header),
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           22,
@@ -1334,12 +1342,8 @@ class _SupportViewState extends State<AppReferSupportView>
                         height: 40,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: palette.darkOnAccent
-                              ? Colors.black.withValues(alpha: 0.06)
-                              : Colors.white.withValues(alpha: 0.24),
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.45),
-                          ),
+                          color: header.closeFill,
+                          border: Border.all(color: header.closeBorder),
                         ),
                         child: Icon(Icons.close_rounded, size: 22, color: on),
                       ),
@@ -1410,8 +1414,8 @@ class _SupportViewState extends State<AppReferSupportView>
             ),
           ],
           gradient: image == null
-              ? const LinearGradient(
-                  colors: [Color(0xff29205c), Color(0xff0f0a1f)],
+              ? LinearGradient(
+                  colors: header.iconTile,
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 )
@@ -1427,7 +1431,7 @@ class _SupportViewState extends State<AppReferSupportView>
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w800,
-                  color: palette.light,
+                  color: header.iconText,
                 ),
               )
             : null,
@@ -1453,15 +1457,15 @@ class _SupportViewState extends State<AppReferSupportView>
     // The assistant comes first, then the team, overlapping by 8.
     final offset = persona == null ? 0 : 1;
     final count = names.length + offset;
-    final on = palette.onAccent;
+    final on = header.foreground;
+    final faces = header.avatars;
+    final ring = header.avatarRing;
     return Container(
       padding: const EdgeInsetsDirectional.fromSTEB(8, 7, 14, 7),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(
-          alpha: palette.darkOnAccent ? 0.06 : 0.16,
-        ),
+        color: header.pillFill,
         borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: on.withValues(alpha: 0.3)),
+        border: Border.all(color: header.pillBorder),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1475,9 +1479,10 @@ class _SupportViewState extends State<AppReferSupportView>
                   ? [
                       SupportAvatar(
                         size: 28,
-                        colors: [palette.warm, palette.hot],
+                        colors: faces ?? [palette.warm, palette.hot],
                         icon: Icons.chat_bubble_rounded,
                         ring: true,
+                        ringColor: ring,
                       ),
                     ]
                   : [
@@ -1487,8 +1492,9 @@ class _SupportViewState extends State<AppReferSupportView>
                           child: SupportAvatar(
                             name: names[i],
                             size: 28,
-                            colors: _avatarColors(i),
+                            colors: faces ?? _avatarColors(i),
                             ring: true,
+                            ringColor: ring,
                           ),
                         ),
                       if (persona != null)
@@ -1497,9 +1503,10 @@ class _SupportViewState extends State<AppReferSupportView>
                           child: SupportAvatar(
                             name: persona.name,
                             size: 28,
-                            colors: [palette.warm, palette.hot],
+                            colors: faces ?? [palette.warm, palette.hot],
                             imageUrl: persona.avatarUrl,
                             ring: true,
+                            ringColor: ring,
                           ),
                         ),
                     ],
@@ -3605,8 +3612,9 @@ class _SupportViewState extends State<AppReferSupportView>
     final brightness = dark ? Brightness.dark : Brightness.light;
     palette = SupportPalette(accent);
     colors = SupportColors(dark);
+    header = SupportHeaderLook(config.headerStyle, palette, dark: dark);
     final overlay = id == null && helpStack.isEmpty
-        ? (palette.darkOnAccent
+        ? (header.foregroundIsDark
               ? SystemUiOverlayStyle.dark
               : SystemUiOverlayStyle.light)
         : (dark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark);

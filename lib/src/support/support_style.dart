@@ -96,11 +96,130 @@ String? supportFirstName(String? name) {
   return trimmed.split(RegExp(r'\s+')).first;
 }
 
-/// The hero: accent plus three soft radial glows. Paints upward into the
-/// overscroll gap when the home is pulled down, so the colour never ends early.
+/// How `AppReferSupport.headerStyle` draws the home screen's header.
+enum AppReferSupportHeaderStyle {
+  /// The accent with soft coloured glows (the default).
+  accent,
+
+  /// A flat neutral grey surface with the page's text colour: no accent,
+  /// glow or colour.
+  plain,
+}
+
+/// How the home header is drawn for an [AppReferSupportHeaderStyle] (the
+/// iOS/Android `SupportHeaderLook`). Accent is the accent with three soft
+/// glows and text that follows it; plain is one flat neutral grey with the
+/// page's text colour: no accent, glow or coloured avatar in the header.
+class SupportHeaderLook {
+  factory SupportHeaderLook(
+    AppReferSupportHeaderStyle style,
+    SupportPalette palette, {
+    required bool dark,
+  }) {
+    if (style == AppReferSupportHeaderStyle.plain) {
+      final background = plainBackground(dark);
+      final ink = plainInk(dark);
+      return SupportHeaderLook._(
+        plain: true,
+        background: background,
+        foreground: ink,
+        foregroundIsDark: !dark,
+        closeFill: ink.withValues(alpha: 0.08),
+        closeBorder: ink.withValues(alpha: 0.16),
+        pillFill: ink.withValues(alpha: 0.06),
+        pillBorder: ink.withValues(alpha: 0.16),
+        avatars: plainAvatar,
+        avatarRing: background,
+        iconTile: const [Color(0xff3d3d3d), Color(0xff1c1c1c)],
+        iconText: Colors.white,
+      );
+    }
+    final on = palette.onAccent;
+    return SupportHeaderLook._(
+      plain: false,
+      background: palette.accent,
+      foreground: on,
+      foregroundIsDark: palette.darkOnAccent,
+      closeFill: palette.darkOnAccent
+          ? Colors.black.withValues(alpha: 0.06)
+          : Colors.white.withValues(alpha: 0.24),
+      closeBorder: Colors.white.withValues(alpha: 0.45),
+      pillFill: Colors.black.withValues(
+        alpha: palette.darkOnAccent ? 0.06 : 0.16,
+      ),
+      pillBorder: on.withValues(alpha: 0.3),
+      avatars: null,
+      avatarRing: Colors.white.withValues(alpha: 0.9),
+      iconTile: const [Color(0xff29205c), Color(0xff0f0a1f)],
+      iconText: palette.light,
+    );
+  }
+
+  const SupportHeaderLook._({
+    required this.plain,
+    required this.background,
+    required this.foreground,
+    required this.foregroundIsDark,
+    required this.closeFill,
+    required this.closeBorder,
+    required this.pillFill,
+    required this.pillBorder,
+    required this.avatars,
+    required this.avatarRing,
+    required this.iconTile,
+    required this.iconText,
+  });
+
+  final bool plain;
+
+  /// The header's base fill; accent draws its glows on top.
+  final Color background;
+  bool get glows => !plain;
+
+  /// Title, greeting, subtitle, presence text and the close icon.
+  final Color foreground;
+
+  /// Whether [foreground] is dark (the status bar over the header follows it).
+  final bool foregroundIsDark;
+  final Color closeFill, closeBorder, pillFill, pillBorder;
+
+  /// Avatars in the presence pill; null keeps the accent's and per-person colours.
+  final List<Color>? avatars;
+
+  /// The ring that separates overlapping avatars.
+  final Color avatarRing;
+
+  /// The initials tile shown when the app has no icon.
+  final List<Color> iconTile;
+  final Color iconText;
+
+  /// Neutral (R = G = B) greys: a step up from the page in dark mode, a step down in light.
+  static Color plainBackground(bool dark) =>
+      dark ? const Color(0xff1c1c1c) : const Color(0xffebebeb);
+
+  /// White, or a neutral near-black (the page's ink has a faint tint the plain header avoids).
+  static Color plainInk(bool dark) =>
+      dark ? Colors.white : const Color(0xff121212);
+
+  /// White initials on these read at 5:1 or better.
+  static const plainAvatar = [Color(0xff6b6b6b), Color(0xff3a3a3a)];
+}
+
+/// The hero: accent plus three soft radial glows, or the plain header's flat
+/// grey. Paints upward into the overscroll gap when the home is pulled down,
+/// so the colour never ends early.
 class SupportHeroPainter extends CustomPainter {
-  SupportHeroPainter(this.palette, this.scroll) : super(repaint: scroll);
+  SupportHeroPainter(this.palette, this.scroll, [SupportHeaderLook? look])
+    : look =
+          look ??
+          SupportHeaderLook(
+            AppReferSupportHeaderStyle.accent,
+            palette,
+            dark: false,
+          ),
+      super(repaint: scroll);
   final SupportPalette palette;
+  final SupportHeaderLook look;
   final ScrollController? scroll;
 
   @override
@@ -109,7 +228,8 @@ class SupportHeroPainter extends CustomPainter {
         ? (-scroll!.offset).clamp(0.0, double.infinity)
         : 0.0;
     final rect = Rect.fromLTRB(0, -pull, size.width, size.height);
-    canvas.drawRect(rect, Paint()..color = palette.accent);
+    canvas.drawRect(rect, Paint()..color = look.background);
+    if (!look.glows) return;
     void glow(Color color, double x, double y, double radius) {
       final center = Offset(
         rect.left + rect.width * x,
@@ -132,7 +252,10 @@ class SupportHeroPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(SupportHeroPainter old) =>
-      old.palette.accent != palette.accent || old.scroll != scroll;
+      old.palette.accent != palette.accent ||
+      old.look.background != look.background ||
+      old.look.glows != look.glows ||
+      old.scroll != scroll;
 }
 
 /// A round avatar: a person's initial, or an icon, on a gradient.
@@ -144,6 +267,7 @@ class SupportAvatar extends StatelessWidget {
     required this.colors,
     this.icon,
     this.ring = false,
+    this.ringColor,
     this.imageUrl,
   });
   final String? name;
@@ -151,6 +275,9 @@ class SupportAvatar extends StatelessWidget {
   final List<Color> colors;
   final IconData? icon;
   final bool ring;
+
+  /// The ring's colour; white by default.
+  final Color? ringColor;
 
   /// A portrait (the AI assistant's); the initial shows until it loads, or if it can't.
   final String? imageUrl;
@@ -196,7 +323,7 @@ class SupportAvatar extends StatelessWidget {
       ),
       border: ring
           ? Border.all(
-              color: Colors.white.withValues(alpha: 0.9),
+              color: ringColor ?? Colors.white.withValues(alpha: 0.9),
               width: 2,
               strokeAlign: BorderSide.strokeAlignOutside,
             )
