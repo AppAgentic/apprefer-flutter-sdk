@@ -538,6 +538,26 @@ class _SupportViewState extends State<AppReferSupportView>
   final List<_Pending> pending = [];
   bool sending = false, loading = true, refreshing = false, active = true;
   double composerHeight = 90;
+
+  /// The home's floating composer (with its chip, error line and photos), measured.
+  double homeComposerHeight = 100;
+
+  /// The home's height as last laid out (it shrinks when the keyboard opens).
+  double? homeViewport;
+
+  bool get _homeAtEnd {
+    if (!homeScroll.hasClients) return false;
+    final p = homeScroll.position;
+    return p.hasContentDimensions &&
+        supportHomeAtEnd(p.pixels, p.maxScrollExtent);
+  }
+
+  /// After the next layout, back to the end of the home (the composer or the
+  /// keyboard took more room while the customer was already at the end).
+  void _keepHomeEnd() => WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!mounted || !homeScroll.hasClients) return;
+    homeScroll.jumpTo(homeScroll.position.maxScrollExtent);
+  });
   Timer? timer;
   late SupportPalette palette;
   late SupportColors colors;
@@ -2030,6 +2050,25 @@ class _SupportViewState extends State<AppReferSupportView>
     final selection = supportContinueSelection(conversations);
     final current = selection.current;
     final topics = config.topics;
+    return LayoutBuilder(
+      builder: (context, box) {
+        // The keyboard opening shrinks the home. Read before the scroll view lays
+        // out again, so it is where the customer was: only someone already at the
+        // end stays there; someone reading higher up isn't moved.
+        final viewport = box.maxHeight;
+        final old = homeViewport;
+        homeViewport = viewport;
+        if (old != null && viewport < old && _homeAtEnd) _keepHomeEnd();
+        return _homeStack(current, selection.others, topics);
+      },
+    );
+  }
+
+  Widget _homeStack(
+    Map<String, dynamic>? current,
+    List<Map<String, dynamic>> others,
+    List<AppReferSupportTopic> topics,
+  ) {
     return Stack(
       children: [
         Positioned.fill(
@@ -2045,7 +2084,16 @@ class _SupportViewState extends State<AppReferSupportView>
                 Transform.translate(
                   offset: const Offset(0, -62),
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 78),
+                    // The page ends 64 pt above the composer as it really is (taller
+                    // with a chip, photos, several lines or large text), so the last
+                    // tiles always scroll clear of it. The pull-up already leaves 62 pt
+                    // under the last section, which is followed by 24 pt.
+                    padding: EdgeInsets.fromLTRB(
+                      16,
+                      0,
+                      16,
+                      homeComposerHeight + 64 - 62 - 24,
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
@@ -2061,8 +2109,7 @@ class _SupportViewState extends State<AppReferSupportView>
                               topics,
                               labelled: current != null || articles.isNotEmpty,
                             ),
-                          if (selection.others.isNotEmpty)
-                            _pastConversations(selection.others),
+                          if (others.isNotEmpty) _pastConversations(others),
                           if (loading && conversations.isEmpty)
                             const Center(child: CircularProgressIndicator()),
                           if (loadError.isNotEmpty && conversations.isEmpty)
@@ -2086,12 +2133,23 @@ class _SupportViewState extends State<AppReferSupportView>
           left: 0,
           right: 0,
           bottom: 0,
-          child: _composer(
-            home: true,
-            above: [
-              if (sendError.isNotEmpty) _errorLine(sendError),
-              if (topic != null) _topicChip(topic!),
-            ],
+          child: _MeasureSize(
+            onChange: (size) {
+              if (mounted && size.height != homeComposerHeight) {
+                // More lines, a topic, photos or an error: someone already at
+                // the end stays there.
+                final keepEnd = _homeAtEnd;
+                setState(() => homeComposerHeight = size.height);
+                if (keepEnd) _keepHomeEnd();
+              }
+            },
+            child: _composer(
+              home: true,
+              above: [
+                if (sendError.isNotEmpty) _errorLine(sendError),
+                if (topic != null) _topicChip(topic!),
+              ],
+            ),
           ),
         ),
       ],
@@ -2415,17 +2473,20 @@ class _SupportViewState extends State<AppReferSupportView>
       ],
       for (var i = 0; i < topics.length; i += 2) ...[
         if (i > 0) const SizedBox(height: 10),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(child: _tile(topics[i])),
-            const SizedBox(width: 10),
-            Expanded(
-              child: i + 1 < topics.length
-                  ? _tile(topics[i + 1])
-                  : const SizedBox(),
-            ),
-          ],
+        // Both tiles of a row take the taller one's height (a subtitle may wrap).
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(child: _tile(topics[i])),
+              const SizedBox(width: 10),
+              Expanded(
+                child: i + 1 < topics.length
+                    ? _tile(topics[i + 1])
+                    : const SizedBox(),
+              ),
+            ],
+          ),
         ),
       ],
     ],
@@ -2466,12 +2527,13 @@ class _SupportViewState extends State<AppReferSupportView>
               ),
             ),
           ),
-          Text(
-            t.subtitle,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 12.5, color: colors.muted),
-          ),
+          if (t.subtitle.isNotEmpty)
+            Text(
+              t.subtitle,
+              maxLines: supportTileSubtitleLines,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12.5, color: colors.muted),
+            ),
         ],
       ),
     ),
@@ -2864,7 +2926,11 @@ class _SupportViewState extends State<AppReferSupportView>
           ),
           const SizedBox(height: 4),
           for (final article in top) ...[
-            _articleRow(article, summaryLines: 1, horizontal: 0),
+            _articleRow(
+              article,
+              summaryLines: supportHomeSummaryLines,
+              horizontal: 0,
+            ),
             if (!identical(article, top.last))
               Divider(
                 height: 1,
