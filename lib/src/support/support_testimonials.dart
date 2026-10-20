@@ -19,10 +19,9 @@ import 'support_style.dart';
 // only answers one, for the account the support session is verified for
 // (`AppReferSDK.support.verifyIdentity`). The reward and the publication
 // permission text come from the request: the SDK never chooses a reward and
-// never ties it to what is said. Taking part earns the reward; public use is a
-// separate switch that starts on and the customer can turn off. Only the final
-// button sends its value ("Send and allow sharing" / "Send privately"), with the
-// permission version shown.
+// never ties it to what is said or to later use. The app's usage terms are
+// shown word for word above a plain Submit ("By submitting, you agree to these
+// terms."); only that Submit sends the agreement, with the terms version shown.
 
 /// A photo/video request as the server sends it.
 @immutable
@@ -65,7 +64,7 @@ class AppReferTestimonialRequest {
   /// What the customer gets, as the app wrote it (e.g. "50 bonus credits").
   final String? rewardDescription;
 
-  /// Exactly what a "yes" to public use allows, shown word for word.
+  /// The app's usage terms, shown word for word; submitting agrees to them.
   final String? permissionText;
   final List<String> permissionScopes;
   final String? permissionVersion;
@@ -364,22 +363,16 @@ class TestimonialFlow extends ChangeNotifier {
   AppReferTestimonialRequest? request;
   TestimonialFile? file;
 
-  /// Public use starts on; the customer can turn it off. Nothing is recorded
-  /// until [submit] (opening, picking or cancelling sends no answer), and a
-  /// request without permission text (an older server) can't be submitted,
-  /// so no permission is ever assumed.
-  bool publish = true;
+  /// The app's usage terms are shown word for word above Submit, and
+  /// submitting is the agreement: [submit] sends `publication: true` with the
+  /// version of the terms on screen. Opening, picking, cancelling and
+  /// declining send no answer, and a request without terms (an older server)
+  /// can't be submitted at all, so agreement is never assumed.
+  bool get hasTerms =>
+      request?.permissionText != null && request?.permissionVersion != null;
 
-  /// The final button says what it sends: "Send and allow sharing" while the
-  /// switch is on, "Send privately" while it is off (also on retry). Without
-  /// permission text there is no switch and nothing can be submitted, so it
-  /// keeps the plain label.
-  String get submitLabelKey =>
-      request?.permissionText == null || request?.permissionVersion == null
-      ? 'support.testimonial.submit'
-      : publish
-      ? 'support.testimonial.submitPublic'
-      : 'support.testimonial.submitPrivate';
+  /// Submit is offered only with a file picked and the terms on screen.
+  bool get canSubmit => hasTerms && file != null;
 
   /// The localized message for the last problem (null when none).
   String? notice;
@@ -397,7 +390,9 @@ class TestimonialFlow extends ChangeNotifier {
     try {
       final r = await _transport.request(requestId);
       request = r;
-      phase = r.isOpen
+      phase = r.isOpen && !hasTerms
+          ? TestimonialPhase.unavailable
+          : r.isOpen
           ? TestimonialPhase.ready
           : r.status == 'submitted'
           ? TestimonialPhase.done
@@ -458,11 +453,13 @@ class TestimonialFlow extends ChangeNotifier {
     'ALREADY_SUBMITTED',
   };
 
-  /// Uploads (unless this file already reached storage) and shares. Safe to
-  /// call again after a failure.
+  /// The customer's Submit: agrees to the terms on screen, uploads (unless
+  /// this file already reached storage) and shares. Safe to call again after a
+  /// failure. If the terms changed in the meantime nothing is shared: the new
+  /// terms are loaded and shown, and only another Submit agrees to them.
   Future<void> submit() async {
     final r = request, f = file, version = request?.permissionVersion;
-    if (r == null || f == null || version == null) return;
+    if (r == null || f == null || version == null || !hasTerms) return;
     notice = null;
     try {
       String uploadId;
@@ -487,7 +484,7 @@ class TestimonialFlow extends ChangeNotifier {
         requestId,
         uploadId,
         _clientSubmissionId,
-        publish,
+        true,
         version,
       );
       request = shared;
@@ -501,6 +498,8 @@ class TestimonialFlow extends ChangeNotifier {
       if (e is SupportException && e.reason == SupportErrorReason.reset) {
         phase = TestimonialPhase.unavailable;
         notice = SupportStrings.text('support.testimonial.unavailable');
+      } else if (code == 'TERMS_CHANGED') {
+        await _reloadTerms();
       } else {
         if (_refusedFile.contains(code)) _uploaded = null;
         if (_closed.contains(code) ||
@@ -520,6 +519,25 @@ class TestimonialFlow extends ChangeNotifier {
       }
     }
     _changed();
+  }
+
+  /// The terms changed before the server took the answer: show the current
+  /// ones and wait for the customer's next Submit (the upload is kept).
+  Future<void> _reloadTerms() async {
+    try {
+      final fresh = await _transport.request(requestId);
+      request = fresh;
+      if (fresh.isOpen && hasTerms) {
+        notice = SupportStrings.text('support.testimonial.termsChanged');
+        phase = TestimonialPhase.ready;
+      } else {
+        notice = SupportStrings.text('support.testimonial.unavailable');
+        phase = TestimonialPhase.unavailable;
+      }
+    } catch (_) {
+      notice = SupportStrings.text('support.testimonial.failed');
+      phase = TestimonialPhase.failed;
+    }
   }
 
   Future<AppReferTestimonialResult> decline(bool dontAskAgain) async {
@@ -704,9 +722,7 @@ Future<TestimonialFile?> pickTestimonialMedia({
 }
 
 /// The capture screen: what's asked, the reward, pick or record, preview,
-/// public use (on unless the customer turns it off) with the app's exact
-/// permission text, honest
-/// progress, then the result. Pops with an [AppReferTestimonialResult].
+/// the app's exact usage terms above Submit, honest progress, then the result. Pops with an [AppReferTestimonialResult].
 class AppReferTestimonialScreen extends StatefulWidget {
   const AppReferTestimonialScreen({
     super.key,
@@ -1010,26 +1026,12 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
         if (r.permissionText case final text?) ...[
           const SizedBox(height: 14),
           _box(colors, [
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
-              value: flow.publish,
-              activeTrackColor: palette.accent,
-              onChanged: _busy ? null : (v) => setState(() => flow.publish = v),
-              title: Text(
-                SupportStrings.text('support.testimonial.publish'),
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+            Text(
+              SupportStrings.text('support.testimonial.termsAgree'),
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
             ),
-            Text(text, style: const TextStyle(fontSize: 13.5)),
             const SizedBox(height: 6),
-            _muted(
-              SupportStrings.text('support.testimonial.publishHint'),
-              colors,
-              12.5,
-            ),
+            Text(text, style: const TextStyle(fontSize: 13.5)),
           ]),
         ],
       ] else ...[
@@ -1077,9 +1079,9 @@ class _AppReferTestimonialScreenState extends State<AppReferTestimonialScreen> {
           ),
         ],
         _ => [
-          if (f != null)
+          if (flow.canSubmit)
             _button(
-              SupportStrings.text(flow.submitLabelKey),
+              SupportStrings.text('support.testimonial.submit'),
               palette,
               true,
               () => flow.submit(),

@@ -141,7 +141,6 @@ void main() {
       await flow.load();
       expect(flow.phase, TestimonialPhase.ready);
       flow.picked(photo);
-      flow.publish = false;
       t.failSubmit = const SocketException('connection reset');
       await flow.submit();
       expect(flow.phase, TestimonialPhase.failed);
@@ -159,75 +158,94 @@ void main() {
         t.submits[1][1],
         reason: 'same clientSubmissionId',
       );
-      expect(t.submits[1][2], false);
-      expect(t.submits[1][3], '0123456789abcdef');
+      expect(t.submits[1].sublist(2), [true, '0123456789abcdef']);
       expect(
         flow.result,
         AppReferTestimonialResult(
           t.current.requestId,
           'submitted',
           'pending',
-          'declined',
+          'granted',
         ),
       );
     },
   );
 
-  test('public use starts on but only the final share records it', () async {
-    final t = FakeTransport(request());
-    final flow = TestimonialFlow(t.current.requestId, t);
-    expect(flow.publish, isTrue, reason: 'public use starts on');
-    await flow.load();
-    flow.picked(photo);
-    expect(flow.request?.permissionText, 'You may show this in the app.');
-    expect(t.submits, isEmpty, reason: 'opening and picking record nothing');
-    await flow.submit();
-    expect(t.submits.single.sublist(2), [true, '0123456789abcdef']);
-    expect(
-      flow.result,
-      AppReferTestimonialResult(
-        t.current.requestId,
-        'submitted',
-        'pending',
-        'granted',
-      ),
-    );
-    final declined = TestimonialFlow('tsr_x', FakeTransport(request()));
-    await declined.load();
-    declined.picked(photo);
-    expect(
-      (await declined.decline(false)).publication,
-      isNull,
-      reason: 'declining sends no permission answer',
-    );
-  });
+  test(
+    'only Submit agrees to the terms shown; opening, picking and cancelling send nothing',
+    () async {
+      final t = FakeTransport(request());
+      final flow = TestimonialFlow(t.current.requestId, t);
+      expect(flow.canSubmit, isFalse);
+      await flow.load();
+      expect(flow.hasTerms, isTrue);
+      expect(flow.canSubmit, isFalse, reason: 'nothing picked yet');
+      flow.picked(photo);
+      expect(flow.canSubmit, isTrue);
+      expect(flow.request?.permissionText, 'You may show this in the app.');
+      expect(t.submits, isEmpty, reason: 'opening and picking record nothing');
+      expect(t.slots, 0, reason: 'nothing is uploaded before Submit');
+      await flow.submit();
+      expect(t.submits.single.sublist(2), [true, '0123456789abcdef']);
+      final declined = TestimonialFlow('tsr_x', FakeTransport(request()));
+      await declined.load();
+      declined.picked(photo);
+      expect(
+        (await declined.decline(false)).publication,
+        isNull,
+        reason: 'declining or cancelling sends no agreement',
+      );
+    },
+  );
 
-  test('the submit button says whether it allows sharing', () async {
-    final t = FakeTransport(request());
-    final flow = TestimonialFlow(t.current.requestId, t);
-    await flow.load();
-    flow.picked(photo);
-    expect(flow.submitLabelKey, 'support.testimonial.submitPublic');
-    expect(SupportStrings.text(flow.submitLabelKey), 'Send and allow sharing');
-    flow.publish = false;
-    expect(SupportStrings.text(flow.submitLabelKey), 'Send privately');
-    t.failSubmit = const SocketException('connection reset');
-    await flow.submit();
-    expect(flow.phase, TestimonialPhase.failed);
-    expect(
-      SupportStrings.text(flow.submitLabelKey),
-      'Send privately',
-      reason: 'a retry still names what it sends',
-    );
-    await flow.submit();
-    expect(t.submits.map((s) => s[2]), [
-      false,
-      false,
-    ], reason: 'the label matches the answer sent');
+  test(
+    'changed terms are shown again and only the next Submit agrees to them',
+    () async {
+      final t = FakeTransport(request());
+      final flow = TestimonialFlow(t.current.requestId, t);
+      await flow.load();
+      flow.picked(photo);
+      t.failSubmit = SupportException(409, 'changed', code: 'TERMS_CHANGED');
+      t.current = request({
+        ...requestJson(),
+        'permission': {
+          'text': 'You may show this in the app and on our website.',
+          'scopes': ['in_app', 'website'],
+          'version': 'fedcba9876543210',
+        },
+      });
+      await flow.submit();
+      expect(flow.phase, TestimonialPhase.ready);
+      expect(
+        flow.notice,
+        'The terms have changed. Please read them, then submit again.',
+      );
+      expect(
+        flow.request?.permissionText,
+        'You may show this in the app and on our website.',
+      );
+      expect(
+        t.submits.single[3],
+        '0123456789abcdef',
+        reason: 'the refused answer named the terms that were shown',
+      );
+      expect(flow.result.publication, isNull, reason: 'nothing was agreed');
+      await flow.submit();
+      expect(flow.phase, TestimonialPhase.done);
+      expect(t.submits.last.sublist(2), [true, 'fedcba9876543210']);
+      expect(t.submits.first[0], t.submits.last[0], reason: 'upload kept');
+      expect(t.submits.first[1], t.submits.last[1], reason: 'same client id');
+      expect(t.slots, 1);
+    },
+  );
+
+  test('every language has the terms wrapper, Submit and the notice', () {
     for (final language in supportLanguages) {
       for (final key in [
-        'support.testimonial.submitPublic',
-        'support.testimonial.submitPrivate',
+        'support.testimonial.termsAgree',
+        'support.testimonial.termsChanged',
+        'support.testimonial.submit',
+        'support.testimonial.rewardNote',
       ]) {
         expect(
           supportStringsTable[language]?[key],
@@ -235,25 +253,45 @@ void main() {
           reason: '$key in $language',
         );
       }
+      for (final gone in [
+        'support.testimonial.publish',
+        'support.testimonial.publishHint',
+        'support.testimonial.submitPublic',
+        'support.testimonial.submitPrivate',
+      ]) {
+        expect(supportStringsTable[language]?[gone], isNull, reason: gone);
+      }
     }
+    SupportStrings.forcedLanguage = 'de';
+    expect(
+      SupportStrings.text('support.testimonial.termsAgree'),
+      'Mit dem Senden stimmst du diesen Bedingungen zu.',
+    );
+    expect(SupportStrings.text('support.testimonial.submit'), 'Senden');
   });
 
   test(
-    'a request without permission text is never submitted with an assumed answer',
+    'a request without terms can\'t be submitted and nothing is assumed',
     () async {
       final t = FakeTransport(request({...requestJson(), 'permission': null}));
       final flow = TestimonialFlow(t.current.requestId, t);
       await flow.load();
       expect(flow.request?.permissionVersion, isNull);
-      expect(
-        flow.submitLabelKey,
-        'support.testimonial.submit',
-        reason: 'no switch, so the button claims neither sharing nor privacy',
-      );
+      expect(flow.phase, TestimonialPhase.unavailable);
       flow.picked(photo);
+      expect(flow.canSubmit, isFalse);
       await flow.submit();
       expect(t.submits, isEmpty);
       expect(t.slots, 0);
+      final noVersion = FakeTransport(
+        request({
+          ...requestJson(),
+          'permission': {'text': 'You may show this in the app.'},
+        }),
+      );
+      final other = TestimonialFlow(noVersion.current.requestId, noVersion);
+      await other.load();
+      expect(other.phase, TestimonialPhase.unavailable);
     },
   );
 
@@ -412,7 +450,7 @@ void main() {
     expect(opened, 1);
   });
 
-  testWidgets('the capture screen picks, asks permission separately and shares', (
+  testWidgets('the capture screen picks, shows the terms above Submit and shares', (
     tester,
   ) async {
     final t = FakeTransport(request());
@@ -448,7 +486,7 @@ void main() {
     );
     expect(
       find.text(
-        'You get it for taking part, whatever you say and whether or not you allow reuse.',
+        'You get it for taking part, whatever you say and whether or not we use it.',
       ),
       findsOneWidget,
     );
@@ -465,32 +503,18 @@ void main() {
       find.text('You may show this in the app.'),
       200,
     );
-    expect(find.text('Allow public use'), findsOneWidget);
     expect(
-      find.text(
-        'On unless you turn it off. The reward is the same either way, and you can withdraw this later.',
-      ),
+      find.text('By submitting, you agree to these terms.'),
       findsOneWidget,
     );
-    final toggle = find.byType(SwitchListTile);
-    expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
-    expect(t.submits, isEmpty, reason: 'showing the switch records nothing');
-    await tester.scrollUntilVisible(find.text('Send and allow sharing'), 200);
-    expect(find.text('Send privately'), findsNothing);
-    expect(
-      find.text('Share'),
-      findsNothing,
-      reason: 'the button names what it sends',
-    );
-    await tester.ensureVisible(toggle);
-    await tester.tap(toggle);
+    expect(find.byType(Switch), findsNothing, reason: 'no toggle');
+    expect(find.byType(Checkbox), findsNothing, reason: 'no tick');
+    expect(find.text('Allow public use'), findsNothing);
+    expect(t.submits, isEmpty, reason: 'showing the terms records nothing');
+    await tester.scrollUntilVisible(find.text('Submit'), 200);
+    await tester.ensureVisible(find.text('Submit'));
     await tester.pumpAndSettle();
-    expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
-    expect(find.text('Send and allow sharing'), findsNothing);
-    await tester.scrollUntilVisible(find.text('Send privately'), 200);
-    await tester.ensureVisible(find.text('Send privately'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Send privately'));
+    await tester.tap(find.text('Submit'));
     await tester.pumpAndSettle();
     expect(find.text('Thanks for sharing!'), findsOneWidget);
     // Earned, not yet confirmed by the app's backend: no delivery promise.
@@ -501,9 +525,9 @@ void main() {
       findsOneWidget,
     );
     expect(
-      t.submits.single[2],
-      false,
-      reason: 'the customer turned public use off before sharing',
+      t.submits.single.sublist(2),
+      [true, '0123456789abcdef'],
+      reason: 'Submit agrees to the terms version that was on screen',
     );
     // The done screen checks the reward a few times; let those checks run out.
     await tester.pump(const Duration(seconds: 60));

@@ -64,7 +64,7 @@ void main() {
       final translations = json['translations'] as Map<String, dynamic>;
       // 78 chat keys + 22 help centre / status keys (0.10.0) + 7 lifecycle notification keys (0.11.0)
       // + 15 offer card keys (0.12.0) + 32 photo/video testimonial keys (0.13.0).
-      expect(keys, hasLength(170));
+      expect(keys, hasLength(168));
       Map<String, String> flatten(String lang) {
         final out = <String, String>{};
         for (final key in keys.keys) {
