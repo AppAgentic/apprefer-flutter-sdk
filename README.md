@@ -1,6 +1,6 @@
 # AppRefer Flutter SDK
 
-## 0.11.0 (unreleased): lifecycle notifications (engagement)
+## 0.11.0: lifecycle notifications (engagement)
 
 **Not generally available.** AppRefer turns lifecycle engagement on per app; until then every engagement call answers "disabled" quietly and nothing is stored. The server side is dry-run only in this release: no notification is sent to anyone yet. This version is the client contract (wire schema 1) the live sender will use.
 
@@ -23,7 +23,7 @@ await AppReferSDK.engagement.identify(assertionFromYourBackend);
 
 iOS: make the Flutter app delegate the notification delegate (`UNUserNotificationCenter.current().delegate = self` in `AppDelegate`) so the plugin receives taps, or call `AppReferPlugin.handleEngagementResponse(response)` / `engagementPresentationOptions(for:)` from your own delegate. Images need the Notification Service Extension from the iOS SDK README (add the `AppReferNotifications` Swift package product to that target; Dart doesn't run there). Android: declare and request `POST_NOTIFICATIONS` yourself; the plugin renders AppRefer's data messages natively. Dart code may not run when the app was killed: outcomes wait natively and are delivered when Dart drains them (start, resume, `drain()`).
 
-## 0.10.0 (unreleased): help centre in the chat; the help chat speaks 35 languages
+## 0.10.0: help centre in the chat; the help chat speaks 35 languages
 
 **Help centre.** When your app has published help articles in AppRefer, the help home
 shows a "Help articles" card (search plus the top articles), with a help centre screen
@@ -659,7 +659,7 @@ final result = await AppReferSDK.support.testimonials.present(context, requestId
   at the moment of capture. The plugin does the picking and normalising natively; no new Dart
   package.
 
-0.13.0 is released. Install it from Git only: `git: url: https://github.com/AppAgentic/apprefer-flutter-sdk, ref: 0.13.0` (not on pub.dev).
+0.13.1 is released. Install it from Git only: `git: url: https://github.com/AppAgentic/apprefer-flutter-sdk, ref: 0.13.1` (not on pub.dev).
 
 ### Languages and your own wording
 
