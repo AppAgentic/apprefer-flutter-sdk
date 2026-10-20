@@ -20,12 +20,19 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import com.apprefer.flutter.testimonial.TestimonialMedia
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-internal class SupportBridge(private val context: Context) : MethodChannel.MethodCallHandler, PluginRegistry.ActivityResultListener {
+internal class SupportBridge(private val context: Context) : MethodChannel.MethodCallHandler, PluginRegistry.ActivityResultListener, PluginRegistry.RequestPermissionsResultListener {
     var activity: Activity? = null
     private var pending: MethodChannel.Result? = null
+    private var testimonialReply: MethodChannel.Result? = null
+    private var testimonialArgs = Triple(true, false, 30)
+    /** The private file the camera app is writing a still photo to (null for a video or a pick). */
+    private var capturePath: String? = null
+    /** The capture waiting for the CAMERA prompt's answer: photo (true) or video (false). */
+    private var awaitingPermission: Boolean? = null
     private var limit = 4
     private val prefs = context.getSharedPreferences("apprefer_support_secure", Context.MODE_PRIVATE)
     private fun key(): SecretKey {
@@ -118,6 +125,33 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
                     bitmap.recycle()
                     result.success(out.toByteArray())
                 }
+                // Photo/video testimonials: the shared TestimonialMedia helper (system picker or camera app).
+                "testimonialCameraAvailable" -> {
+                    // { video: true|false } for one kind; no argument = either.
+                    val video = (call.arguments as? Map<*, *>)?.get("video") as? Boolean
+                    result.success(if (video == null) TestimonialMedia.cameraAvailable(context) else TestimonialMedia.cameraAvailable(context, video))
+                }
+                "testimonialDiscard" -> { TestimonialMedia.discard(context, call.arguments as? String); result.success(null) }
+                "testimonialPick" -> {
+                    check(testimonialReply == null) { "Picker already open" }
+                    val host = activity ?: error("No foreground activity")
+                    val args = call.arguments as? Map<*, *> ?: emptyMap<String, Any>()
+                    val camera = args["source"] == "camera"
+                    testimonialArgs = Triple(args["images"] != false, args["videos"] == true, (args["maxSeconds"] as? Int) ?: 30)
+                    testimonialReply = result
+                    if (!camera) {
+                        launch(host, TestimonialMedia.libraryIntent(testimonialArgs.first, testimonialArgs.second))
+                    } else {
+                        // "capture": "image" takes a still photo; anything else records a video (0.13.0 behaviour).
+                        val photo = args["capture"] == "image"
+                        if (!TestimonialMedia.cameraAvailable(context, !photo)) { finishPick("unavailable", 0); return }
+                        if (TestimonialMedia.cameraPermissionNeeded(context) && Build.VERSION.SDK_INT >= 23) {
+                            // The app declares CAMERA: Android refuses capture intents until it is granted.
+                            awaitingPermission = photo
+                            host.requestPermissions(arrayOf(android.Manifest.permission.CAMERA), TESTIMONIAL_PERMISSION)
+                        } else capture(host, photo)
+                    }
+                }
                 "pick" -> {
                     check(pending == null) { "Photo picker already open" }
                     val host = activity ?: error("No foreground activity")
@@ -131,7 +165,64 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
             }
         } catch(e: Exception) { result.error("support_native", e.message, null) }
     }
+    /** Starts the picker or camera for the open testimonial pick; a failure to start answers it. */
+    private fun launch(host: Activity, intent: Intent) {
+        @Suppress("DEPRECATION")
+        try { host.startActivityForResult(intent, TESTIMONIAL_REQUEST) } catch (e: Exception) {
+            capturePath?.let { TestimonialMedia.discardCapture(context, it) }; capturePath = null
+            finishPick("unavailable", 0)
+        }
+    }
+
+    private fun capture(host: Activity, photo: Boolean) {
+        if (!photo) { launch(host, TestimonialMedia.videoCaptureIntent(testimonialArgs.third)); return }
+        val shot = try { TestimonialMedia.photoCapture(context) } catch (e: TestimonialMedia.MediaException) { finishPick(e.code, 0); return }
+        capturePath = shot.path
+        launch(host, shot.intent)
+    }
+
+    /** Answers the open testimonial pick with an error code the Dart side shows in the request's language. */
+    private fun finishPick(code: String, seconds: Int) {
+        val reply = testimonialReply ?: return
+        testimonialReply = null
+        reply.error(code, code, seconds)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray): Boolean {
+        if (requestCode != TESTIMONIAL_PERMISSION) return false
+        val photo = awaitingPermission ?: return true
+        awaitingPermission = null
+        val host = activity
+        // Declined (or the prompt was dismissed): nothing is captured; the library stays available.
+        if (host == null || grantResults.isEmpty() || grantResults[0] != android.content.pm.PackageManager.PERMISSION_GRANTED) finishPick("camera_denied", 0)
+        else capture(host, photo)
+        return true
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode == TESTIMONIAL_REQUEST) {
+            val reply = testimonialReply ?: return true; testimonialReply = null
+            val shot = capturePath; capturePath = null
+            val uri = data?.data
+            val (images, videos, maxSeconds) = testimonialArgs
+            if (resultCode != Activity.RESULT_OK || (shot == null && uri == null)) {
+                shot?.let { TestimonialMedia.discardCapture(context, it) }
+                reply.error("cancelled", "No photo or video chosen", null); return true
+            }
+            Thread {
+                val main = android.os.Handler(android.os.Looper.getMainLooper())
+                try {
+                    // A still photo arrives in our own capture file (the camera app returns no URI for EXTRA_OUTPUT).
+                    val p = if (shot != null) TestimonialMedia.finishPhotoCapture(context, shot) else TestimonialMedia.normalize(context, uri!!, images, videos, maxSeconds)
+                    main.post { reply.success(mapOf("path" to p.path, "contentType" to p.contentType, "kind" to p.kind, "size" to p.size, "durationMs" to p.durationMs)) }
+                } catch (e: TestimonialMedia.MediaException) {
+                    main.post { reply.error(e.code, e.code, e.seconds) }
+                } catch (e: Exception) {
+                    main.post { reply.error("unreadable", e.message, 0) }
+                }
+            }.start()
+            return true
+        }
         if (requestCode != 51931) return false
         val reply = pending ?: return true; pending = null
         if (resultCode != Activity.RESULT_OK) { reply.success(emptyList<ByteArray>()); return true }
@@ -170,8 +261,16 @@ internal class SupportBridge(private val context: Context) : MethodChannel.Metho
         }.start()
         return true
     }
-    fun detach() { pending?.error("activity_detached", "Photo selection interrupted. Try again.", null); pending = null; activity = null }
+    fun detach() {
+        pending?.error("activity_detached", "Photo selection interrupted. Try again.", null); pending = null
+        testimonialReply?.error("cancelled", "Selection interrupted", null); testimonialReply = null
+        capturePath?.let { TestimonialMedia.discardCapture(context, it) }; capturePath = null
+        awaitingPermission = null
+        activity = null
+    }
     companion object {
+        const val TESTIMONIAL_REQUEST = 51932
+        const val TESTIMONIAL_PERMISSION = 51933
         fun jpeg(source: Bitmap): ByteArray {
             var scale = minOf(1.0, 1600.0 / max(source.width, source.height))
             while (true) {

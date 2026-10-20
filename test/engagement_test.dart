@@ -229,34 +229,45 @@ void main() {
   );
 
   group('client', () {
-    test(
-      'registers once and keeps the secret only in secure storage',
-      () async {
-        final c = client();
-        final status = await c.start(key, explicit: true, images: true);
-        expect(status.isActive, isTrue);
-        final id = status.installId!;
-        expect(server.count('POST', '/api/engagement/v1/installs'), 1);
-        final reg = server.calls.firstWhere(
-          (c) => c.url.path == '/api/engagement/v1/installs',
-        );
-        expect(reg.headers['X-AppRefer-Install'], isNull);
-        expect(jsonDecode(reg.body)['deviceId'], 'dev-0000-0001');
-        final secret = server.installs[id]!['secret'] as String;
-        expect(secure.map.values.single, contains(secret));
-        expect(prefs.map.values.any((v) => v.contains(secret)), isFalse);
-        final patch = (server.installs[id]!['patches'] as List).last as Map;
-        expect(patch['notificationPermission'], 'granted');
-        expect(patch['capabilities'], {
+    test('registers once and keeps the secret only in secure storage', () async {
+      final c = client();
+      final status = await c.start(key, explicit: true, images: true);
+      expect(status.isActive, isTrue);
+      final id = status.installId!;
+      expect(server.count('POST', '/api/engagement/v1/installs'), 1);
+      final reg = server.calls.firstWhere(
+        (c) => c.url.path == '/api/engagement/v1/installs',
+      );
+      expect(reg.headers['X-AppRefer-Install'], isNull);
+      expect(jsonDecode(reg.body)['deviceId'], 'dev-0000-0001');
+      final secret = server.installs[id]!['secret'] as String;
+      expect(secure.map.values.single, contains(secret));
+      expect(prefs.map.values.any((v) => v.contains(secret)), isFalse);
+      final patch = (server.installs[id]!['patches'] as List).last as Map;
+      expect(patch['notificationPermission'], 'granted');
+      expect(patch['capabilities'], {
+        'schema': 1,
+        'images': true,
+        'actions': true,
+      });
+      expect(identity.last, (id, 0));
+      // With Support in the app, the install also says it opens testimonial invitations.
+      EngagementClient.testimonialsCapable = () => true;
+      try {
+        await c.refreshDeviceState();
+        final again = (server.installs[id]!['patches'] as List).last as Map;
+        expect(again['capabilities'], {
           'schema': 1,
           'images': true,
           'actions': true,
+          'testimonials': true,
         });
-        expect(identity.last, (id, 0));
-        expect((await client().start(key, explicit: true)).installId, id);
-        expect(server.count('POST', '/api/engagement/v1/installs'), 1);
-      },
-    );
+      } finally {
+        EngagementClient.testimonialsCapable = () => false;
+      }
+      expect((await client().start(key, explicit: true)).installId, id);
+      expect(server.count('POST', '/api/engagement/v1/installs'), 1);
+    });
 
     test(
       'token sent once with the signing environment; unchanged state not resent',
@@ -483,18 +494,27 @@ void main() {
         await c.identify('ok:user-a');
         server.offline = true;
         await c.logout();
-        expect(prefs.map['apprefer_engagement_pending_logout_target_$slot'], '$id:1');
+        expect(
+          prefs.map['apprefer_engagement_pending_logout_target_$slot'],
+          '$id:1',
+        );
         expect(
           prefs.map['apprefer_engagement_pending_logout_$slot'],
           isNull,
           reason: 'no separate flag that a crash could strand',
         );
-        expect(prefs.map['apprefer_engagement_pending_logout_epoch_$slot'], isNull);
+        expect(
+          prefs.map['apprefer_engagement_pending_logout_epoch_$slot'],
+          isNull,
+        );
         server.offline = false;
         await client().start(key, explicit: true);
         expect(server.lastBody('POST', '/logout')['expectedEpoch'], 1);
         expect(server.installs[id]!['account'], isNull);
-        expect(prefs.map['apprefer_engagement_pending_logout_target_$slot'], isNull);
+        expect(
+          prefs.map['apprefer_engagement_pending_logout_target_$slot'],
+          isNull,
+        );
       });
 
       test(
@@ -502,17 +522,24 @@ void main() {
         () async {
           final c = client();
           final id = (await c.start(key, explicit: true)).installId!;
-          await c.identify('ok:user-a'); // epoch 1, persisted with the install id
+          await c.identify(
+            'ok:user-a',
+          ); // epoch 1, persisted with the install id
           // An earlier build crashed between its two writes: the flag without its epoch.
           prefs.map['apprefer_engagement_pending_logout_$slot'] = '1';
-          server.backendBind(id, 'user-b'); // epoch 2 while the app wasn't running
+          server.backendBind(
+            id,
+            'user-b',
+          ); // epoch 2 while the app wasn't running
           final restarted = client();
           await restarted.start(key, explicit: true);
           final logouts = server.calls
               .where((r) => r.url.path.endsWith('/logout'))
               .map((r) => (jsonDecode(r.body) as Map)['expectedEpoch'])
               .toList();
-          expect(logouts, [1], reason: 'aimed at the persisted epoch, never the fresh one');
+          expect(logouts, [
+            1,
+          ], reason: 'aimed at the persisted epoch, never the fresh one');
           expect(server.installs[id]!['account'], 'user-b');
           expect(restarted.snapshot!.accountEpoch, 2);
           expect(restarted.stateForTesting().pendingLogout, isFalse);
@@ -552,7 +579,10 @@ void main() {
           server.offline = false;
           server.backendBind(id, 'user-c');
           await client().start(key, explicit: true);
-          expect(server.count('POST', '/api/engagement/v1/installs/me/logout'), 0);
+          expect(
+            server.count('POST', '/api/engagement/v1/installs/me/logout'),
+            0,
+          );
           expect(server.installs[id]!['account'], 'user-c');
         },
       );
@@ -1015,6 +1045,75 @@ void main() {
         );
         await AppReferEngagement.instance.drain();
         expect(delivered.last.destination, isNull);
+      },
+    );
+
+    test(
+      'a testimonial invitation opens the SDK capture screen, never the app router, and only for the current identity',
+      () async {
+        final c = client();
+        AppReferEngagement.setClientForTesting(c);
+        final id = (await AppReferEngagement.instance.start(
+          apiKey: key,
+        )).installId!;
+        const rid = 'tsr_0123456789abcdef0123456789abcdef';
+        final opened = <String>[];
+        final previous = AppReferEngagement.openTestimonial;
+        AppReferEngagement.openTestimonial = opened.add;
+        try {
+          expect(
+            AppReferEngagement.testimonialRequestId(
+              '/apprefer/testimonials/$rid',
+            ),
+            rid,
+          );
+          for (final other in [
+            '/apprefer/testimonials/tsr_x',
+            '/apprefer/testimonials/$rid/extra',
+            '/setup',
+            null,
+          ]) {
+            expect(AppReferEngagement.testimonialRequestId(other), isNull);
+          }
+          final delivered = <AppReferEngagementNotificationEvent>[];
+          // No app handler at all: the SDK still owns its own destination.
+          AppReferEngagement.instance.onNotificationEvent = null;
+          nativeEvents.add(
+            event(
+              'opened',
+              id,
+              0,
+              dest: '/apprefer/testimonials/$rid',
+              mid: 'sparkly_live_tminv_$rid',
+            ),
+          );
+          await AppReferEngagement.instance.drain();
+          expect(opened, isEmpty, reason: 'waits until the app can navigate');
+          AppReferEngagement.instance.setNavigationReady(true);
+          expect(opened, [rid]);
+          AppReferEngagement.instance.onNotificationEvent = delivered.add;
+          expect(delivered, isEmpty, reason: 'never handed to the app');
+          AppReferEngagement.instance.setNavigationReady(true);
+          expect(opened, [rid], reason: 'once');
+          // A tap from before an account switch opens nothing.
+          AppReferEngagement.instance.setNavigationReady(false);
+          nativeEvents.add(
+            event(
+              'opened',
+              id,
+              0,
+              dest: '/apprefer/testimonials/$rid',
+              mid: 'sparkly_live_tminv_x',
+            ),
+          );
+          await AppReferEngagement.instance.drain();
+          await c.identify('ok:user-a');
+          AppReferEngagement.instance.setNavigationReady(true);
+          expect(opened, [rid]);
+          expect(delivered, isEmpty);
+        } finally {
+          AppReferEngagement.openTestimonial = previous;
+        }
       },
     );
 

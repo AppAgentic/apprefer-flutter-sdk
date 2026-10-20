@@ -22,11 +22,12 @@ class AppReferPlugin : FlutterPlugin, MethodCallHandler, io.flutter.embedding.en
     private var supportChannel: MethodChannel? = null
     private var activityBinding: io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding? = null
     override fun onAttachedToActivity(binding: io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding) {
-        activityBinding = binding; support?.activity = binding.activity; support?.let { binding.addActivityResultListener(it) }
+        activityBinding = binding; support?.activity = binding.activity
+        support?.let { binding.addActivityResultListener(it); binding.addRequestPermissionsResultListener(it) }
         engagement?.let { binding.addOnNewIntentListener(it); it.attach(binding.activity) }
     }
     override fun onDetachedFromActivity() {
-        support?.let { activityBinding?.removeActivityResultListener(it) }
+        support?.let { activityBinding?.removeActivityResultListener(it); activityBinding?.removeRequestPermissionsResultListener(it) }
         engagement?.let { activityBinding?.removeOnNewIntentListener(it) }
         activityBinding = null; support?.detach()
     }

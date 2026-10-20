@@ -31,6 +31,16 @@ void main() {
     final text = File('ios/Classes/EngagementPayload.swift').readAsStringSync();
     expect(hash(swift(text)), manifest['engagementPayloadSwift'], reason: hint);
   });
+  test('TestimonialMedia.java matches the manifest', () {
+    final text = File(
+      'android/src/main/java/com/apprefer/flutter/testimonial/TestimonialMedia.java',
+    ).readAsStringSync();
+    expect(hash(java(text)), manifest['testimonialMediaJava'], reason: hint);
+  });
+  test('TestimonialMedia.swift matches the manifest', () {
+    final text = File('ios/Classes/TestimonialMedia.swift').readAsStringSync();
+    expect(hash(swift(text)), manifest['testimonialMediaSwift'], reason: hint);
+  });
   test('EngagementSnoozeGuard.swift matches the manifest', () {
     final text = File(
       'ios/Classes/EngagementSnoozeGuard.swift',

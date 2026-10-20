@@ -29,10 +29,14 @@ class SupportException implements Exception {
   /// its own localized text instead (`SupportStrings.errorText`).
   final String message;
   final SupportErrorReason reason;
+
+  /// The server's error code when it sent one (e.g. `IDENTITY_REQUIRED`).
+  final String? code;
   SupportException(
     this.status,
     this.message, {
     this.reason = SupportErrorReason.server,
+    this.code,
   });
   @override
   String toString() => message;
@@ -681,6 +685,7 @@ class SupportAPI {
       throw SupportException(
         response.statusCode,
         '${data['error'] ?? data['message'] ?? 'Unable to connect (${response.statusCode})'}',
+        code: data['code'] is String ? data['code'] as String : null,
       );
     }
     return data;

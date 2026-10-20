@@ -593,6 +593,74 @@ from the App Store id or package name your app already has in AppRefer (Billing 
 
 0.12.0 is unreleased source (not tagged). Once tagged, install it from Git only: a pubspec `git:` dependency on `https://github.com/AppAgentic/apprefer-flutter-sdk.git` with `ref: 0.12.0` (not published to pub.dev).
 
+### Photo and video testimonials (0.13.0)
+
+Ask a signed-in customer for a photo or a short video and give them the reward your campaign sets,
+from your own screens, from your coach/assistant, from a Support reply, or automatically after
+real usage. One native capture screen does it everywhere: what's asked, the reward, the system photo
+picker (no photo-library permission needed) or the camera, a preview, your campaign's exact usage terms above a
+plain Submit ("By submitting, you agree to these terms."), upload progress, then the result.
+
+1. Your backend registers campaigns (`PUT /api/v1/apps/{appId}/support/testimonials/campaigns`,
+   private key with `support:testimonials`). A company admin switches each one on in AppRefer
+   Support; nothing reaches customers before that.
+2. Your backend asks for one user: `POST /api/v1/apps/{appId}/support/testimonials/requests`
+   `{ campaignId, appUserId, idempotencyKey, source: "host" | "coach" }`. It returns `requestId`.
+   The reward comes from the campaign; the call can't set one.
+3. The app shows it:
+
+```dart
+AppReferSDK.support.testimonials.onRewardUpdate = (update) {
+  if (update.rewardStatus == 'fulfilled') credits.refresh();
+};
+final open = await AppReferSDK.support.testimonials.pending();     // requests waiting for this account
+final result = await AppReferSDK.support.testimonials.present(context, requestId);
+// result?.outcome: submitted, declined, cancelled or unavailable
+```
+
+4. Your backend applies the reward: `POST …/support/testimonials/rewards/claim` (2-minute leases),
+   applies each `fulfillmentId` at most once in your own system (credits, coach usage,
+   subscription time, a discount, a gift, or a merch order you collect the address for yourself),
+   then `POST …/rewards/{fulfillmentId}/complete` with `status: "fulfilled"` and your own
+   `receiptId`. Only then does the SDK report `fulfilled`.
+
+- The customer's Support session must be verified for the same account
+  (`verifyIdentity`); otherwise requests read as unavailable. A reset or account switch
+  cancels a capture in progress; nothing is shared for another account.
+- Taking part earns the reward whatever the customer says and whether or not the media is ever
+  used. Your campaign's usage terms (`permission.text`, set by your backend or by a company admin
+  in AppRefer Support) are shown word for word under "By submitting, you agree to these terms."
+  above a plain **Submit**: there is no switch, tick or extra screen. Only Submit records the
+  agreement, with the version of the terms shown; opening, picking, cancelling or declining records
+  nothing, a request without terms can't be submitted, and if the terms changed the screen shows the
+  new ones and waits for another Submit. Customers can withdraw it later
+  (`withdrawPublication(requestId)`); the reward is never taken back.
+- Photos are re-encoded as JPEG (≤ 2048 px, no location or other metadata); videos are exported as
+  MP4 without metadata and refused when longer than the campaign allows. Limits: 15 MB per photo,
+  150 MB per video. The server checks the stored bytes and video length again.
+- Requests from Support show as a card in the chat ("Share a photo or video"); older SDK versions
+  show your text and a line asking the customer to update the app.
+- The Support home shows the newest open request for the verified account as a card each time it
+  opens (never a pop-up). Requests your backend, coach or automation made appear there by
+  themselves; shared, declined, withdrawn or ended ones leave it, and another account's never show.
+- Automated asks (a campaign `automation`, switched on separately in Support): the invitation is that
+  home card. The SDK declares the `testimonials` engagement capability and opens a tapped
+  invitation notification (`/apprefer/testimonials/<requestId>`) as the capture screen itself on
+  `AppReferSDK.support.navigatorKey`, never through `onNotificationEvent`. AppRefer only records
+  push invitations as dry runs in this release: no notification is sent yet.
+- The reward line after sharing is honest about who confirms it: "earned" until your backend
+  reports its receipt; then "added to your account" for credits, coach answers and subscription
+  time, or "confirmed" for anything else (no shipping or email promise); a failed or late one says
+  Support can see it and send it again.
+- iOS camera (optional): offered only when your app declares `NSCameraUsageDescription` (and,
+  for video, `NSMicrophoneUsageDescription`). Android needs no new permission: the photo picker,
+  and the camera app for "Take a photo" (into a private cache file through the plugin's
+  non-exported provider) or "Record a video"; if your app itself declares `CAMERA`, it is asked for
+  at the moment of capture. The plugin does the picking and normalising natively; no new Dart
+  package.
+
+0.13.0 is unreleased source (not tagged). Once tagged, install it from Git only: `git: url: https://github.com/AppAgentic/apprefer-flutter-sdk, ref: 0.13.0` (not on pub.dev).
+
 ### Languages and your own wording
 
 The chat ships in 35 languages: ar, ca, cs, da, de, el, en, es, es-MX, fi, fr, he, hi, hr, hu, id, it, ja, ko, ms, nb, nl, pl, pt-BR, pt-PT, ro, ru, sk, sv, th, tr, uk, vi, zh-Hans, zh-Hant. Nothing to set up, and no `localizationsDelegates` are needed.

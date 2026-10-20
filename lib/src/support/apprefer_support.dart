@@ -13,13 +13,23 @@ import '../services/device_info.dart';
 import '../services/registry.dart';
 import '../services/storage.dart';
 import '../services/logger.dart';
+import '../engagement/apprefer_engagement.dart' show AppReferEngagement;
+import '../engagement/engagement_client.dart' show EngagementClient;
 import 'support_api.dart';
 import 'support_help.dart';
 import 'support_offers.dart';
 import 'support_reviews.dart';
 import 'support_strings.dart';
 import 'support_style.dart';
+import 'support_testimonials.dart';
 
+export 'support_testimonials.dart'
+    show
+        AppReferTestimonials,
+        AppReferTestimonialRequest,
+        AppReferTestimonialResult,
+        AppReferTestimonialRewardUpdate,
+        AppReferTestimonialScreen;
 export 'support_api.dart'
     show
         AppReferSupportPersona,
@@ -44,7 +54,22 @@ class AppReferSupport with WidgetsBindingObserver {
   AppReferSupport._() {
     WidgetsFlutterBinding.ensureInitialized().addObserver(this);
     api.resumeRevocations();
+    AppReferTestimonials.instance.api = () => api;
+    // A tapped testimonial invitation opens the capture screen on the app's
+    // navigator; without navigatorKey the invitation waits on the Support home.
+    AppReferEngagement.openTestimonial = (requestId) {
+      final nav = navigatorKey?.currentState;
+      if (nav != null)
+        unawaited(AppReferTestimonials.instance.presentOn(nav, requestId));
+    };
+    EngagementClient.testimonialsCapable = () => true;
   }
+
+  /// Photo/video testimonials: show a request your backend (or its coach
+  /// tool) made with `present(context, requestId)`, list open ones with
+  /// `pending()`, and refresh credits in `onRewardUpdate` once your backend
+  /// confirms the reward.
+  AppReferTestimonials get testimonials => AppReferTestimonials.instance;
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
@@ -67,6 +92,7 @@ class AppReferSupport with WidgetsBindingObserver {
 
   Future<void> reset() async {
     await api.reset();
+    AppReferTestimonials.instance.reset();
     // Offer-card receipts belong to the retired session; never sent for another account.
     await _clearOfferReceipts();
     final route = _presented;
@@ -632,7 +658,11 @@ class _SupportViewState extends State<AppReferSupportView>
       openingCard = null;
       shownCards.clear();
       reviewCards.clear();
+      testimonials.clear();
+      invitations = [];
     });
+    // The new account's own invitations (an anonymous or unverified one has none).
+    unawaited(_refreshInvitations(force: true));
   }
 
   void _changed() {
@@ -683,6 +713,7 @@ class _SupportViewState extends State<AppReferSupportView>
     if (active) {
       _refresh();
       _refreshOffers();
+      unawaited(_refreshInvitations(force: true));
     }
   }
 
@@ -771,6 +802,77 @@ class _SupportViewState extends State<AppReferSupportView>
 
   // Review cards: each card's latest state by card id.
   final Map<String, AppReferSupportReviewCard> reviewCards = {};
+  // Photo/video requests: each request's latest state by request id.
+  final Map<String, AppReferTestimonialRequest> testimonials = {};
+
+  /// Open photo/video requests for the account verified on this device now
+  /// (from the app's backend, its coach, automation or a Support reply),
+  /// newest first; the home shows the newest. Loaded when the chat opens, comes
+  /// back to the foreground and after the capture screen closes; never shown
+  /// for another account (the list is the server's, for this session).
+  @visibleForTesting
+  List<AppReferTestimonialRequest> invitations = [];
+  bool _invitationsLoading = false;
+  DateTime? _invitationsAt;
+
+  /// Only while the home is showing; at most once a minute unless [force]d.
+  Future<void> _refreshInvitations({bool force = false}) async {
+    if (_invitationsLoading || id != null) return;
+    final last = _invitationsAt;
+    if (!force &&
+        last != null &&
+        DateTime.now().difference(last) < const Duration(minutes: 1))
+      return;
+    _invitationsAt = DateTime.now();
+    _invitationsLoading = true;
+    final currentGeneration = generation;
+    try {
+      final open = await AppReferTestimonials.instance.pendingWith(api);
+      if (mounted && generation == currentGeneration) {
+        setState(() => invitations = open.where((r) => r.isOpen).toList());
+      }
+    } catch (_) {
+      // Offline or not configured: keep what is shown (an account change already cleared it).
+    } finally {
+      _invitationsLoading = false;
+    }
+  }
+
+  /// Opens the capture screen from the home card, then shows the new state
+  /// (shared, declined or no longer available all remove the card).
+  Future<void> _openInvitation(AppReferTestimonialRequest request) async {
+    final currentGeneration = generation;
+    await AppReferTestimonials.instance.present(context, request.requestId);
+    if (!mounted || generation != currentGeneration) return;
+    setState(
+      () => invitations = [
+        for (final r in invitations)
+          if (r.requestId != request.requestId) r,
+      ],
+    );
+    await _refreshInvitations(force: true);
+  }
+
+  Widget _invitationCard(AppReferTestimonialRequest request) => KeyedSubtree(
+    key: supportTestimonialInviteKey,
+    child: SupportTestimonialCard(
+      request: request,
+      palette: palette,
+      colors: colors,
+      open: () => _openInvitation(request),
+    ),
+  );
+
+  /// Opens the capture screen for a request card, then shows its new state.
+  Future<void> _openTestimonial(AppReferTestimonialRequest request) async {
+    await AppReferTestimonials.instance.present(context, request.requestId);
+    try {
+      final fresh = await AppReferTestimonials.instance.request(
+        request.requestId,
+      );
+      if (mounted) setState(() => testimonials[fresh.requestId] = fresh);
+    } catch (_) {}
+  }
 
   /// Fresh review card states (withdrawn, expired, store page changed).
   Future<void> _refreshReviews() async {
@@ -1263,7 +1365,10 @@ class _SupportViewState extends State<AppReferSupportView>
   }
 
   Future<void> _refresh() async {
-    if (id == null) unawaited(_refreshArticles());
+    if (id == null) {
+      unawaited(_refreshArticles());
+      unawaited(_refreshInvitations());
+    }
     if (refreshing) return;
     refreshing = true;
     final current = id;
@@ -1301,6 +1406,10 @@ class _SupportViewState extends State<AppReferSupportView>
               if (card != null) offerCards[card.cardId] = card;
               final review = AppReferSupportReviewCard.fromJson(m['review']);
               if (review != null) reviewCards[review.cardId] = review;
+              final request = AppReferTestimonialRequest.fromJson(
+                m['testimonial'],
+              );
+              if (request != null) testimonials[request.requestId] = request;
             }
             messages.sort(
               (a, b) => '${a['createdAt']}'.compareTo('${b['createdAt']}'),
@@ -1941,6 +2050,8 @@ class _SupportViewState extends State<AppReferSupportView>
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         for (final section in [
+                          if (invitations.isNotEmpty)
+                            _invitationCard(invitations.first),
                           if (current != null) _continueCard(current),
                           // Hidden entirely when the app has no published articles.
                           if (articles.isNotEmpty)
@@ -3840,6 +3951,37 @@ class _SupportViewState extends State<AppReferSupportView>
     final rawReview = raw == null
         ? AppReferSupportReviewCard.fromJson(m['review'])
         : null;
+    final rawRequest = raw == null && rawReview == null
+        ? AppReferTestimonialRequest.fromJson(m['testimonial'])
+        : null;
+    if (rawRequest != null) {
+      final request = testimonials[rawRequest.requestId] ?? rawRequest;
+      final words = '${m['text'] ?? ''}';
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (words.isNotEmpty || m['from'] == 'bot') ...[
+            _bubble(i),
+            const SizedBox(height: 8),
+          ],
+          Padding(
+            padding: const EdgeInsetsDirectional.only(start: 38),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 340),
+                child: SupportTestimonialCard(
+                  request: request,
+                  palette: palette,
+                  colors: colors,
+                  open: () => _openTestimonial(request),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
     if (raw == null && rawReview == null) return _bubble(i);
     if (rawReview != null) {
       final review = reviewCards[rawReview.cardId] ?? rawReview;
