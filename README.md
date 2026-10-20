@@ -591,7 +591,7 @@ from the App Store id or package name your app already has in AppRefer (Billing 
   device". AppRefer sends at most one card per customer every 120 days (configurable, 30–365).
 - Older SDK versions show your text plus a line asking the customer to update the app.
 
-0.12.0 is unreleased source (not tagged). Once tagged, install it from Git only: a pubspec `git:` dependency on `https://github.com/AppAgentic/apprefer-flutter-sdk.git` with `ref: 0.12.0` (not published to pub.dev).
+0.12.0 is released. Install it from Git only: a pubspec `git:` dependency on `https://github.com/AppAgentic/apprefer-flutter-sdk.git` with `ref: 0.12.0` (not published to pub.dev).
 
 ### Photo and video testimonials (0.13.0)
 
@@ -659,7 +659,7 @@ final result = await AppReferSDK.support.testimonials.present(context, requestId
   at the moment of capture. The plugin does the picking and normalising natively; no new Dart
   package.
 
-0.13.0 is unreleased source (not tagged). Once tagged, install it from Git only: `git: url: https://github.com/AppAgentic/apprefer-flutter-sdk, ref: 0.13.0` (not on pub.dev).
+0.13.0 is released. Install it from Git only: `git: url: https://github.com/AppAgentic/apprefer-flutter-sdk, ref: 0.13.0` (not on pub.dev).
 
 ### Languages and your own wording
 
