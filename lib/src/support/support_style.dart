@@ -61,6 +61,15 @@ class SupportColors {
   static const shadow = Color(0xff29145a);
 }
 
+/// Lines an article summary may wrap to on the help home before it ends in "…":
+/// enough to read on a 320 pt screen, short enough that one long summary can't
+/// push everything else off the page. The help centre list keeps 2.
+const supportHomeSummaryLines = 3;
+
+/// Lines a quick-help tile's subtitle may wrap to (half-width tiles on a narrow
+/// screen or with large text); both tiles of a row then share its height.
+const supportTileSubtitleLines = 2;
+
 /// The open conversation to pick up again (unread first, then the newest) and the rest.
 ({Map<String, dynamic>? current, List<Map<String, dynamic>> others})
 supportContinueSelection(List<Map<String, dynamic>> conversations) {
