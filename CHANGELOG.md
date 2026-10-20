@@ -1,6 +1,7 @@
 ## 0.13.1 (unreleased)
 
 - Support home on narrow screens (320 pt, iPhone Duo cover) and with large text: help-article summaries wrap to 3 lines instead of stopping after a few words (`supportHomeSummaryLines`; the help centre keeps 2), quick-help tile subtitles wrap to 2 lines with both tiles of a row sharing the taller height, and an empty subtitle or summary adds no blank line. The page now ends 64 pt above the floating composer as measured (topic chip, error line, photos, up to five lines, large text, keyboard), so the last quick-help tiles always scroll clear of it; before, the pull-up under the hero was not counted and a taller composer covered them. No API, string or behaviour change otherwise.
+- Support home keeps its end in view: when the customer is already at the end of the help home (within 24 pt) and the keyboard opens or the composer grows (more lines, a topic chip, photos, an error line, large text), the page stays at its end, so the last quick-help tiles stay above the composer with the keyboard still open. Someone reading higher up is never moved, and dragging the page still closes the keyboard as before. The home reads the scroll position before the scroll view lays out again (a `LayoutBuilder` for the keyboard, the composer's measured size for its growth) and jumps back to the end after that frame (`supportHomeAtEnd`).
 - Version 0.13.1 (source only; not tagged or released).
 
 ## 0.13.0 (2026-10-20)

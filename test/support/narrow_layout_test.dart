@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:apprefer/apprefer.dart';
 import 'package:apprefer/src/support/support_api.dart';
 import 'package:apprefer/src/support/support_strings.dart';
+import 'package:apprefer/src/support/support_style.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -186,6 +187,69 @@ void main() {
     await pump(tester, keyboard: 300, height: 760);
     await scrollToEnd(tester);
     expectLastTileClear(tester);
+  });
+
+  // The customer is already at the end, then taps the composer: the keyboard
+  // opens and they type five lines. The last tiles stay above the composer
+  // without another scroll.
+  testWidgets('at the end, the keyboard opening keeps the last tiles clear', (
+    tester,
+  ) async {
+    await pump(tester, height: 760);
+    await scrollToEnd(tester);
+    expectLastTileClear(tester);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pumpAndSettle();
+    expectLastTileClear(tester);
+    await tester.enterText(
+      find.byType(TextField).last,
+      'line one\nline two\nline three\nline four\nline five',
+    );
+    await tester.pumpAndSettle();
+    expectLastTileClear(tester);
+  });
+
+  testWidgets('at the end, a taller composer keeps the last tiles clear', (
+    tester,
+  ) async {
+    await pump(tester, textScale: 1.6, height: 700);
+    await scrollToEnd(tester);
+    await tester.enterText(
+      find.byType(TextField).last,
+      'line one\nline two\nline three\nline four\nline five',
+    );
+    await tester.pumpAndSettle();
+    expectLastTileClear(tester);
+  });
+
+  // Reading higher up: neither the keyboard nor a taller composer moves the page.
+  testWidgets('reading higher up, the page does not jump', (tester) async {
+    await pump(tester, height: 760);
+    await tester.drag(
+      find.byType(Scrollable).first,
+      const Offset(0, -60),
+      warnIfMissed: false,
+    );
+    await tester.pumpAndSettle();
+    final position = tester
+        .state<ScrollableState>(find.byType(Scrollable).first)
+        .position;
+    expect(position.pixels, lessThan(position.maxScrollExtent - 100));
+    final reading = tester.getRect(find.text('Refunds')).top;
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byType(TextField).last,
+      'line one\nline two\nline three\nline four\nline five',
+    );
+    await tester.pumpAndSettle();
+    expect(tester.getRect(find.text('Refunds')).top, reading);
+  });
+
+  test('at-end rule', () {
+    expect(supportHomeAtEnd(976, 1000), isTrue);
+    expect(supportHomeAtEnd(975, 1000), isFalse);
+    expect(supportHomeAtEnd(0, 0), isTrue);
   });
 
   testWidgets('ordinary phone and large window keep the same layout', (

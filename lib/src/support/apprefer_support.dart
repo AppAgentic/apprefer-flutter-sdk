@@ -541,6 +541,23 @@ class _SupportViewState extends State<AppReferSupportView>
 
   /// The home's floating composer (with its chip, error line and photos), measured.
   double homeComposerHeight = 100;
+
+  /// The home's height as last laid out (it shrinks when the keyboard opens).
+  double? homeViewport;
+
+  bool get _homeAtEnd {
+    if (!homeScroll.hasClients) return false;
+    final p = homeScroll.position;
+    return p.hasContentDimensions &&
+        supportHomeAtEnd(p.pixels, p.maxScrollExtent);
+  }
+
+  /// After the next layout, back to the end of the home (the composer or the
+  /// keyboard took more room while the customer was already at the end).
+  void _keepHomeEnd() => WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!mounted || !homeScroll.hasClients) return;
+    homeScroll.jumpTo(homeScroll.position.maxScrollExtent);
+  });
   Timer? timer;
   late SupportPalette palette;
   late SupportColors colors;
@@ -2033,6 +2050,25 @@ class _SupportViewState extends State<AppReferSupportView>
     final selection = supportContinueSelection(conversations);
     final current = selection.current;
     final topics = config.topics;
+    return LayoutBuilder(
+      builder: (context, box) {
+        // The keyboard opening shrinks the home. Read before the scroll view lays
+        // out again, so it is where the customer was: only someone already at the
+        // end stays there; someone reading higher up isn't moved.
+        final viewport = box.maxHeight;
+        final old = homeViewport;
+        homeViewport = viewport;
+        if (old != null && viewport < old && _homeAtEnd) _keepHomeEnd();
+        return _homeStack(current, selection.others, topics);
+      },
+    );
+  }
+
+  Widget _homeStack(
+    Map<String, dynamic>? current,
+    List<Map<String, dynamic>> others,
+    List<AppReferSupportTopic> topics,
+  ) {
     return Stack(
       children: [
         Positioned.fill(
@@ -2073,8 +2109,7 @@ class _SupportViewState extends State<AppReferSupportView>
                               topics,
                               labelled: current != null || articles.isNotEmpty,
                             ),
-                          if (selection.others.isNotEmpty)
-                            _pastConversations(selection.others),
+                          if (others.isNotEmpty) _pastConversations(others),
                           if (loading && conversations.isEmpty)
                             const Center(child: CircularProgressIndicator()),
                           if (loadError.isNotEmpty && conversations.isEmpty)
@@ -2101,7 +2136,11 @@ class _SupportViewState extends State<AppReferSupportView>
           child: _MeasureSize(
             onChange: (size) {
               if (mounted && size.height != homeComposerHeight) {
+                // More lines, a topic, photos or an error: someone already at
+                // the end stays there.
+                final keepEnd = _homeAtEnd;
                 setState(() => homeComposerHeight = size.height);
+                if (keepEnd) _keepHomeEnd();
               }
             },
             child: _composer(
