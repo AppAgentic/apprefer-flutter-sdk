@@ -263,6 +263,8 @@ class StorePurchaseOptions {
 
 /// The store behind an interface so the engine can be tested with fakes.
 abstract class BillingStoreAdapter {
+  /// Native-verified Apple app transaction context, for routing only.
+  Future<BillingEnvironment?> storeEnvironment() async => null;
   Future<String?> storefrontCountry() async => null;
   String? get appVersion => null;
   BillingStore get store;

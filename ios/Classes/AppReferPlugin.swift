@@ -54,6 +54,8 @@ public class AppReferPlugin: NSObject, FlutterPlugin {
             } else { result("granted") }
         case "getAdServicesToken":
             getAdServicesToken(result: result)
+        case "billingStoreEnvironment":
+            Task { @MainActor in result(await VerifiedBillingStoreContext.environment()) }
         case "billingCurrentEntitlements":
             if #available(iOS 15.0, *) {
                 Task { @MainActor in

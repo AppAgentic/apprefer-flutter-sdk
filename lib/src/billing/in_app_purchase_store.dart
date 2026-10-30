@@ -46,6 +46,23 @@ class InAppPurchaseBillingStore extends BillingStoreAdapter {
 
   bool get _isApple => store == BillingStore.appStore;
 
+  @override
+  Future<BillingEnvironment?> storeEnvironment() async {
+    if (!_isApple) return null;
+    try {
+      final value = await const MethodChannel(
+        'com.apprefer.sdk/adservices',
+      ).invokeMethod<String>('billingStoreEnvironment');
+      return value == 'production'
+          ? BillingEnvironment.production
+          : value == 'sandbox'
+          ? BillingEnvironment.sandbox
+          : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // --- Updates ---
 
   @override

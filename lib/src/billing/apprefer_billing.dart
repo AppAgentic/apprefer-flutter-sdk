@@ -147,6 +147,19 @@ class AppReferBilling {
     final done = () async {
       final prefs = await SharedPreferences.getInstance();
       final storage = BillingStorage(prefs);
+      final selectedStore =
+          store ??
+          InAppPurchaseBillingStore(
+            storage: storage,
+            consumableProductIds: consumableProductIds,
+            logger: logger,
+          );
+      BillingEnvironment? detected;
+      if (environment == null) {
+        try {
+          detected = await selectedStore.storeEnvironment();
+        } catch (_) {}
+      }
       BillingEnvironment? scope() {
         final key = apiKey ?? AppReferRegistry.apiKey;
         if (key == null) return environment;
@@ -156,7 +169,7 @@ class AppReferBilling {
         return environment ??
             (key.startsWith('pk_test_')
                 ? BillingEnvironment.sandbox
-                : BillingEnvironment.production);
+                : detected ?? BillingEnvironment.production);
       }
 
       _broadcaster.validScope = (info) =>
@@ -176,13 +189,7 @@ class AppReferBilling {
         ),
         storage: storage,
         queue: PendingPurchaseQueue(prefs, BillingStorage.pendingPurchasesKey),
-        store:
-            store ??
-            InAppPurchaseBillingStore(
-              storage: storage,
-              consumableProductIds: consumableProductIds,
-              logger: logger,
-            ),
+        store: selectedStore,
         options: BillingEngineOptions(
           environment: scope,
           productEntitlements: entitlementsByProduct,
@@ -323,17 +330,22 @@ class AppReferBilling {
   /// Not configured: still never lock a payer out.
   static Future<AppReferCustomerInfo> _unconfiguredFallback() async {
     List<StoreEntitlement> purchases = const [];
+    BillingEnvironment? detected;
+    final initialKey = AppReferRegistry.apiKey;
     try {
-      purchases = await unconfiguredStore().activeEntitlements();
+      final store = unconfiguredStore();
+      if (!(initialKey ?? '').startsWith('pk_test_'))
+        detected = await store.storeEnvironment();
+      purchases = await store.activeEntitlements();
     } catch (_) {}
     final prefs = await SharedPreferences.getInstance();
     final storage = BillingStorage(prefs);
     final key = AppReferRegistry.apiKey;
-    final environment = key == null
+    final environment = key == null || key != initialKey
         ? null
         : key.startsWith('pk_test_')
         ? BillingEnvironment.sandbox
-        : BillingEnvironment.production;
+        : detected;
     purchases = purchases.where((purchase) {
       final bound =
           purchase.environment ??
