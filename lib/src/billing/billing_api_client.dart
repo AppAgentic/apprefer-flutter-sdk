@@ -79,6 +79,11 @@ class BillingApiClient {
 
   /// 100 ms polls while waiting for the SDK key.
   final int keyWaitAttempts;
+  final BillingEnvironment? environment;
+  final BillingEnvironment? Function()? environmentProvider;
+  final Future<void> Function(Map<String, String>, BillingEnvironment)?
+  recordProofEnvironment;
+  final BillingEnvironment? Function(Map<String, String>)? proofEnvironment;
 
   /// False while the install may not be linked (collection off, after reset
   /// until configure): requests then never use the tracking host.
@@ -90,6 +95,10 @@ class BillingApiClient {
     http.Client? client,
     this.timeout = const Duration(seconds: 15),
     this.keyWaitAttempts = 30,
+    this.environment,
+    this.environmentProvider,
+    this.recordProofEnvironment,
+    this.proofEnvironment,
     this.linkAllowed,
   }) : baseUrls = baseUrls.toSet().toList(),
        _client = client ?? http.Client();
@@ -178,7 +187,7 @@ class BillingApiClient {
 
   /// `AppReferSDK.configure` usually runs just before `AppReferBilling.configure`
   /// without being awaited, so give it a moment to register the key.
-  Future<String?> _resolveApiKey() async {
+  Future<String?> awaitKey() async {
     for (var attempt = 0; attempt <= keyWaitAttempts; attempt++) {
       final key = apiKey();
       if (key != null && key.isNotEmpty) return key;
@@ -219,12 +228,44 @@ class BillingApiClient {
 
   Future<BillingCustomerResponse> send(BillingEndpoint endpoint) async =>
       BillingCustomerResponse.fromJson(await sendRaw(endpoint));
-  Future<Map<String, dynamic>> sendRaw(BillingEndpoint endpoint) async {
-    final key = await _resolveApiKey();
+  Future<BillingCustomerResponse> sendPurchaseInEnvironment(
+    RecordPurchase endpoint,
+    BillingEnvironment selected,
+    String expectedKey,
+  ) async => BillingCustomerResponse.fromJson(
+    await _sendRaw(endpoint, override: selected, expectedKey: expectedKey),
+  );
+  Future<Map<String, dynamic>> sendRaw(BillingEndpoint endpoint) =>
+      _sendRaw(endpoint);
+  Future<Map<String, dynamic>> _sendRaw(
+    BillingEndpoint endpoint, {
+    BillingEnvironment? override,
+    String? expectedKey,
+  }) async {
+    final key = await awaitKey();
     if (key == null) {
       throw const AppReferBillingException(
         AppReferBillingErrorCode.missingApiKey,
       );
+    }
+    if (expectedKey != null && key != expectedKey)
+      throw const AppReferBillingException(
+        AppReferBillingErrorCode.invalidResponse,
+      );
+    final selected = override ?? environmentProvider?.call() ?? environment;
+    final scoped =
+        override != null || environmentProvider != null || environment != null;
+    if (scoped && selected == null)
+      throw const AppReferBillingException(
+        AppReferBillingErrorCode.invalidResponse,
+      );
+    if (endpoint is RecordPurchase && scoped) {
+      final known = proofEnvironment?.call(endpoint.storeFields);
+      if (known != null && known != selected)
+        throw AppReferBillingException(
+          AppReferBillingErrorCode.environmentMismatch,
+          environment: known,
+        );
     }
     var lastError = const AppReferBillingException(
       AppReferBillingErrorCode.network,
@@ -246,7 +287,20 @@ class BillingApiClient {
           )
         : baseUrls;
     for (final baseUrl in hosts) {
+      if (expectedKey != null && apiKey() != expectedKey)
+        throw const AppReferBillingException(
+          AppReferBillingErrorCode.invalidResponse,
+        );
       final request = makeRequest(endpoint, baseUrl, key);
+      if (selected != null) {
+        if (key.startsWith('pk_test_') &&
+            selected == BillingEnvironment.production) {
+          throw const AppReferBillingException(
+            AppReferBillingErrorCode.invalidResponse,
+          );
+        }
+        request.headers['X-AppRefer-Billing-Environment'] = selected.name;
+      }
       final http.Response response;
       try {
         response = await http.Response.fromStream(
@@ -260,6 +314,10 @@ class BillingApiClient {
         continue;
       }
 
+      if (expectedKey != null && apiKey() != expectedKey)
+        throw const AppReferBillingException(
+          AppReferBillingErrorCode.invalidResponse,
+        );
       final status = response.statusCode;
       if (status >= 200 && status < 300) {
         final Map<String, dynamic> json;
@@ -281,6 +339,20 @@ class BillingApiClient {
           );
         }
         try {
+          if (endpoint is! GetOfferings &&
+              selected != null &&
+              json['environment'] != selected.name) {
+            throw const FormatException('Billing environment mismatch');
+          }
+          if (endpoint is RecordPurchase && selected != null) {
+            // Parse the complete snapshot before recording proof scope.
+            BillingCustomerResponse.fromJson(json);
+            await recordProofEnvironment?.call(endpoint.storeFields, selected);
+          }
+          if (expectedKey != null && apiKey() != expectedKey)
+            throw const AppReferBillingException(
+              AppReferBillingErrorCode.invalidResponse,
+            );
           return json;
         } catch (_) {
           throw const AppReferBillingException(
@@ -289,12 +361,33 @@ class BillingApiClient {
         }
       }
       String? message;
+      BillingEnvironment? verifiedEnvironment;
       try {
         final decoded = jsonDecode(response.body);
+        if (decoded is Map &&
+            status == 400 &&
+            decoded['code'] == 'billing_environment_mismatch') {
+          verifiedEnvironment = decoded['environment'] == 'production'
+              ? BillingEnvironment.production
+              : decoded['environment'] == 'sandbox'
+              ? BillingEnvironment.sandbox
+              : null;
+        }
         if (decoded is Map && decoded['error'] is String) {
           message = decoded['error'] as String;
         }
       } catch (_) {}
+      if (endpoint is RecordPurchase && verifiedEnvironment != null) {
+        await recordProofEnvironment?.call(
+          endpoint.storeFields,
+          verifiedEnvironment,
+        );
+        throw AppReferBillingException(
+          AppReferBillingErrorCode.environmentMismatch,
+          environment: verifiedEnvironment,
+          message: message,
+        );
+      }
       final error = AppReferBillingException(
         AppReferBillingErrorCode.server,
         status: status,

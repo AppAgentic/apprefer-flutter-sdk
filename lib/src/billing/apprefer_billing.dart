@@ -1,3 +1,4 @@
+import 'automatic_billing_scope.dart';
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
@@ -62,6 +63,7 @@ class AppReferBilling {
   ///   after AppRefer records them. iOS reads the product type from StoreKit.
   static Future<void> configure({
     String? apiKey,
+    BillingEnvironment? environment,
     String? appUserId,
     Map<String, List<String>> entitlementsByProduct = const {},
     String? defaultEntitlement,
@@ -71,6 +73,7 @@ class AppReferBilling {
   }) {
     return _configure(
       apiKey: apiKey,
+      environment: environment,
       appUserId: appUserId,
       entitlementsByProduct: entitlementsByProduct,
       defaultEntitlement: defaultEntitlement,
@@ -85,14 +88,17 @@ class AppReferBilling {
   static Future<void> configureForTesting({
     required BillingStoreAdapter store,
     required http.Client httpClient,
-    String apiKey = 'pk_test_123',
+    String? apiKey = 'pk_test_123',
+    BillingEnvironment? environment,
     String? appUserId,
     Map<String, List<String>> entitlementsByProduct = const {},
     String? defaultEntitlement,
     DateTime Function()? now,
+    ProtectedBillingState? automaticState,
   }) {
     return _configure(
       apiKey: apiKey,
+      environment: environment,
       appUserId: appUserId,
       entitlementsByProduct: entitlementsByProduct,
       defaultEntitlement: defaultEntitlement,
@@ -103,6 +109,7 @@ class AppReferBilling {
       httpClient: httpClient,
       now: now,
       observeLifecycle: false,
+      automaticState: automaticState ?? _TestProtectedBillingState(),
     );
   }
 
@@ -122,6 +129,7 @@ class AppReferBilling {
 
   static Future<void> _configure({
     required String? apiKey,
+    BillingEnvironment? environment,
     required String? appUserId,
     required Map<String, List<String>> entitlementsByProduct,
     required String? defaultEntitlement,
@@ -132,6 +140,7 @@ class AppReferBilling {
     http.Client? httpClient,
     DateTime Function()? now,
     bool observeLifecycle = true,
+    ProtectedBillingState? automaticState,
   }) {
     final logger = AppReferLogger(debug: debug, logLevel: logLevel);
     if (_configuring != null) {
@@ -142,6 +151,35 @@ class AppReferBilling {
     final done = () async {
       final prefs = await SharedPreferences.getInstance();
       final storage = BillingStorage(prefs);
+      final selectedStore =
+          store ??
+          InAppPurchaseBillingStore(
+            storage: storage,
+            consumableProductIds: consumableProductIds,
+            logger: logger,
+          );
+      BillingEnvironment? detected;
+      if (environment == null) {
+        try {
+          detected = await selectedStore.storeEnvironment();
+        } catch (_) {}
+      }
+      final automatic = AutomaticBillingScope(
+        automaticState ?? NativeProtectedBillingState(),
+        () => apiKey ?? AppReferRegistry.apiKey,
+        () => (
+          user: storage.currentAppUserId,
+          revision: storage.automaticIdentityGeneration,
+          reset: storage.automaticResetGeneration,
+        ),
+        () => AppReferRegistry.accountEpoch,
+        explicit: environment,
+        nativeContext: detected,
+      );
+      BillingEnvironment? scope() => automatic.current();
+
+      _broadcaster.validScope = (info) =>
+          scope() != null && info.environment == scope();
       final engine = BillingEngine(
         api: BillingApiClient(
           baseUrls: const [
@@ -150,18 +188,17 @@ class AppReferBilling {
           ],
           apiKey: () => apiKey ?? AppReferRegistry.apiKey,
           client: httpClient,
+          environmentProvider: scope,
+          recordProofEnvironment: storage.recordPurchaseEnvironment,
+          proofEnvironment: storage.purchaseEnvironment,
           linkAllowed: AppReferRegistry.linkAllowed,
         ),
         storage: storage,
         queue: PendingPurchaseQueue(prefs, BillingStorage.pendingPurchasesKey),
-        store:
-            store ??
-            InAppPurchaseBillingStore(
-              storage: storage,
-              consumableProductIds: consumableProductIds,
-              logger: logger,
-            ),
+        store: selectedStore,
         options: BillingEngineOptions(
+          environment: scope,
+          automaticScope: automatic,
           productEntitlements: entitlementsByProduct,
           defaultEntitlement: defaultEntitlement,
         ),
@@ -209,6 +246,7 @@ class AppReferBilling {
   static void _publish(AppReferCustomerInfo info) {
     _broadcaster.publish(info);
     for (final listener in List.of(_listeners)) {
+      if (!_broadcaster.validScope(info)) break;
       try {
         listener(info);
       } catch (e) {
@@ -299,9 +337,33 @@ class AppReferBilling {
   /// Not configured: still never lock a payer out.
   static Future<AppReferCustomerInfo> _unconfiguredFallback() async {
     List<StoreEntitlement> purchases = const [];
+    BillingEnvironment? detected;
+    final initialKey = AppReferRegistry.apiKey;
     try {
-      purchases = await unconfiguredStore().activeEntitlements();
+      final store = unconfiguredStore();
+      if (!(initialKey ?? '').startsWith('pk_test_'))
+        detected = await store.storeEnvironment();
+      purchases = await store.activeEntitlements();
     } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    final storage = BillingStorage(prefs);
+    final key = AppReferRegistry.apiKey;
+    final environment = key == null || key != initialKey
+        ? null
+        : key.startsWith('pk_test_')
+        ? BillingEnvironment.sandbox
+        : detected;
+    purchases = purchases.where((purchase) {
+      final bound =
+          purchase.environment ??
+          (purchase.store == BillingStore.playStore
+              ? storage.purchaseEnvironment({
+                  'store': 'play_store',
+                  'purchaseToken': purchase.originalId,
+                })
+              : null);
+      return environment != null && bound == environment;
+    }).toList();
     final now = DateTime.now();
     final local = LocalEntitlements.compute(
       purchases,
@@ -309,12 +371,20 @@ class AppReferBilling {
       learned: const {},
       now: now,
     );
-    return LocalEntitlements.merge(
+    final result = LocalEntitlements.merge(
       server: null,
       local: local,
       appUserId: '',
       now: now,
       source: CustomerInfoSource.localFallback,
+    );
+    return AppReferCustomerInfo(
+      appUserId: result.appUserId,
+      entitlements: result.entitlements,
+      activeSubscriptions: result.activeSubscriptions,
+      requestDate: result.requestDate,
+      source: result.source,
+      environment: environment,
     );
   }
 
@@ -408,9 +478,11 @@ class _LifecycleObserver with WidgetsBindingObserver {
 /// the latest value to each new one.
 class _CustomerInfoBroadcaster {
   AppReferCustomerInfo? _latest;
+  bool Function(AppReferCustomerInfo) validScope = (_) => true;
   final _controller = StreamController<AppReferCustomerInfo>.broadcast();
 
   void publish(AppReferCustomerInfo info) {
+    if (!validScope(info)) return;
     _latest = info;
     _controller.add(info);
   }
@@ -423,5 +495,16 @@ class _CustomerInfoBroadcaster {
         if (latest != null) controller.add(latest);
         final sub = _controller.stream.listen(controller.add);
         controller.onCancel = sub.cancel;
-      });
+      }).where((info) => validScope(info));
+}
+
+// configureForTesting only. Production always uses native protected storage.
+class _TestProtectedBillingState implements ProtectedBillingState {
+  String? value;
+  @override
+  Future<String?> read() async => value;
+  @override
+  Future<void> write(String next) async {
+    value = next;
+  }
 }

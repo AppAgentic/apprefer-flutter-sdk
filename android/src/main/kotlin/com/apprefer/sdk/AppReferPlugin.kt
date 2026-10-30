@@ -55,6 +55,25 @@ class AppReferPlugin : FlutterPlugin, MethodCallHandler, io.flutter.embedding.en
 
     override fun onMethodCall(call: MethodCall, result: Result) {
         when (call.method) {
+            "billingAutomaticStateGet", "billingAutomaticStateSet" -> {
+                try {
+                    val context = applicationContext ?: throw java.io.IOException("Context unavailable")
+                    if (android.os.Build.VERSION.SDK_INT >= 24 && context.isDeviceProtectedStorage) throw java.io.IOException("Credential-protected storage unavailable")
+                    val directory = java.io.File(context.noBackupFilesDir, "apprefer-billing")
+                    val file = android.util.AtomicFile(java.io.File(directory, "automatic-environments-v1.json"))
+                    if (call.method == "billingAutomaticStateGet") {
+                        if (!file.baseFile.exists() && !java.io.File(file.baseFile.path + ".bak").exists()) result.success(null)
+                        else result.success(String(file.readFully(), Charsets.UTF_8))
+                    } else {
+                        val value = call.arguments as? String ?: throw java.io.IOException("Invalid billing state")
+                        if (!directory.isDirectory && !directory.mkdirs()) throw java.io.IOException("Billing directory unavailable")
+                        val output = file.startWrite()
+                        try { output.write(value.toByteArray(Charsets.UTF_8)); file.finishWrite(output) }
+                        catch (error: Exception) { file.failWrite(output); throw error }
+                        result.success(null)
+                    }
+                } catch (_: Exception) { result.error("billing_storage", "Automatic billing state unavailable", null) }
+            }
             "getAdServicesToken" -> {
                 // AdServices is iOS only
                 result.success(null)

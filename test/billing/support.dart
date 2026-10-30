@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:apprefer/src/billing/automatic_billing_scope.dart';
 
 import 'package:apprefer/src/billing/billing_api_client.dart';
 import 'package:apprefer/src/billing/billing_engine.dart';
@@ -73,7 +74,14 @@ class FakeServer {
       final user = r.method == 'GET'
           ? r.url.queryParameters['appUserId']!
           : (jsonDecode(r.body) as Map)['appUserId'] as String;
-      return (200, customerJson(user, active: active));
+      return (
+        200,
+        {
+          ...customerJson(user, active: active),
+          if (r.headers['X-AppRefer-Billing-Environment'] != null)
+            'environment': r.headers['X-AppRefer-Billing-Environment'],
+        },
+      );
     };
   }
 
@@ -313,6 +321,8 @@ class Harness {
     Future<String?> Function()? appreferId,
     Future<bool> Function()? linkAllowed,
     int Function()? accountEpoch,
+    BillingEnvironment? Function()? environment,
+    AutomaticBillingScope? automaticScope,
   }) async {
     SharedPreferences.setMockInitialValues(prefs);
     final real = await SharedPreferences.getInstance();
@@ -328,11 +338,18 @@ class Harness {
         apiKey: () => apiKey,
         client: s.client,
         keyWaitAttempts: 0,
+        environmentProvider: environment,
+        proofEnvironment: storage.purchaseEnvironment,
+        recordProofEnvironment: storage.recordPurchaseEnvironment,
       ),
       storage: storage,
       queue: queue,
       store: st,
-      options: BillingEngineOptions(productEntitlements: entitlementsByProduct),
+      options: BillingEngineOptions(
+        productEntitlements: entitlementsByProduct,
+        environment: environment,
+        automaticScope: automaticScope,
+      ),
       appUserId: appUserId,
       appreferId: appreferId ?? () async => 'device-1',
       linkAllowed: linkAllowed ?? () async => true,

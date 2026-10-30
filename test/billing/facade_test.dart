@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support.dart';
+import 'package:apprefer/src/services/registry.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -11,6 +12,44 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     await AppReferBilling.resetForTesting();
   });
+
+  for (final row in [
+    ('pk_live_a', null, BillingEnvironment.sandbox, BillingEnvironment.sandbox),
+    (
+      'pk_live_a',
+      BillingEnvironment.production,
+      BillingEnvironment.sandbox,
+      BillingEnvironment.production,
+    ),
+    (
+      'pk_test_a',
+      null,
+      BillingEnvironment.production,
+      BillingEnvironment.sandbox,
+    ),
+    ('pk_live_a', null, null, BillingEnvironment.production),
+  ]) {
+    test('verified context matrix ' + row.toString(), () async {
+      final server = FakeServer()..online();
+      await AppReferBilling.configureForTesting(
+        apiKey: row.$1,
+        environment: row.$2,
+        appUserId: 'review-user',
+        store: _ContextStore(row.$3),
+        httpClient: server.client,
+      );
+      final info = await AppReferBilling.customerInfo(
+        fetchPolicy: FetchPolicy.fetchCurrent,
+      );
+      expect(info.environment, row.$4);
+      expect(
+        server.requests.every(
+          (r) => r.headers['X-AppRefer-Billing-Environment'] == row.$4.name,
+        ),
+        isTrue,
+      );
+    });
+  }
 
   test(
     'calls before configure throw notConfigured; customerInfo never throws',
@@ -31,7 +70,7 @@ void main() {
       );
       final info = await AppReferBilling.customerInfo();
       expect(info.source, CustomerInfoSource.localFallback);
-      expect(info.entitlements['premium']?.isActive, isTrue);
+      expect(info.entitlements.active, isEmpty);
       expect(await AppReferBilling.appUserId, '');
       expect(await AppReferBilling.isAnonymous, isTrue);
     },
@@ -70,6 +109,47 @@ void main() {
     });
   });
 
+  test(
+    'stream replay validates the current registered-key environment',
+    () async {
+      AppReferRegistry.apiKey = 'pk_test_registered';
+      final server = FakeServer()..online(active: {'premium': 'pro_yearly'});
+      await AppReferBilling.configureForTesting(
+        apiKey: null,
+        store: FakeStore(),
+        httpClient: server.client,
+      );
+      final sandbox = await AppReferBilling.customerInfo(
+        fetchPolicy: FetchPolicy.fetchCurrent,
+      );
+      expect(sandbox.environment, BillingEnvironment.sandbox);
+      AppReferRegistry.apiKey = 'pk_live_registered';
+      final next = AppReferBilling.customerInfoStream.first;
+      await AppReferBilling.customerInfo(fetchPolicy: FetchPolicy.fetchCurrent);
+      expect((await next).environment, BillingEnvironment.production);
+      AppReferRegistry.apiKey = null;
+    },
+  );
+
+  test(
+    'registered test to live key retains verified sandbox context',
+    () async {
+      AppReferRegistry.apiKey = 'pk_test_a';
+      final server = FakeServer()..online();
+      await AppReferBilling.configureForTesting(
+        apiKey: null,
+        store: _ContextStore(BillingEnvironment.sandbox),
+        httpClient: server.client,
+      );
+      AppReferRegistry.apiKey = 'pk_live_a';
+      final info = await AppReferBilling.customerInfo(
+        fetchPolicy: FetchPolicy.fetchCurrent,
+      );
+      expect(info.environment, BillingEnvironment.sandbox);
+      AppReferRegistry.apiKey = null;
+    },
+  );
+
   test('products and purchase go through the store', () async {
     final server = FakeServer()..online(active: {'premium': 'pro_yearly'});
     final store = FakeStore();
@@ -91,4 +171,11 @@ void main() {
     expect(store.bought.single.$2.accountToken, token);
     expect(store.completed, ['t1']);
   });
+}
+
+class _ContextStore extends FakeStore {
+  final BillingEnvironment? environment;
+  _ContextStore(this.environment);
+  @override
+  Future<BillingEnvironment?> storeEnvironment() async => environment;
 }

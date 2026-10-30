@@ -24,6 +24,18 @@ class BillingStorage {
   static const _customerInfo = 'apprefer_billing_customer_info';
   static const _productKinds = 'apprefer_billing_product_kinds';
   static const resetUserKey = 'apprefer_billing_reset_user';
+  static const _automaticIdentity = 'apprefer_billing_automatic_identity';
+  static const _automaticReset = 'apprefer_billing_automatic_reset';
+  String get automaticIdentityGeneration =>
+      _readIdentity(_automaticIdentity) ?? '';
+  String? get automaticResetGeneration => _readIdentity(_automaticReset);
+  void _advanceAutomaticIdentity() {
+    final value = generateUuidV4();
+    _write(
+      _automaticIdentity,
+      () => prefs.setString(_automaticIdentity, value),
+    );
+  }
 
   /// Advances on every `AppReferBilling.logIn`/`logOut` in this process, once
   /// the id is validated and the new user stored; when `configure(appUserId:)`
@@ -132,6 +144,7 @@ class BillingStorage {
   }
 
   String resetAnonymousId() {
+    _advanceAutomaticIdentity();
     final id = '$anonymousPrefix${generateUuidV4().toUpperCase()}';
     _write(_anonymousId, () => prefs.setString(_anonymousId, id));
     _dropStaleResetUser();
@@ -143,6 +156,7 @@ class BillingStorage {
   String? get loggedInAppUserId => _readIdentity(_appUserId);
 
   set loggedInAppUserId(String? value) {
+    if (value != loggedInAppUserId) _advanceAutomaticIdentity();
     if (value == null) {
       _write(_appUserId, () => prefs.remove(_appUserId));
     } else {
@@ -167,6 +181,8 @@ class BillingStorage {
     SharedPreferences prefs, {
     required int since,
   }) async {
+    if (identityChanges != since) return;
+    await prefs.setString(_automaticReset, generateUuidV4());
     if (identityChanges != since) return;
     final user = prefs.getString(_appUserId) ?? prefs.getString(_anonymousId);
     if (user == null || user.isEmpty) return;
@@ -394,6 +410,33 @@ class BillingStorage {
       for (final e in list)
         if (e != entry) e,
     ];
+  }
+
+  BillingEnvironment? purchaseEnvironment(Map<String, String> fields) {
+    if (fields['store'] != 'play_store' || fields['purchaseToken'] == null)
+      return null;
+    final value = _stringMap(
+      'apprefer_billing_proof_environments',
+    )[fields['purchaseToken']];
+    return value == 'production'
+        ? BillingEnvironment.production
+        : value == 'sandbox'
+        ? BillingEnvironment.sandbox
+        : null;
+  }
+
+  Future<void> recordPurchaseEnvironment(
+    Map<String, String> fields,
+    BillingEnvironment environment,
+  ) async {
+    if (fields['store'] != 'play_store' || fields['purchaseToken'] == null)
+      return;
+    final values = _stringMap('apprefer_billing_proof_environments')
+      ..[fields['purchaseToken']!] = environment.name;
+    await prefs.setString(
+      'apprefer_billing_proof_environments',
+      jsonEncode(values),
+    );
   }
 
   // --- Cached CustomerInfo (last server answer) ---

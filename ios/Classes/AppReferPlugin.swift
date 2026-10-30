@@ -9,6 +9,7 @@ import AdSupport
 import AppTrackingTransparency
 
 public class AppReferPlugin: NSObject, FlutterPlugin {
+    private static let billingStateQueue = DispatchQueue(label: "com.apprefer.billing.automatic-state")
     public static func register(with registrar: FlutterPluginRegistrar) {
         SupportBridge.register(with: registrar)
         EngagementBridge.register(with: registrar)
@@ -54,6 +55,25 @@ public class AppReferPlugin: NSObject, FlutterPlugin {
             } else { result("granted") }
         case "getAdServicesToken":
             getAdServicesToken(result: result)
+        case "billingAutomaticStateGet":
+            Self.billingStateQueue.async {
+                do {
+                    let data = try ProtectedBillingState.read(from: ProtectedBillingState.wrapperURL())
+                    if let data, String(data: data, encoding: .utf8) == nil { throw NSError(domain: "AppReferBilling", code: 1) }
+                    let value = data.flatMap { String(data: $0, encoding: .utf8) }
+                    DispatchQueue.main.async { result(value) }
+                } catch { DispatchQueue.main.async { result(FlutterError(code: "billing_storage", message: "Automatic billing state unavailable", details: nil)) } }
+            }
+        case "billingAutomaticStateSet":
+            guard let value = call.arguments as? String else { result(FlutterError(code: "billing_storage", message: "Invalid billing state", details: nil)); return }
+            Self.billingStateQueue.async {
+                do {
+                    try ProtectedBillingState.write(Data(value.utf8), to: ProtectedBillingState.wrapperURL())
+                    DispatchQueue.main.async { result(nil) }
+                } catch { DispatchQueue.main.async { result(FlutterError(code: "billing_storage", message: "Automatic billing state could not be saved", details: nil)) } }
+            }
+        case "billingStoreEnvironment":
+            Task { @MainActor in result(await VerifiedBillingStoreContext.environment()) }
         case "billingCurrentEntitlements":
             if #available(iOS 15.0, *) {
                 Task { @MainActor in

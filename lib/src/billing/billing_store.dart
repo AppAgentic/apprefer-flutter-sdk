@@ -199,6 +199,7 @@ bool isDefinitiveStoreFailure(Object? failure) {
 /// A store-verified purchase that currently grants access, used for the
 /// outage fallback (Apple: verified `Transaction.all`; Google: owned purchases).
 class StoreEntitlement {
+  final BillingEnvironment? environment;
   final String productId;
   final String originalId;
   final StoreProductKind kind;
@@ -216,6 +217,7 @@ class StoreEntitlement {
   final String? accountToken;
 
   const StoreEntitlement({
+    this.environment,
     required this.productId,
     required this.originalId,
     required this.kind,
@@ -261,6 +263,8 @@ class StorePurchaseOptions {
 
 /// The store behind an interface so the engine can be tested with fakes.
 abstract class BillingStoreAdapter {
+  /// Native-verified Apple app transaction context, for routing only.
+  Future<BillingEnvironment?> storeEnvironment() async => null;
   Future<String?> storefrontCountry() async => null;
   String? get appVersion => null;
   BillingStore get store;

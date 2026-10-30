@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -17,6 +18,7 @@ class PurchaseIntent {
   final DateTime startedAt;
   final PresentedOfferingContext? presentedOfferingContext;
   final String? bucketId;
+  final String? pendingTokenHash;
 
   const PurchaseIntent({
     required this.appUserId,
@@ -25,6 +27,7 @@ class PurchaseIntent {
     required this.startedAt,
     this.presentedOfferingContext,
     this.bucketId,
+    this.pendingTokenHash,
   });
 
   bool sameAs(PurchaseIntent other) =>
@@ -37,6 +40,7 @@ class PurchaseIntent {
     'productId': productId,
     'accountToken': accountToken,
     'startedAtMs': startedAt.millisecondsSinceEpoch,
+    if (pendingTokenHash != null) 'pendingTokenHash': pendingTokenHash,
     if (presentedOfferingContext != null)
       'presentedOfferingContext': presentedOfferingContext!.toJson(),
     if (bucketId != null) 'bucketId': bucketId,
@@ -62,6 +66,7 @@ class PurchaseIntent {
             )
           : null,
       bucketId: json['bucketId'] as String?,
+      pendingTokenHash: json['pendingTokenHash'] as String?,
     );
   }
 }
@@ -241,7 +246,36 @@ class PurchaseIntentStore {
 
   /// Saves [intent]. True only once it is on disk; false when the write
   /// failed or the stored intents can't be read (they are never overwritten).
-  Future<bool> add(PurchaseIntent intent) async {
+  Future<void> _mutationTail = Future.value();
+  Future<T> _mutate<T>(Future<T> Function() action) {
+    final result = _mutationTail.then((_) => action());
+    _mutationTail = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
+
+  Future<bool> bindPendingToken(PurchaseIntent intent, String hash) =>
+      _mutate(() async {
+        final stored = await read();
+        for (var index = 0; index < stored.length; index++) {
+          final entry = stored[index];
+          if (!entry.sameAs(intent)) continue;
+          if (entry.pendingTokenHash != null && entry.pendingTokenHash != hash)
+            return false;
+          stored[index] = PurchaseIntent(
+            appUserId: entry.appUserId,
+            productId: entry.productId,
+            accountToken: entry.accountToken,
+            startedAt: entry.startedAt,
+            presentedOfferingContext: entry.presentedOfferingContext,
+            bucketId: entry.bucketId,
+            pendingTokenHash: hash,
+          );
+          return _write(stored);
+        }
+        return false;
+      });
+
+  Future<bool> add(PurchaseIntent intent) => _mutate(() async {
     final List<PurchaseIntent> stored;
     try {
       stored = await read();
@@ -252,10 +286,10 @@ class PurchaseIntentStore {
     // The in-memory copy took the failed write: put the stored list back.
     await _write(stored);
     return false;
-  }
+  });
 
   /// Removes [intent] only; one saved for a newer purchase stays.
-  Future<void> remove(PurchaseIntent intent) async {
+  Future<void> remove(PurchaseIntent intent) => _mutate(() async {
     final List<PurchaseIntent> stored;
     try {
       stored = await read();
@@ -267,7 +301,7 @@ class PurchaseIntentStore {
         if (!e.sameAs(intent)) e,
     ];
     if (next.length != stored.length) await _write(next);
-  }
+  });
 
   Future<bool> _write(List<PurchaseIntent> intents) =>
       _set(_key, jsonEncode([for (final e in intents) e.toJson()]));
