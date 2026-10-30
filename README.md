@@ -814,7 +814,7 @@ Call this when collection consent is withdrawn. The choice persists across launc
 
 Product events include `app_user_id` from the identity set via `setUserId` when tracked. The identity is saved in the queued payload, so retries and relaunches retain the original account even after a user switch. Without an identity the field is omitted. Internal events whose names start with `_` retain their existing payloads.
 
-### Billing environments (0.13.3 candidate)
+### Billing environments (0.13.3)
 
 Billing snapshots use one environment. Test SDK keys default to sandbox; live SDK keys default to production. For store sandbox testing with a live key, explicitly choose sandbox in Billing configuration:
 
