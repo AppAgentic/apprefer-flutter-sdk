@@ -60,6 +60,14 @@ class AutomaticBillingScope {
     this.explicit,
     this.nativeContext,
   }) : _seenEpoch = epoch();
+  bool isIntentQuarantined(PurchaseIntent intent) =>
+      _quarantinedIntents.contains(_intent(intent));
+  void releaseIntentQuarantine(PurchaseIntent intent) =>
+      _quarantinedIntents.remove(_intent(intent));
+  static String tokenHash(String token) => _hash(token);
+  final Set<String> _quarantinedIntents = {};
+  void quarantineIntent(PurchaseIntent intent) =>
+      _quarantinedIntents.add(_intent(intent));
   static String _hash(String s) => sha256.convert(utf8.encode(s)).toString();
   static String _intent(PurchaseIntent i) => _hash(
     jsonEncode([
@@ -238,6 +246,30 @@ class AutomaticBillingScope {
       a is Map && a['context'] == t.context && a['generation'] == t.generation;
   Future<void> authorizeIntent(PurchaseIntent i, AutomaticScopeTicket t) =>
       _authorize('intents', _intent(i), t);
+  Future<void> authorizePending(
+    PurchaseIntent i,
+    Map<String, String> fields,
+  ) async {
+    final t = await capture(i.appUserId), token = fields['purchaseToken'];
+    if (t == null || token == null || token.isEmpty) return;
+    await _run(() async {
+      if (!isCurrent(t)) throw _error();
+      final d = await _load(),
+          intents = _map(d, 'intents'),
+          id = _intent(i),
+          entry = intents[_intent(i)];
+      if (!_matches(entry, t)) return;
+      final hash = _hash(token);
+      if (entry['pendingToken'] != null && entry['pendingToken'] != hash)
+        throw _error();
+      intents[id] = {
+        ...Map<String, dynamic>.from(entry as Map),
+        'pendingToken': hash,
+      };
+      await _save({...d, 'intents': intents});
+    });
+  }
+
   Future<AutomaticScopeTicket?> recoverIntent(
     PurchaseIntent i,
     StorePurchase p,
@@ -250,8 +282,18 @@ class AutomaticBillingScope {
         ) ||
         (i.accountToken != null && i.accountToken != p.accountToken))
       return null;
+    if (_quarantinedIntents.contains(_intent(i)) ||
+        (i.pendingTokenHash != null &&
+            (p.purchaseToken == null ||
+                i.pendingTokenHash != _hash(p.purchaseToken!))))
+      return null;
     final t = await capture(i.appUserId), id = _intent(i), f = p.storeFields;
     final a = _doc?['intents'][id];
+    if (a is Map &&
+        a['pendingToken'] != null &&
+        (p.purchaseToken == null ||
+            a['pendingToken'] != _hash(p.purchaseToken!)))
+      return null;
     if (f == null ||
         (a is Map && a['proof'] != null && a['proof'] != _proof(f)))
       return null;
@@ -266,12 +308,17 @@ class AutomaticBillingScope {
     Map<String, String> f,
     AutomaticScopeTicket t, {
     PurchaseIntent? intent,
-  }) => _authorize(
-    'proofs',
-    _proof(f),
-    t,
-    intent == null ? null : _intent(intent),
-  );
+  }) {
+    if (intent != null && _quarantinedIntents.contains(_intent(intent)))
+      throw _error();
+    return _authorize(
+      'proofs',
+      _proof(f),
+      t,
+      intent == null ? null : _intent(intent),
+    );
+  }
+
   Future<void> _authorize(
     String kind,
     String id,

@@ -814,9 +814,65 @@ class BillingEngine {
 
   // --- Store updates ---
 
-  Future<void> _handleUpdate(StorePurchase purchase) async {
+  final Map<String, Future<void> Function()> _pendingBindings = {};
+  final Map<String, Future<void>> _pendingBindingFutures = {};
+  Future<void> _awaitPendingBinding(String product) async {
+    final operation = _pendingBindings[product];
+    if (operation == null) return;
+    final running = _pendingBindingFutures.putIfAbsent(product, operation);
+    try {
+      await running;
+      if (identical(_pendingBindings[product], operation))
+        _pendingBindings.remove(product);
+    } finally {
+      if (identical(_pendingBindingFutures[product], running))
+        _pendingBindingFutures.remove(product);
+    }
+  }
+
+  final Map<String, Future<void>> _updateTails = {};
+  Future<void> _handleUpdate(StorePurchase purchase) {
+    final product = purchase.productId;
+    final previous = _updateTails[product] ?? Future<void>.value();
+    final next = previous.then(
+      (_) => _handleUpdatePass(purchase),
+      onError: (Object _) => _handleUpdatePass(purchase),
+    );
+    _updateTails[product] = next;
+    return next.whenComplete(() {
+      if (identical(_updateTails[product], next)) _updateTails.remove(product);
+    });
+  }
+
+  Future<void> _handleUpdatePass(StorePurchase purchase) async {
     switch (purchase.status) {
       case StorePurchaseStatus.pending:
+        final intent = _waiters[purchase.productId]?.intent;
+        final fields = purchase.storeFields;
+        if (intent != null &&
+            purchase.store == BillingStore.playStore &&
+            fields != null &&
+            purchase.purchaseToken?.isNotEmpty == true) {
+          _options.automaticScope?.quarantineIntent(intent);
+          _pendingBindings[purchase.productId] = () async {
+            if (!await _intents.bindPendingToken(
+              intent,
+              AutomaticBillingScope.tokenHash(purchase.purchaseToken!),
+            ))
+              throw const AppReferBillingException(
+                AppReferBillingErrorCode.storage,
+              );
+            await _options.automaticScope?.authorizePending(intent, fields);
+            _options.automaticScope?.releaseIntentQuarantine(intent);
+          };
+          try {
+            await _awaitPendingBinding(purchase.productId);
+          } catch (e) {
+            _options.automaticScope?.quarantineIntent(intent);
+            _waiters.remove(purchase.productId)?.completer.completeError(e);
+            return;
+          }
+        }
         // The saved intent stays: the purchase may complete after a restart,
         // a logout or a user switch.
         _resolve(purchase.productId, PurchaseOutcome.pending, null);
@@ -908,9 +964,16 @@ class BillingEngine {
     String? initiator,
     PurchaseIntent? suppliedIntent,
   ) async {
+    try {
+      await _awaitPendingBinding(purchase.productId);
+    } catch (_) {
+      return localFallback();
+    }
     // A renewal never matches or uses up a saved intent, even one handed in
     // by the purchase sheet that is waiting.
-    final waiterIntent = purchase.isRenewal ? null : suppliedIntent;
+    final waiterIntent = purchase.isRenewal
+        ? null
+        : await _usableIntent(suppliedIntent, purchase);
     final fields = purchase.storeFields;
     if (fields == null || purchase.id.isEmpty) {
       _logger.error(
@@ -1073,8 +1136,33 @@ class BillingEngine {
   /// token. Oldest is the earliest `startedAt`, never the stored order.
   /// Never called for a renewal. Throws [AppReferBillingErrorCode.storage]
   /// when the intents can't be read.
+  bool _matchesPending(PurchaseIntent i, StorePurchase p) =>
+      _options.automaticScope?.isIntentQuarantined(i) != true &&
+      (i.pendingTokenHash == null ||
+          (p.purchaseToken != null &&
+              i.pendingTokenHash ==
+                  AutomaticBillingScope.tokenHash(p.purchaseToken!)));
+  Future<PurchaseIntent?> _usableIntent(
+    PurchaseIntent? i,
+    StorePurchase p,
+  ) async {
+    if (i == null) return null;
+    try {
+      final stored = await _intents.read();
+      final latest = stored.firstWhere(
+        (entry) => entry.sameAs(i),
+        orElse: () => i,
+      );
+      return _matchesPending(latest, p) ? latest : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<PurchaseIntent?> _intentFor(StorePurchase purchase) async {
-    final intents = await _intents.read();
+    final intents = (await _intents.read()).where(
+      (i) => _matchesPending(i, purchase),
+    );
     final token = purchase.accountToken?.toLowerCase();
     if (token != null) {
       return _oldest(

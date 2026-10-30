@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:apprefer/apprefer.dart';
 import 'package:apprefer/src/billing/billing_store.dart';
+import 'package:apprefer/src/billing/billing_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:apprefer/src/billing/automatic_billing_scope.dart';
@@ -49,20 +51,374 @@ const proof = {
 
 class IntentGate extends FlakyPrefs {
   final entered = Completer<void>(), release = Completer<void>();
-  IntentGate(super.inner);
+  int remaining;
+  IntentGate(super.inner, {this.remaining = 1});
   @override
   Future<bool> setString(String key, String value) async {
-    final ok = await super.setString(key, value);
-    if (key.contains('purchase_intents') && !entered.isCompleted) {
+    if (key.contains('purchase_intents') &&
+        --remaining == 0 &&
+        !entered.isCompleted) {
       entered.complete();
       await release.future;
     }
-    return ok;
+    return super.setString(key, value);
   }
 }
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'known pending Play token rejects another token after restart without authorizing a proof',
+    () async {
+      final state = MemoryState(), store = FakeStore();
+      AutomaticBillingScope make() => AutomaticBillingScope(
+        state,
+        () => 'pk_live_a',
+        () => (user: 'buyer', revision: 'one', reset: null),
+        () => 0,
+      );
+      final a = make(),
+          i = PurchaseIntent(
+            appUserId: 'buyer',
+            productId: 'plan',
+            accountToken: null,
+            startedAt: now,
+          );
+      await a.authorizeIntent(i, (await a.capture('buyer'))!);
+      await a.authorizePending(i, {
+        'store': 'play_store',
+        'purchaseToken': 'A',
+      });
+      final restarted = make();
+      expect(
+        await restarted.recoverIntent(
+          i,
+          store.googlePurchase('B', 'plan', purchasedAt: now),
+        ),
+        isNull,
+      );
+      expect(
+        await restarted.recoverIntent(
+          i,
+          store.googlePurchase('A', 'plan', purchasedAt: now),
+        ),
+        isNotNull,
+      );
+      expect((jsonDecode(state.value!) as Map)['proofs'], isEmpty);
+    },
+  );
+  test(
+    'pending binding failure rejects handoff and retains ordinary token restriction',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      await AppReferBilling.resetForTesting();
+      final state = MemoryState(),
+          server = FakeServer()..online(),
+          store = FakeStore()..store = BillingStore.playStore;
+      final online = server.handler!;
+      server.handler = (r) {
+        if (r.url.path.endsWith('/purchases') &&
+            r.headers['X-AppRefer-Billing-Environment'] == 'production')
+          return (
+            400,
+            {'code': 'billing_environment_mismatch', 'environment': 'sandbox'},
+          );
+        return online(r);
+      };
+      store.onBuy = (p, o) {
+        state.failWrite = true;
+        store.updates.add([
+          store.googlePurchase(
+            'A',
+            p.id,
+            status: StorePurchaseStatus.pending,
+            accountToken: o.accountToken,
+            purchasedAt: now,
+          ),
+        ]);
+      };
+      await AppReferBilling.configureForTesting(
+        store: store,
+        httpClient: server.client,
+        apiKey: 'pk_live_a',
+        appUserId: 'buyer',
+        automaticState: state,
+        now: () => now,
+      );
+      await expectLater(
+        AppReferBilling.purchase(
+          (await AppReferBilling.products(['plan'])).single,
+        ),
+        throwsA(anything),
+      );
+      state.failWrite = false;
+      final prefs = await SharedPreferences.getInstance(),
+          storage = BillingStorage(prefs);
+      final intentKey = prefs.getKeys().firstWhere(
+        (key) => key.endsWith('purchase_intents'),
+      );
+      final i = PurchaseIntent.fromJson(
+        (jsonDecode(prefs.getString(intentKey)!) as List).first,
+      )!;
+      expect(i.pendingTokenHash, isNotNull);
+      final restarted = AutomaticBillingScope(
+        state,
+        () => 'pk_live_a',
+        () => (
+          user: 'buyer',
+          revision: storage.automaticIdentityGeneration,
+          reset: null,
+        ),
+        () => 0,
+      );
+      expect(
+        await restarted.recoverIntent(
+          i,
+          store.googlePurchase(
+            'B',
+            'plan',
+            accountToken: i.accountToken,
+            purchasedAt: now,
+          ),
+        ),
+        isNull,
+      );
+      store.updates.add([
+        store.googlePurchase(
+          'A',
+          'plan',
+          accountToken: i.accountToken,
+          purchasedAt: now,
+        ),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(
+        (await AppReferBilling.customerInfo(
+          fetchPolicy: FetchPolicy.fetchCurrent,
+        )).environment,
+        BillingEnvironment.sandbox,
+      );
+      await AppReferBilling.resetForTesting();
+    },
+  );
+  test(
+    'concurrent wrong token cannot use or consume intent while pending binding is suspended',
+    () async {
+      final state = MemoryState();
+      final automatic = AutomaticBillingScope(
+        state,
+        () => 'pk_live_a',
+        () => (user: 'buyer', revision: 'one', reset: null),
+        () => 0,
+      );
+      late IntentGate prefs;
+      final h = await Harness.create(
+        appUserId: 'buyer',
+        apiKey: 'pk_live_a',
+        automaticScope: automatic,
+        environment: automatic.current,
+        wrapPrefs: (p) => prefs = IntentGate(p, remaining: 2),
+      );
+      h.server.online();
+      h.store.store = BillingStore.playStore;
+      h.store.onBuy = (p, o) => h.store.updates.add([
+        h.store.googlePurchase(
+          'A',
+          p.id,
+          status: StorePurchaseStatus.pending,
+          accountToken: o.accountToken,
+          purchasedAt: now,
+        ),
+      ]);
+      final purchase = h.engine.purchase(
+        FakeProduct('plan'),
+        const StorePurchaseOptions(),
+      );
+      await prefs.entered.future;
+      final processing = h.engine.process(
+        h.store.googlePurchase(
+          'B',
+          'plan',
+          accountToken: token,
+          purchasedAt: now,
+        ),
+      );
+      prefs.release.complete();
+      await processing;
+      await purchase;
+      final intents = await PurchaseIntentStore(
+        prefs,
+        'apprefer_billing_purchase_intents',
+        now: () => now,
+      ).read();
+      expect(
+        intents.single.pendingTokenHash,
+        AutomaticBillingScope.tokenHash('A'),
+      );
+      expect(automatic.current(), BillingEnvironment.production);
+      h.engine.dispose();
+    },
+  );
+  test(
+    'concurrent intent add cannot overwrite a pending token restriction',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = IntentGate(
+        await SharedPreferences.getInstance(),
+        remaining: 2,
+      );
+      final intents = PurchaseIntentStore(
+        prefs,
+        'apprefer_billing_purchase_intents',
+        now: () => now,
+      );
+      final a = PurchaseIntent(
+            appUserId: 'buyer',
+            productId: 'a',
+            accountToken: null,
+            startedAt: now,
+          ),
+          b = PurchaseIntent(
+            appUserId: 'buyer',
+            productId: 'b',
+            accountToken: null,
+            startedAt: now,
+          );
+      expect(await intents.add(a), isTrue);
+      final binding = intents.bindPendingToken(a, 'hash-A');
+      await prefs.entered.future;
+      final adding = intents.add(b);
+      prefs.release.complete();
+      expect(await binding, isTrue);
+      expect(await adding, isTrue);
+      final saved = await intents.read();
+      expect(saved.length, 2);
+      expect(
+        saved.firstWhere((i) => i.productId == 'a').pendingTokenHash,
+        'hash-A',
+      );
+    },
+  );
+  test(
+    'matching purchased callback waits for pending binding and retains automatic adoption',
+    () async {
+      final state = MemoryState();
+      final automatic = AutomaticBillingScope(
+        state,
+        () => 'pk_live_a',
+        () => (user: 'buyer', revision: 'one', reset: null),
+        () => 0,
+      );
+      late IntentGate prefs;
+      final h = await Harness.create(
+        appUserId: 'buyer',
+        apiKey: 'pk_live_a',
+        automaticScope: automatic,
+        environment: automatic.current,
+        wrapPrefs: (p) => prefs = IntentGate(p, remaining: 2),
+      );
+      h.server.handler = (r) {
+        final scope = r.headers['X-AppRefer-Billing-Environment'];
+        if (r.url.path.endsWith('/purchases') && scope == 'production')
+          return (
+            400,
+            {'code': 'billing_environment_mismatch', 'environment': 'sandbox'},
+          );
+        return (200, {...customerJson('buyer'), 'environment': scope});
+      };
+      h.store.store = BillingStore.playStore;
+      h.store.onBuy = (p, o) => h.store.updates.add([
+        h.store.googlePurchase(
+          'A',
+          p.id,
+          status: StorePurchaseStatus.pending,
+          accountToken: o.accountToken,
+          purchasedAt: now,
+        ),
+      ]);
+      final purchase = h.engine.purchase(
+        FakeProduct('plan'),
+        const StorePurchaseOptions(),
+      );
+      await prefs.entered.future;
+      h.store.updates.add([
+        h.store.googlePurchase(
+          'A',
+          'plan',
+          accountToken: token,
+          purchasedAt: now,
+        ),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      prefs.release.complete();
+      await purchase;
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await h.engine.customerInfo(FetchPolicy.fetchCurrent);
+      expect(automatic.current(), BillingEnvironment.sandbox);
+      h.engine.dispose();
+    },
+  );
+  test(
+    'direct unfinished scan waits for pending binding and retains automatic adoption',
+    () async {
+      final state = MemoryState();
+      final automatic = AutomaticBillingScope(
+        state,
+        () => 'pk_live_a',
+        () => (user: 'buyer', revision: 'one', reset: null),
+        () => 0,
+      );
+      late IntentGate prefs;
+      final h = await Harness.create(
+        appUserId: 'buyer',
+        apiKey: 'pk_live_a',
+        automaticScope: automatic,
+        environment: automatic.current,
+        wrapPrefs: (p) => prefs = IntentGate(p, remaining: 2),
+      );
+      h.server.handler = (r) {
+        final scope = r.headers['X-AppRefer-Billing-Environment'];
+        if (r.url.path.endsWith('/purchases') && scope == 'production')
+          return (
+            400,
+            {'code': 'billing_environment_mismatch', 'environment': 'sandbox'},
+          );
+        return (200, {...customerJson('buyer'), 'environment': scope});
+      };
+      h.store.store = BillingStore.playStore;
+      h.store.onBuy = (p, o) => h.store.updates.add([
+        h.store.googlePurchase(
+          'A',
+          p.id,
+          status: StorePurchaseStatus.pending,
+          accountToken: o.accountToken,
+          purchasedAt: now,
+        ),
+      ]);
+      final purchase = h.engine.purchase(
+        FakeProduct('plan'),
+        const StorePurchaseOptions(),
+      );
+      await prefs.entered.future;
+      h.store.unfinishedList = [
+        h.store.googlePurchase(
+          'A',
+          'plan',
+          accountToken: token,
+          purchasedAt: now,
+        ),
+      ];
+      final scanning = h.engine.retryUnfinished();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      prefs.release.complete();
+      await scanning;
+      await purchase;
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await h.engine.customerInfo(FetchPolicy.fetchCurrent);
+      expect(automatic.current(), BillingEnvironment.sandbox);
+      h.engine.dispose();
+    },
+  );
   for (final change in ['single transition', 'roundtrip transition']) {
     test(
       '$change during intent persistence cannot mint new automatic authority',
@@ -104,9 +460,11 @@ void main() {
     );
   }
   for (final storeType in [BillingStore.appStore, BillingStore.playStore]) {
-    for (final delayed in [false, true]) {
+    for (final mode in ['fresh', 'pending', 'queued', 'finished-owned']) {
+      final delayed = mode == 'pending';
+      var offlinePurchase = mode == 'queued' || mode == 'finished-owned';
       test(
-        'default live-key ${storeType.name} ${delayed ? "pending recovery" : "fresh purchase"} adopts only owned sandbox and survives restart',
+        'default live-key ${storeType.name} $mode adopts only owned sandbox and survives restart',
         () async {
           SharedPreferences.setMockInitialValues({});
           await AppReferBilling.resetForTesting();
@@ -122,6 +480,8 @@ void main() {
                 r.url.queryParameters['appUserId'] ??
                 'buyer';
             final scope = r.headers['X-AppRefer-Billing-Environment'];
+            if (offlinePurchase && r.url.path.endsWith('/purchases'))
+              throw http.ClientException('offline');
             if (r.url.path.endsWith('/purchases') && scope == 'production') {
               return (
                 400,
@@ -175,11 +535,39 @@ void main() {
           final result = await AppReferBilling.purchase(
             (await AppReferBilling.products(['plan'])).single,
           );
-          if (!delayed)
+          if (mode == 'fresh')
             expect(result.customerInfo.environment, BillingEnvironment.sandbox);
+          offlinePurchase = false;
           final restarted = FakeStore()..store = storeType;
+          if (mode == 'finished-owned') {
+            await (await SharedPreferences.getInstance()).remove(
+              BillingStorage.pendingPurchasesKey,
+            );
+            restarted.restoreList = [
+              storeType == BillingStore.playStore
+                  ? restarted.googlePurchase(
+                      'fresh',
+                      'plan',
+                      accountToken: token,
+                      purchasedAt: now,
+                    )
+                  : restarted.applePurchase(
+                      'fresh',
+                      'plan',
+                      accountToken: token,
+                      purchasedAt: now,
+                    ),
+            ];
+          }
           if (delayed)
             restarted.unfinishedList = [
+              if (storeType == BillingStore.playStore)
+                restarted.googlePurchase(
+                  'unrelated',
+                  'plan',
+                  accountToken: token,
+                  purchasedAt: now,
+                ),
               storeType == BillingStore.playStore
                   ? restarted.googlePurchase(
                       'fresh',
@@ -203,7 +591,7 @@ void main() {
             automaticState: state,
             now: () => now,
           );
-          if (delayed)
+          if (delayed || mode == 'finished-owned')
             await Future<void>.delayed(const Duration(milliseconds: 50));
           expect(
             (await AppReferBilling.customerInfo(
