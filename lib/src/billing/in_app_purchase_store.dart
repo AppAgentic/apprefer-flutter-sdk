@@ -528,6 +528,7 @@ List<T> sortProducts<T extends ProductDetails>(
 
 /// The fields billing needs from a StoreKit 2 `Transaction.jsonRepresentation`.
 class AppleTransactionJson {
+  final BillingEnvironment? environment;
   final String? productId;
   final String? originalTransactionId;
   final StoreProductKind kind;
@@ -539,6 +540,7 @@ class AppleTransactionJson {
   final DateTime? purchaseDate;
 
   const AppleTransactionJson({
+    this.environment,
     this.productId,
     this.originalTransactionId,
     required this.kind,
@@ -573,6 +575,15 @@ class AppleTransactionJson {
         _ => BillingPeriodType.normal,
       };
       return AppleTransactionJson(
+        environment: json['environment'] == 'Production'
+            ? BillingEnvironment.production
+            : const [
+                'Sandbox',
+                'Xcode',
+                'LocalTesting',
+              ].contains(json['environment'])
+            ? BillingEnvironment.sandbox
+            : null,
         productId: json['productId'] as String?,
         originalTransactionId: json['originalTransactionId']?.toString(),
         kind: kind,
@@ -598,6 +609,7 @@ class AppleTransactionJson {
     String? transactionId,
     String? fallbackAccountToken,
   }) => StoreEntitlement(
+    environment: environment,
     productId: productId ?? fallbackProductId,
     originalId: originalTransactionId ?? fallbackOriginalId,
     kind: kind,

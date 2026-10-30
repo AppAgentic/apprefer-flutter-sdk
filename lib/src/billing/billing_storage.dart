@@ -396,6 +396,33 @@ class BillingStorage {
     ];
   }
 
+  BillingEnvironment? purchaseEnvironment(Map<String, String> fields) {
+    if (fields['store'] != 'play_store' || fields['purchaseToken'] == null)
+      return null;
+    final value = _stringMap(
+      'apprefer_billing_proof_environments',
+    )[fields['purchaseToken']];
+    return value == 'production'
+        ? BillingEnvironment.production
+        : value == 'sandbox'
+        ? BillingEnvironment.sandbox
+        : null;
+  }
+
+  Future<void> recordPurchaseEnvironment(
+    Map<String, String> fields,
+    BillingEnvironment environment,
+  ) async {
+    if (fields['store'] != 'play_store' || fields['purchaseToken'] == null)
+      return;
+    final values = _stringMap('apprefer_billing_proof_environments')
+      ..[fields['purchaseToken']!] = environment.name;
+    await prefs.setString(
+      'apprefer_billing_proof_environments',
+      jsonEncode(values),
+    );
+  }
+
   // --- Cached CustomerInfo (last server answer) ---
 
   AppReferCustomerInfo? cachedCustomerInfo() =>

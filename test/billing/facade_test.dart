@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support.dart';
+import 'package:apprefer/src/services/registry.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -31,7 +32,7 @@ void main() {
       );
       final info = await AppReferBilling.customerInfo();
       expect(info.source, CustomerInfoSource.localFallback);
-      expect(info.entitlements['premium']?.isActive, isTrue);
+      expect(info.entitlements.active, isEmpty);
       expect(await AppReferBilling.appUserId, '');
       expect(await AppReferBilling.isAnonymous, isTrue);
     },
@@ -69,6 +70,28 @@ void main() {
       r'$email': 'a@b.com',
     });
   });
+
+  test(
+    'stream replay validates the current registered-key environment',
+    () async {
+      AppReferRegistry.apiKey = 'pk_test_registered';
+      final server = FakeServer()..online(active: {'premium': 'pro_yearly'});
+      await AppReferBilling.configureForTesting(
+        apiKey: null,
+        store: FakeStore(),
+        httpClient: server.client,
+      );
+      final sandbox = await AppReferBilling.customerInfo(
+        fetchPolicy: FetchPolicy.fetchCurrent,
+      );
+      expect(sandbox.environment, BillingEnvironment.sandbox);
+      AppReferRegistry.apiKey = 'pk_live_registered';
+      final next = AppReferBilling.customerInfoStream.first;
+      await AppReferBilling.customerInfo(fetchPolicy: FetchPolicy.fetchCurrent);
+      expect((await next).environment, BillingEnvironment.production);
+      AppReferRegistry.apiKey = null;
+    },
+  );
 
   test('products and purchase go through the store', () async {
     final server = FakeServer()..online(active: {'premium': 'pro_yearly'});

@@ -62,6 +62,7 @@ class AppReferBilling {
   ///   after AppRefer records them. iOS reads the product type from StoreKit.
   static Future<void> configure({
     String? apiKey,
+    BillingEnvironment? environment,
     String? appUserId,
     Map<String, List<String>> entitlementsByProduct = const {},
     String? defaultEntitlement,
@@ -71,6 +72,7 @@ class AppReferBilling {
   }) {
     return _configure(
       apiKey: apiKey,
+      environment: environment,
       appUserId: appUserId,
       entitlementsByProduct: entitlementsByProduct,
       defaultEntitlement: defaultEntitlement,
@@ -85,7 +87,8 @@ class AppReferBilling {
   static Future<void> configureForTesting({
     required BillingStoreAdapter store,
     required http.Client httpClient,
-    String apiKey = 'pk_test_123',
+    String? apiKey = 'pk_test_123',
+    BillingEnvironment? environment,
     String? appUserId,
     Map<String, List<String>> entitlementsByProduct = const {},
     String? defaultEntitlement,
@@ -93,6 +96,7 @@ class AppReferBilling {
   }) {
     return _configure(
       apiKey: apiKey,
+      environment: environment,
       appUserId: appUserId,
       entitlementsByProduct: entitlementsByProduct,
       defaultEntitlement: defaultEntitlement,
@@ -122,6 +126,7 @@ class AppReferBilling {
 
   static Future<void> _configure({
     required String? apiKey,
+    BillingEnvironment? environment,
     required String? appUserId,
     required Map<String, List<String>> entitlementsByProduct,
     required String? defaultEntitlement,
@@ -142,6 +147,20 @@ class AppReferBilling {
     final done = () async {
       final prefs = await SharedPreferences.getInstance();
       final storage = BillingStorage(prefs);
+      BillingEnvironment? scope() {
+        final key = apiKey ?? AppReferRegistry.apiKey;
+        if (key == null) return environment;
+        if (key.startsWith('pk_test_') &&
+            environment == BillingEnvironment.production)
+          return null;
+        return environment ??
+            (key.startsWith('pk_test_')
+                ? BillingEnvironment.sandbox
+                : BillingEnvironment.production);
+      }
+
+      _broadcaster.validScope = (info) =>
+          scope() != null && info.environment == scope();
       final engine = BillingEngine(
         api: BillingApiClient(
           baseUrls: const [
@@ -150,6 +169,9 @@ class AppReferBilling {
           ],
           apiKey: () => apiKey ?? AppReferRegistry.apiKey,
           client: httpClient,
+          environmentProvider: scope,
+          recordProofEnvironment: storage.recordPurchaseEnvironment,
+          proofEnvironment: storage.purchaseEnvironment,
           linkAllowed: AppReferRegistry.linkAllowed,
         ),
         storage: storage,
@@ -162,6 +184,7 @@ class AppReferBilling {
               logger: logger,
             ),
         options: BillingEngineOptions(
+          environment: scope,
           productEntitlements: entitlementsByProduct,
           defaultEntitlement: defaultEntitlement,
         ),
@@ -209,6 +232,7 @@ class AppReferBilling {
   static void _publish(AppReferCustomerInfo info) {
     _broadcaster.publish(info);
     for (final listener in List.of(_listeners)) {
+      if (!_broadcaster.validScope(info)) break;
       try {
         listener(info);
       } catch (e) {
@@ -302,6 +326,25 @@ class AppReferBilling {
     try {
       purchases = await unconfiguredStore().activeEntitlements();
     } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    final storage = BillingStorage(prefs);
+    final key = AppReferRegistry.apiKey;
+    final environment = key == null
+        ? null
+        : key.startsWith('pk_test_')
+        ? BillingEnvironment.sandbox
+        : BillingEnvironment.production;
+    purchases = purchases.where((purchase) {
+      final bound =
+          purchase.environment ??
+          (purchase.store == BillingStore.playStore
+              ? storage.purchaseEnvironment({
+                  'store': 'play_store',
+                  'purchaseToken': purchase.originalId,
+                })
+              : null);
+      return environment != null && bound == environment;
+    }).toList();
     final now = DateTime.now();
     final local = LocalEntitlements.compute(
       purchases,
@@ -309,12 +352,20 @@ class AppReferBilling {
       learned: const {},
       now: now,
     );
-    return LocalEntitlements.merge(
+    final result = LocalEntitlements.merge(
       server: null,
       local: local,
       appUserId: '',
       now: now,
       source: CustomerInfoSource.localFallback,
+    );
+    return AppReferCustomerInfo(
+      appUserId: result.appUserId,
+      entitlements: result.entitlements,
+      activeSubscriptions: result.activeSubscriptions,
+      requestDate: result.requestDate,
+      source: result.source,
+      environment: environment,
     );
   }
 
@@ -408,9 +459,11 @@ class _LifecycleObserver with WidgetsBindingObserver {
 /// the latest value to each new one.
 class _CustomerInfoBroadcaster {
   AppReferCustomerInfo? _latest;
+  bool Function(AppReferCustomerInfo) validScope = (_) => true;
   final _controller = StreamController<AppReferCustomerInfo>.broadcast();
 
   void publish(AppReferCustomerInfo info) {
+    if (!validScope(info)) return;
     _latest = info;
     _controller.add(info);
   }
@@ -423,5 +476,5 @@ class _CustomerInfoBroadcaster {
         if (latest != null) controller.add(latest);
         final sub = _controller.stream.listen(controller.add);
         controller.onCancel = sub.cancel;
-      });
+      }).where((info) => validScope(info));
 }

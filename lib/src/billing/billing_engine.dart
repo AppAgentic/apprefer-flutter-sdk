@@ -47,6 +47,7 @@ class PurchaseResult {
 }
 
 class BillingEngineOptions {
+  final BillingEnvironment? Function()? environment;
   final Map<String, List<String>> productEntitlements;
   final String? defaultEntitlement;
 
@@ -54,6 +55,7 @@ class BillingEngineOptions {
   final Duration cacheTtl;
 
   const BillingEngineOptions({
+    this.environment,
     this.productEntitlements = const {},
     this.defaultEntitlement,
     this.cacheTtl = const Duration(minutes: 5),
@@ -407,9 +409,16 @@ class BillingEngine {
     final active = await _activeUser();
     if (active == null || (forUser != null && forUser != active)) return;
     final user = forUser ?? active;
+    final scope = _options.environment?.call();
+    if (_options.environment != null && scope == null) return;
+    final phase = _options.environment == null
+        ? user
+        : 'environment-v3:${scope!.name}:$user';
+    bool sameScope() =>
+        _options.environment == null || _options.environment!() == scope;
     if (!_migratingUsers.add(user)) return;
     try {
-      if (_storage.migrationSynced(user)) return;
+      if (_storage.migrationSynced(phase)) return;
       if (BillingStorage.isUuid(user)) {
         if (_storage.legacyAccountToken(user) == null)
           _registeredUsers.remove(user);
@@ -426,12 +435,12 @@ class BillingEngine {
         for (final p in await _store.unfinished()) '${p.store.name}:${p.id}',
       };
       final purchases = await _store.migrationPurchases();
-      if (await _activeUser() != user) return;
+      if (await _activeUser() != user || !sameScope()) return;
       final deviceId = await _linkableDeviceId(user);
       var durable = true;
       var imported = false;
       for (final purchase in purchases) {
-        if (await _activeUser() != user) return;
+        if (await _activeUser() != user || !sameScope()) return;
         if (open.contains('${purchase.store.name}:${purchase.id}') ||
             purchase.needsCompletion ||
             purchase.needsAcknowledgement ||
@@ -449,7 +458,7 @@ class BillingEngine {
           continue;
         }
         final progress =
-            '${Uri.encodeComponent(user)}:${purchase.store.name}:${purchase.id}';
+            '${Uri.encodeComponent(phase)}:${purchase.store.name}:${purchase.id}';
         if (_storage.isMigrationPurchase(progress)) continue;
         if (_queue.entries.any(
               (e) => e.transactionId == purchase.id && e.appUserId == user,
@@ -488,7 +497,7 @@ class BillingEngine {
             !await _storage.markMigrationPurchase(progress))
           durable = false;
       }
-      if (durable) await _storage.markMigrationSynced(user);
+      if (durable) await _storage.markMigrationSynced(phase);
       if (imported) await drainQueue();
     } catch (e) {
       _logger.warn('Billing: migration sync will retry: $e');
@@ -523,6 +532,13 @@ class BillingEngine {
 
   // --- CustomerInfo ---
 
+  AppReferCustomerInfo? _scopedCachedInfo() {
+    final info = _storage.cachedCustomerInfo();
+    if (_options.environment == null) return info;
+    final scope = _options.environment!();
+    return scope != null && info?.environment == scope ? info : null;
+  }
+
   Future<AppReferCustomerInfo> customerInfo(FetchPolicy policy) async {
     final user = await _activeUser();
     if (user == null) return localFallback();
@@ -531,7 +547,7 @@ class BillingEngine {
         fetched != null &&
         fetched.appUserId == user &&
         _now().difference(fetched.at) < _options.cacheTtl) {
-      final cached = _storage.cachedCustomerInfo();
+      final cached = _scopedCachedInfo();
       if (cached != null && cached.appUserId == user) {
         return _publish(await _withPendingLocal(cached.reevaluated(_now())));
       }
@@ -583,6 +599,12 @@ class BillingEngine {
     BillingCustomerResponse response,
     String user,
   ) async {
+    if (_options.environment != null &&
+        (_options.environment!() == null ||
+            response.info.environment != _options.environment!()))
+      throw const AppReferBillingException(
+        AppReferBillingErrorCode.invalidResponse,
+      );
     final token = response.accountToken;
     if (token != null) _storage.setAccountToken(token, response.info.appUserId);
     _storage.setLegacyAccountToken(
@@ -672,7 +694,7 @@ class BillingEngine {
   Future<AppReferCustomerInfo> localFallback() async {
     final user = currentAppUserId;
     final purchases = await _activeEntitlements();
-    final cached = _storage.cachedCustomerInfo();
+    final cached = _scopedCachedInfo();
     final sameUser = cached != null && cached.appUserId == user
         ? cached.reevaluated(_now())
         : null;
@@ -696,6 +718,21 @@ class BillingEngine {
     String user,
     CustomerInfoSource source,
   ) {
+    final scope = _options.environment?.call();
+    if (_options.environment != null) {
+      purchases = purchases.where((purchase) {
+        final verified =
+            purchase.environment ??
+            (purchase.store == BillingStore.playStore
+                ? _storage.purchaseEnvironment({
+                    'store': 'play_store',
+                    'purchaseToken': purchase.originalId,
+                  })
+                : null);
+        return scope != null && verified == scope;
+      }).toList();
+      if (scope == null || server?.environment != scope) server = null;
+    }
     final local = LocalEntitlements.compute(
       purchases,
       configured: _options.productEntitlements,
@@ -703,16 +740,36 @@ class BillingEngine {
       defaultEntitlement: _options.defaultEntitlement,
       now: _now(),
     );
-    return LocalEntitlements.merge(
+    final result = LocalEntitlements.merge(
       server: server,
       local: local,
       appUserId: user,
       now: _now(),
       source: source,
     );
+    return AppReferCustomerInfo(
+      appUserId: result.appUserId,
+      entitlements: result.entitlements,
+      activeSubscriptions: result.activeSubscriptions,
+      requestDate: result.requestDate,
+      source: result.source,
+      environment: scope ?? server?.environment,
+    );
   }
 
   AppReferCustomerInfo _publish(AppReferCustomerInfo info) {
+    if (_options.environment != null) {
+      final selected = _options.environment!();
+      if (selected == null || info.environment != selected)
+        info = AppReferCustomerInfo(
+          appUserId: info.appUserId,
+          entitlements: EntitlementInfos({}),
+          activeSubscriptions: {},
+          requestDate: _now(),
+          source: info.source,
+          environment: selected,
+        );
+    }
     final last = _lastPublished;
     _lastPublished = info;
     if (last == null || !last.hasSameContent(info)) {
@@ -1475,12 +1532,18 @@ class BillingEngine {
   Future<bool> _drain() async {
     var consumables = false;
     for (final old in _queue.expired(_now())) {
+      if (_options.environment != null) continue;
       _logger.error(
         'Billing: gave up resending purchase ${old.transactionId} after ${old.attempts} attempts',
       );
       await _moveToRejected(old, 'not recorded after ${old.attempts} attempts');
     }
     for (final entry in _queue.entries) {
+      final bound = _storage.purchaseEnvironment(entry.storeFields);
+      if (_options.environment != null &&
+          bound != null &&
+          bound != _options.environment!())
+        continue;
       try {
         // Never the stored id: only what may be linked now, for the current
         // Billing user, so entries from a previous account get none.
@@ -1505,6 +1568,7 @@ class BillingEngine {
           await _accept(response, entry.appUserId);
         }
       } on AppReferBillingException catch (e) {
+        if (e.code == AppReferBillingErrorCode.environmentMismatch) continue;
         if (!e.isRetryable) {
           _logger.error(
             'Billing: AppRefer rejected queued purchase ${entry.transactionId}: $e',

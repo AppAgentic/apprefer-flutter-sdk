@@ -1,3 +1,5 @@
+import 'customer_info.dart';
+
 /// Why an AppReferBilling call failed.
 enum AppReferBillingErrorCode {
   /// `AppReferBilling.configure()` has not been called.
@@ -15,6 +17,7 @@ enum AppReferBillingErrorCode {
 
   /// AppRefer answered 2xx with a body the SDK could not read.
   invalidResponse,
+  environmentMismatch,
 
   /// The store could not verify the transaction; no access was granted.
   unverifiedTransaction,
@@ -35,6 +38,7 @@ enum AppReferBillingErrorCode {
 class AppReferBillingException implements Exception {
   final AppReferBillingErrorCode code;
   final String? message;
+  final BillingEnvironment? environment;
 
   /// HTTP status for [AppReferBillingErrorCode.server].
   final int? status;
@@ -45,6 +49,7 @@ class AppReferBillingException implements Exception {
   const AppReferBillingException(
     this.code, {
     this.message,
+    this.environment,
     this.status,
     this.retryAfter,
   });
@@ -57,6 +62,7 @@ class AppReferBillingException implements Exception {
       case AppReferBillingErrorCode.missingApiKey:
       case AppReferBillingErrorCode.network:
       case AppReferBillingErrorCode.invalidResponse:
+      case AppReferBillingErrorCode.environmentMismatch:
       case AppReferBillingErrorCode.storage:
         return true;
       case AppReferBillingErrorCode.server:
