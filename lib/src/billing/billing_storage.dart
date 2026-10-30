@@ -84,14 +84,14 @@ class BillingStorage {
   bool migrationSynced(String user) =>
       !_failedMigrationFlags.contains(user) &&
       prefs.getString(
-            'apprefer_billing_migration:${Uri.encodeComponent(user)}',
+            'apprefer_billing_migration_v2:${Uri.encodeComponent(user)}',
           ) ==
           'done';
 
   Future<bool> markMigrationSynced(String user) async {
     _failedMigrationFlags.add(user);
     final ok = await prefs.setString(
-      'apprefer_billing_migration:${Uri.encodeComponent(user)}',
+      'apprefer_billing_migration_v2:${Uri.encodeComponent(user)}',
       'done',
     );
     if (ok) _failedMigrationFlags.remove(user);
@@ -260,6 +260,18 @@ class BillingStorage {
 
   // --- Account tokens (Apple appAccountToken / Google obfuscatedAccountId) ---
 
+  String? legacyAccountToken(String user) =>
+      _stringMap('apprefer_billing_legacy_tokens')[user];
+  void setLegacyAccountToken(String? token, String user) {
+    final all = _stringMap('apprefer_billing_legacy_tokens');
+    if (token != null && isUuid(token)) {
+      all[user] = token.toLowerCase();
+    } else {
+      all.remove(user);
+    }
+    prefs.setString('apprefer_billing_legacy_tokens', jsonEncode(all));
+  }
+
   String? accountToken(String appUserId) {
     final token = _stringMap(_accountTokens)[appUserId];
     return token != null && isUuid(token) ? token : null;
@@ -268,6 +280,9 @@ class BillingStorage {
   /// The app user a store account token was issued to on this device.
   String? appUserIdForAccountToken(String token) {
     for (final e in _stringMap(_accountTokens).entries) {
+      if (e.value.toLowerCase() == token.toLowerCase()) return e.key;
+    }
+    for (final e in _stringMap('apprefer_billing_legacy_tokens').entries) {
       if (e.value.toLowerCase() == token.toLowerCase()) return e.key;
     }
     return null;

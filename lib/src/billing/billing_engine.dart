@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 
 import 'package:in_app_purchase/in_app_purchase.dart';
 
@@ -409,6 +410,16 @@ class BillingEngine {
     if (!_migratingUsers.add(user)) return;
     try {
       if (_storage.migrationSynced(user)) return;
+      if (BillingStorage.isUuid(user)) {
+        if (_storage.legacyAccountToken(user) == null)
+          _registeredUsers.remove(user);
+        try {
+          await _fetchFromServer(user);
+        } catch (_) {
+          return;
+        }
+        if (currentAppUserId != user) return;
+      }
       final intents = await _intents.read();
       if (_intents.lostMarker() != null) return;
       final open = {
@@ -430,8 +441,13 @@ class BillingEngine {
           continue;
         }
         if (purchase.accountToken != null &&
-            _storage.appUserIdForAccountToken(purchase.accountToken!) != user)
+            !_ownsAccountToken(purchase.accountToken!, user, purchase.store)) {
+          if (purchase.store == BillingStore.appStore &&
+              BillingStorage.isUuid(user) &&
+              purchase.accountToken!.toLowerCase() == user.toLowerCase())
+            durable = false;
           continue;
+        }
         final progress =
             '${Uri.encodeComponent(user)}:${purchase.store.name}:${purchase.id}';
         if (_storage.isMigrationPurchase(progress)) continue;
@@ -569,6 +585,10 @@ class BillingEngine {
   ) async {
     final token = response.accountToken;
     if (token != null) _storage.setAccountToken(token, response.info.appUserId);
+    _storage.setLegacyAccountToken(
+      response.legacyAppAccountToken,
+      response.info.appUserId,
+    );
     _storage.learnEntitlements(response.info);
     if (response.info.appUserId != user || user != currentAppUserId) {
       // Answer for a user who is no longer current (logIn/logOut raced it).
@@ -585,11 +605,35 @@ class BillingEngine {
   /// notification to match). A purchase counts as the customer's when it has
   /// no account token, carries the customer's token, or is still queued for
   /// them; one tagged with another user's token is left out.
+  /// RevenueCat used UUID user ids on Apple and case-sensitive Base64 SHA-256 on Play.
+  bool _ownsAccountToken(String token, String user, BillingStore store) {
+    final owner = _storage.appUserIdForAccountToken(token);
+    if (owner != null) return owner == user;
+    final own = _storage.accountToken(user);
+    if (own != null && token.toLowerCase() == own.toLowerCase()) return true;
+    if (store == BillingStore.appStore) {
+      return BillingStorage.isUuid(user) &&
+          BillingStorage.isUuid(token) &&
+          token.toLowerCase() == _storage.legacyAccountToken(user);
+    }
+    return store == BillingStore.playStore &&
+        token == base64Encode(sha256.convert(utf8.encode(user)).bytes);
+  }
+
+  bool _blocksQueuedToken(String? token, String user, BillingStore store) {
+    if (token == null) return false;
+    final owner = _storage.appUserIdForAccountToken(token);
+    if (owner != null && owner != user) return true;
+    return store == BillingStore.appStore &&
+        BillingStorage.isUuid(user) &&
+        token.toLowerCase() == user.toLowerCase() &&
+        !_ownsAccountToken(token, user, store);
+  }
+
   Future<AppReferCustomerInfo> _withPendingLocal(
     AppReferCustomerInfo info,
   ) async {
     final user = info.appUserId;
-    final token = _storage.accountToken(user)?.toLowerCase();
     final queued = {
       for (final e in _queue.entries)
         if (e.appUserId == user) e.transactionId,
@@ -599,8 +643,9 @@ class BillingEngine {
     final mine = [
       for (final e in await _activeEntitlements())
         if (e.accountToken == null ||
-            e.accountToken!.toLowerCase() == token ||
-            queued.contains(e.transactionId))
+            _ownsAccountToken(e.accountToken!, user, e.store) ||
+            (queued.contains(e.transactionId) &&
+                !_blocksQueuedToken(e.accountToken, user, e.store)))
           e,
     ];
     if (mine.isEmpty) return info;

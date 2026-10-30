@@ -366,13 +366,21 @@ class AppReferEntitlementInfo {
 class BillingCustomerResponse {
   final AppReferCustomerInfo info;
   final String? accountToken;
+  final String? legacyAppAccountToken;
 
-  const BillingCustomerResponse(this.info, this.accountToken);
+  const BillingCustomerResponse(
+    this.info,
+    this.accountToken, [
+    this.legacyAppAccountToken,
+  ]);
 
   factory BillingCustomerResponse.fromJson(Map<String, dynamic> json) =>
       BillingCustomerResponse(
         AppReferCustomerInfo.fromJson(json, source: CustomerInfoSource.server),
         json['accountToken'] is String ? json['accountToken'] as String : null,
+        json['legacyAppAccountToken'] is String
+            ? json['legacyAppAccountToken'] as String
+            : null,
       );
 }
 
