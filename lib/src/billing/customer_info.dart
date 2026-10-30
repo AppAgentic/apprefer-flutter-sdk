@@ -80,7 +80,10 @@ enum BillingSubscriptionState {
       );
 }
 
+enum BillingEnvironment { production, sandbox }
+
 class AppReferCustomerInfo {
+  final BillingEnvironment? environment;
   final String appUserId;
   final EntitlementInfos entitlements;
 
@@ -92,6 +95,7 @@ class AppReferCustomerInfo {
   final CustomerInfoSource source;
 
   const AppReferCustomerInfo({
+    this.environment,
     required this.appUserId,
     required this.entitlements,
     required this.activeSubscriptions,
@@ -104,6 +108,7 @@ class AppReferCustomerInfo {
 
   AppReferCustomerInfo withSource(CustomerInfoSource source) =>
       AppReferCustomerInfo(
+        environment: environment,
         appUserId: appUserId,
         entitlements: entitlements,
         activeSubscriptions: activeSubscriptions,
@@ -113,7 +118,7 @@ class AppReferCustomerInfo {
 
   /// Same user, entitlements and subscriptions (ignores request date and source).
   bool hasSameContent(AppReferCustomerInfo other) =>
-      appUserId == other.appUserId &&
+      environment == other.environment && appUserId == other.appUserId &&
       entitlements == other.entitlements &&
       _setEquals(activeSubscriptions, other.activeSubscriptions);
 
@@ -135,6 +140,7 @@ class AppReferCustomerInfo {
       }
     });
     return AppReferCustomerInfo(
+      environment: environment,
       appUserId: appUserId,
       entitlements: EntitlementInfos(all),
       activeSubscriptions: activeSubs,
@@ -166,6 +172,7 @@ class AppReferCustomerInfo {
     final rawSubs = json['activeSubscriptions'];
     final ms = json['requestDateMs'];
     return AppReferCustomerInfo(
+      environment: json['environment'] == 'production' ? BillingEnvironment.production : json['environment'] == 'sandbox' ? BillingEnvironment.sandbox : null,
       appUserId: appUserId,
       entitlements: EntitlementInfos(ents),
       activeSubscriptions: rawSubs is List
@@ -184,6 +191,7 @@ class AppReferCustomerInfo {
   }
 
   Map<String, dynamic> toJson() => {
+    if (environment != null) 'environment': environment!.name,
     'appUserId': appUserId,
     'entitlements': entitlements.all.map(
       (key, value) => MapEntry(key, value.toJson()),

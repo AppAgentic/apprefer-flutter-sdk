@@ -79,6 +79,7 @@ class BillingApiClient {
 
   /// 100 ms polls while waiting for the SDK key.
   final int keyWaitAttempts;
+  final BillingEnvironment? environment;
 
   /// False while the install may not be linked (collection off, after reset
   /// until configure): requests then never use the tracking host.
@@ -90,6 +91,7 @@ class BillingApiClient {
     http.Client? client,
     this.timeout = const Duration(seconds: 15),
     this.keyWaitAttempts = 30,
+    this.environment,
     this.linkAllowed,
   }) : baseUrls = baseUrls.toSet().toList(),
        _client = client ?? http.Client();
@@ -247,6 +249,12 @@ class BillingApiClient {
         : baseUrls;
     for (final baseUrl in hosts) {
       final request = makeRequest(endpoint, baseUrl, key);
+      if (environment != null) {
+        if (key.startsWith('pk_test_') && environment == BillingEnvironment.production) {
+          throw const AppReferBillingException(AppReferBillingErrorCode.invalidResponse);
+        }
+        request.headers['X-AppRefer-Billing-Environment'] = environment!.name;
+      }
       final http.Response response;
       try {
         response = await http.Response.fromStream(
@@ -281,6 +289,9 @@ class BillingApiClient {
           );
         }
         try {
+          if (endpoint is! GetOfferings && environment != null && json['environment'] != environment!.name) {
+            throw const FormatException('Billing environment mismatch');
+          }
           return json;
         } catch (_) {
           throw const AppReferBillingException(
