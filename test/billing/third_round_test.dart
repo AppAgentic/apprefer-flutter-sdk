@@ -27,6 +27,7 @@ class FirstWriteFails implements SharedPreferences {
 
   @override
   Future<bool> setString(String key, String value) async {
+    if (key != 'apprefer_billing_app_user_id') return inner.setString(key, value);
     writes.add(value);
     final first = writes.length == 1;
     await inner.setString(key, value);

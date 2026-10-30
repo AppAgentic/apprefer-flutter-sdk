@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:apprefer/src/billing/automatic_billing_scope.dart';
 
 import 'package:apprefer/src/billing/billing_api_client.dart';
 import 'package:apprefer/src/billing/billing_engine.dart';
@@ -321,6 +322,7 @@ class Harness {
     Future<bool> Function()? linkAllowed,
     int Function()? accountEpoch,
     BillingEnvironment? Function()? environment,
+    AutomaticBillingScope? automaticScope,
   }) async {
     SharedPreferences.setMockInitialValues(prefs);
     final real = await SharedPreferences.getInstance();
@@ -346,6 +348,7 @@ class Harness {
       options: BillingEngineOptions(
         productEntitlements: entitlementsByProduct,
         environment: environment,
+        automaticScope: automaticScope,
       ),
       appUserId: appUserId,
       appreferId: appreferId ?? () async => 'device-1',

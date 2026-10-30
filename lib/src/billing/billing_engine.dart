@@ -1,3 +1,4 @@
+import 'automatic_billing_scope.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
@@ -48,6 +49,7 @@ class PurchaseResult {
 
 class BillingEngineOptions {
   final BillingEnvironment? Function()? environment;
+  final AutomaticBillingScope? automaticScope;
   final Map<String, List<String>> productEntitlements;
   final String? defaultEntitlement;
 
@@ -56,6 +58,7 @@ class BillingEngineOptions {
 
   const BillingEngineOptions({
     this.environment,
+    this.automaticScope,
     this.productEntitlements = const {},
     this.defaultEntitlement,
     this.cacheTtl = const Duration(minutes: 5),
@@ -360,7 +363,10 @@ class BillingEngine {
     try {
       _applyPendingConfigure();
       final user = _storage.currentAppUserId;
-      if (await _storage.flush()) return user;
+      if (await _storage.flush()) {
+        await _options.automaticScope?.setUser();
+        return user;
+      }
       _logger.warn('Billing: could not save the app user id; not sending yet');
     } on AppReferBillingException catch (e) {
       _logger.warn('Billing: $e');
@@ -385,8 +391,28 @@ class BillingEngine {
   Future<void> start() async {
     listen();
     await retryUnfinished();
+    await _recoverAuthorizedOwned();
     await customerInfo(FetchPolicy.fetchCurrent);
     unawaited(migrationSync());
+  }
+
+  Future<void> _recoverAuthorizedOwned() async {
+    final user = await _activeUser(), automatic = _options.automaticScope;
+    if (user == null ||
+        automatic == null ||
+        !await automatic.hasAuthorizedProofs(user))
+      return;
+    try {
+      // Adapter restore only queries owned purchases. No store sync or ownership transfer.
+      for (final purchase in await _store.restore()) {
+        final fields = purchase.storeFields;
+        if (fields != null &&
+            await automatic.recoverProof(user, fields) != null)
+          await process(purchase, appUserId: user);
+      }
+    } catch (e) {
+      _logger.warn('Billing: owned proof recovery will retry ($e)');
+    }
   }
 
   /// App came to the foreground: retries failed store completions (Google
@@ -399,6 +425,7 @@ class BillingEngine {
       unawaited(offerings().then<void>((_) {}, onError: (Object _) {}));
     }
     await retryUnfinished();
+    await _recoverAuthorizedOwned();
     await customerInfo(FetchPolicy.cachedOrFetched);
     await migrationSync();
     await drainQueue();
@@ -591,6 +618,9 @@ class BillingEngine {
     }
     final info = await _accept(response, user);
     await drainQueue();
+    if (_options.environment != null &&
+        info.environment != _options.environment!())
+      return customerInfo(FetchPolicy.fetchCurrent);
     return info;
   }
 
@@ -956,16 +986,28 @@ class BillingEngine {
     // (e.g. started before a logIn) is never linked to this install.
     final deviceId = await _linkableDeviceId(user);
     try {
-      final response = await _api.send(
-        RecordPurchase(
-          user,
-          deviceId,
-          fields,
-          sendableAttributes(attributes, linked: deviceId != null),
-          presentedOfferingContext: intent?.presentedOfferingContext,
-          bucketId: intent?.bucketId,
-        ),
+      final endpoint = RecordPurchase(
+        user,
+        deviceId,
+        fields,
+        sendableAttributes(attributes, linked: deviceId != null),
+        presentedOfferingContext: intent?.presentedOfferingContext,
+        bucketId: intent?.bucketId,
       );
+      final automatic = _options.automaticScope;
+      final ticket =
+          (intent == null
+              ? null
+              : await automatic?.recoverIntent(intent, purchase)) ??
+          await automatic?.recoverProof(user, fields);
+      final BillingCustomerResponse response;
+      if (ticket != null) {
+        await automatic?.authorizeProof(fields, ticket, intent: intent);
+        response = await _sendAuthorized(endpoint, ticket);
+        await automatic?.forgetProof(fields);
+      } else {
+        response = await _api.send(endpoint);
+      }
       _storage.clearSentAttributes(attributes);
       await _complete(purchase);
       await _rejected.remove(purchase.store, purchase.id);
@@ -973,7 +1015,9 @@ class BillingEngine {
       if (held) await _releaseHold(purchase);
       final info = await _accept(response, user);
       await drainQueue();
-      return user == currentAppUserId
+      return user == currentAppUserId &&
+              (_options.environment == null ||
+                  info.environment == _options.environment!())
           ? info
           : customerInfo(FetchPolicy.cachedOrFetched);
     } on AppReferBillingException catch (e) {
@@ -1061,6 +1105,7 @@ class BillingEngine {
   Future<void> _dropIntent(PurchaseIntent? intent) async {
     if (intent == null) return;
     try {
+      await _options.automaticScope?.forgetIntent(intent);
       await _intents.remove(intent);
     } catch (e) {
       _logger.warn('Billing: could not drop purchase intent ($e)');
@@ -1338,7 +1383,20 @@ class BillingEngine {
               'Could not read or save the app user on this device; the purchase was not started',
         );
       }
+      final revision = _storage.automaticIdentityGeneration,
+          epoch = _accountEpoch(),
+          initialKey = _api.apiKey();
+      final setupTransition = _options.automaticScope?.transitionRevision;
       final accountToken = await _accountTokenFor(user);
+      final registeredKey = await _api.awaitKey();
+      final canAuthorizeAutomatic =
+          await _activeUser() == user &&
+          revision == _storage.automaticIdentityGeneration &&
+          epoch == _accountEpoch() &&
+          (initialKey == null || initialKey == registeredKey);
+      final ticket = canAuthorizeAutomatic
+          ? await _options.automaticScope?.capture(user)
+          : null;
       // Saved before the sheet opens, so a purchase delivered after a restart,
       // logout or user switch still goes to this user.
       intent = PurchaseIntent(
@@ -1359,6 +1417,12 @@ class BillingEngine {
               'Could not save who started the purchase on this device; the purchase was not started',
         );
       }
+      if (ticket != null &&
+          revision == _storage.automaticIdentityGeneration &&
+          epoch == _accountEpoch() &&
+          setupTransition == _options.automaticScope?.transitionRevision &&
+          registeredKey == _api.apiKey())
+        await _options.automaticScope?.authorizeIntent(intent, ticket);
       _waiters[product.id] = (
         completer: waiter,
         appUserId: user,
@@ -1507,6 +1571,50 @@ class BillingEngine {
   /// drain and backs off (30 s doubling to 1 h, or the server's Retry-After)
   /// without counting an attempt, so a server-side setup problem never uses
   /// up a purchase's retries.
+  Future<BillingCustomerResponse> _sendAuthorized(
+    RecordPurchase endpoint,
+    AutomaticScopeTicket ticket,
+  ) async {
+    final automatic = _options.automaticScope!;
+    if (!automatic.isCurrent(ticket))
+      throw const AppReferBillingException(
+        AppReferBillingErrorCode.invalidResponse,
+      );
+    final selected = _options.environment?.call();
+    if (selected == null)
+      throw const AppReferBillingException(
+        AppReferBillingErrorCode.invalidResponse,
+      );
+    late BillingCustomerResponse response;
+    try {
+      response = await _api.sendPurchaseInEnvironment(
+        endpoint,
+        selected,
+        ticket.key,
+      );
+    } on AppReferBillingException catch (e) {
+      if (e.code != AppReferBillingErrorCode.environmentMismatch ||
+          e.environment == null)
+        rethrow;
+      response = await _api.sendPurchaseInEnvironment(
+        endpoint,
+        e.environment!,
+        ticket.key,
+      );
+    }
+    if (response.info.environment == null ||
+        !await automatic.commit(
+          ticket,
+          response.info.environment!,
+          response.info.appUserId,
+          acceptedFields: endpoint.storeFields,
+        ))
+      throw const AppReferBillingException(
+        AppReferBillingErrorCode.invalidResponse,
+      );
+    return response;
+  }
+
   Future<void> drainQueue() async {
     if (_isDraining || _queue.isEmpty) return;
     final backoff = _drainBackoff;
@@ -1539,25 +1647,35 @@ class BillingEngine {
       await _moveToRejected(old, 'not recorded after ${old.attempts} attempts');
     }
     for (final entry in _queue.entries) {
+      final ticket = entry.restore || entry.migrationOnly
+          ? null
+          : await _options.automaticScope?.recoverProof(
+              entry.appUserId,
+              entry.storeFields,
+            );
       final bound = _storage.purchaseEnvironment(entry.storeFields);
-      if (_options.environment != null &&
+      if (ticket == null &&
+          _options.environment != null &&
           bound != null &&
           bound != _options.environment!())
         continue;
       try {
         // Never the stored id: only what may be linked now, for the current
         // Billing user, so entries from a previous account get none.
-        final response = await _api.send(
-          RecordPurchase(
-            entry.appUserId,
-            await _linkableDeviceId(entry.appUserId),
-            entry.storeFields,
-            const {},
-            restore: entry.restore,
-            presentedOfferingContext: entry.presentedOfferingContext,
-            bucketId: entry.bucketId,
-          ),
+        final endpoint = RecordPurchase(
+          entry.appUserId,
+          await _linkableDeviceId(entry.appUserId),
+          entry.storeFields,
+          const {},
+          restore: entry.restore,
+          presentedOfferingContext: entry.presentedOfferingContext,
+          bucketId: entry.bucketId,
         );
+        final response = ticket == null
+            ? await _api.send(endpoint)
+            : await _sendAuthorized(endpoint, ticket);
+        if (ticket != null)
+          await _options.automaticScope?.forgetProof(entry.storeFields);
         await _queue.remove(entry.transactionId);
         _drainBackoff = null;
         if (!entry.migrationOnly && entry.isConsumable) {
@@ -1676,6 +1794,7 @@ class BillingEngine {
         AppReferBillingErrorCode.invalidAppUserId,
       );
     }
+    _options.automaticScope?.noteTransition();
     _applyPendingConfigure();
     _identityEpoch = _observeEpoch();
     if (appUserId != _storage.currentAppUserId) {
@@ -1695,6 +1814,8 @@ class BillingEngine {
     _storage.clearResetUser();
     BillingStorage.identityChanges++;
     BillingStorage.loggedOutAnonymousId = null;
+    if (await _storage.flush())
+      await _options.automaticScope?.setUser(invalidate: true);
     final info = await customerInfo(FetchPolicy.fetchCurrent);
     Timer.run(() => unawaited(migrationSync(appUserId)));
     return info;
@@ -1702,6 +1823,7 @@ class BillingEngine {
 
   /// Pending identifies stay: they still have to reach the server.
   Future<AppReferCustomerInfo> logOut() async {
+    _options.automaticScope?.noteTransition();
     _applyPendingConfigure();
     _identityEpoch = _observeEpoch();
     _storage.loggedInAppUserId = null;
@@ -1710,6 +1832,8 @@ class BillingEngine {
     _storage.clearResetUser();
     BillingStorage.identityChanges++;
     BillingStorage.loggedOutAnonymousId = minted;
+    if (await _storage.flush())
+      await _options.automaticScope?.setUser(invalidate: true);
     _lastServerFetch = null;
     _invalidateOfferings();
     return customerInfo(FetchPolicy.fetchCurrent);
@@ -1734,13 +1858,23 @@ class BillingEngine {
     try {
       for (final pending in _storage.pendingIdentifies) {
         try {
-          await _api.send(
+          final ticket = await _options.automaticScope?.capture(
+            pending.appUserId,
+          );
+          final response = await _api.send(
             Identify(
               pending.anonymousId,
               pending.appUserId,
               link: !_servingResetUser() && await _safeLinkAllowed(),
             ),
           );
+          if (ticket != null &&
+              !await _options.automaticScope!.inheritAnonymous(
+                pending.anonymousId,
+                ticket,
+                response.info.appUserId,
+              ))
+            return;
         } on AppReferBillingException catch (e) {
           if (e.isRetryable) {
             _logger.warn('Billing: identify will be retried ($e)');

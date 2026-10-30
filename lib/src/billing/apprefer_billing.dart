@@ -1,3 +1,4 @@
+import 'automatic_billing_scope.dart';
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
@@ -93,6 +94,7 @@ class AppReferBilling {
     Map<String, List<String>> entitlementsByProduct = const {},
     String? defaultEntitlement,
     DateTime Function()? now,
+    ProtectedBillingState? automaticState,
   }) {
     return _configure(
       apiKey: apiKey,
@@ -107,6 +109,7 @@ class AppReferBilling {
       httpClient: httpClient,
       now: now,
       observeLifecycle: false,
+      automaticState: automaticState ?? _TestProtectedBillingState(),
     );
   }
 
@@ -137,6 +140,7 @@ class AppReferBilling {
     http.Client? httpClient,
     DateTime Function()? now,
     bool observeLifecycle = true,
+    ProtectedBillingState? automaticState,
   }) {
     final logger = AppReferLogger(debug: debug, logLevel: logLevel);
     if (_configuring != null) {
@@ -160,17 +164,19 @@ class AppReferBilling {
           detected = await selectedStore.storeEnvironment();
         } catch (_) {}
       }
-      BillingEnvironment? scope() {
-        final key = apiKey ?? AppReferRegistry.apiKey;
-        if (key == null) return environment;
-        if (key.startsWith('pk_test_') &&
-            environment == BillingEnvironment.production)
-          return null;
-        return environment ??
-            (key.startsWith('pk_test_')
-                ? BillingEnvironment.sandbox
-                : detected ?? BillingEnvironment.production);
-      }
+      final automatic = AutomaticBillingScope(
+        automaticState ?? NativeProtectedBillingState(),
+        () => apiKey ?? AppReferRegistry.apiKey,
+        () => (
+          user: storage.currentAppUserId,
+          revision: storage.automaticIdentityGeneration,
+          reset: storage.automaticResetGeneration,
+        ),
+        () => AppReferRegistry.accountEpoch,
+        explicit: environment,
+        nativeContext: detected,
+      );
+      BillingEnvironment? scope() => automatic.current();
 
       _broadcaster.validScope = (info) =>
           scope() != null && info.environment == scope();
@@ -192,6 +198,7 @@ class AppReferBilling {
         store: selectedStore,
         options: BillingEngineOptions(
           environment: scope,
+          automaticScope: automatic,
           productEntitlements: entitlementsByProduct,
           defaultEntitlement: defaultEntitlement,
         ),
@@ -489,4 +496,15 @@ class _CustomerInfoBroadcaster {
         final sub = _controller.stream.listen(controller.add);
         controller.onCancel = sub.cancel;
       }).where((info) => validScope(info));
+}
+
+// configureForTesting only. Production always uses native protected storage.
+class _TestProtectedBillingState implements ProtectedBillingState {
+  String? value;
+  @override
+  Future<String?> read() async => value;
+  @override
+  Future<void> write(String next) async {
+    value = next;
+  }
 }

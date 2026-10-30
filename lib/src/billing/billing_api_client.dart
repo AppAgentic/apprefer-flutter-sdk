@@ -187,7 +187,7 @@ class BillingApiClient {
 
   /// `AppReferSDK.configure` usually runs just before `AppReferBilling.configure`
   /// without being awaited, so give it a moment to register the key.
-  Future<String?> _resolveApiKey() async {
+  Future<String?> awaitKey() async {
     for (var attempt = 0; attempt <= keyWaitAttempts; attempt++) {
       final key = apiKey();
       if (key != null && key.isNotEmpty) return key;
@@ -228,15 +228,33 @@ class BillingApiClient {
 
   Future<BillingCustomerResponse> send(BillingEndpoint endpoint) async =>
       BillingCustomerResponse.fromJson(await sendRaw(endpoint));
-  Future<Map<String, dynamic>> sendRaw(BillingEndpoint endpoint) async {
-    final key = await _resolveApiKey();
+  Future<BillingCustomerResponse> sendPurchaseInEnvironment(
+    RecordPurchase endpoint,
+    BillingEnvironment selected,
+    String expectedKey,
+  ) async => BillingCustomerResponse.fromJson(
+    await _sendRaw(endpoint, override: selected, expectedKey: expectedKey),
+  );
+  Future<Map<String, dynamic>> sendRaw(BillingEndpoint endpoint) =>
+      _sendRaw(endpoint);
+  Future<Map<String, dynamic>> _sendRaw(
+    BillingEndpoint endpoint, {
+    BillingEnvironment? override,
+    String? expectedKey,
+  }) async {
+    final key = await awaitKey();
     if (key == null) {
       throw const AppReferBillingException(
         AppReferBillingErrorCode.missingApiKey,
       );
     }
-    final selected = environmentProvider?.call() ?? environment;
-    final scoped = environmentProvider != null || environment != null;
+    if (expectedKey != null && key != expectedKey)
+      throw const AppReferBillingException(
+        AppReferBillingErrorCode.invalidResponse,
+      );
+    final selected = override ?? environmentProvider?.call() ?? environment;
+    final scoped =
+        override != null || environmentProvider != null || environment != null;
     if (scoped && selected == null)
       throw const AppReferBillingException(
         AppReferBillingErrorCode.invalidResponse,
@@ -269,6 +287,10 @@ class BillingApiClient {
           )
         : baseUrls;
     for (final baseUrl in hosts) {
+      if (expectedKey != null && apiKey() != expectedKey)
+        throw const AppReferBillingException(
+          AppReferBillingErrorCode.invalidResponse,
+        );
       final request = makeRequest(endpoint, baseUrl, key);
       if (selected != null) {
         if (key.startsWith('pk_test_') &&
@@ -292,6 +314,10 @@ class BillingApiClient {
         continue;
       }
 
+      if (expectedKey != null && apiKey() != expectedKey)
+        throw const AppReferBillingException(
+          AppReferBillingErrorCode.invalidResponse,
+        );
       final status = response.statusCode;
       if (status >= 200 && status < 300) {
         final Map<String, dynamic> json;
@@ -323,6 +349,10 @@ class BillingApiClient {
             BillingCustomerResponse.fromJson(json);
             await recordProofEnvironment?.call(endpoint.storeFields, selected);
           }
+          if (expectedKey != null && apiKey() != expectedKey)
+            throw const AppReferBillingException(
+              AppReferBillingErrorCode.invalidResponse,
+            );
           return json;
         } catch (_) {
           throw const AppReferBillingException(
