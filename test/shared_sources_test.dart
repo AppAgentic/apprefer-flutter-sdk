@@ -21,6 +21,15 @@ void main() {
   const hint =
       'changed without the shared copies: run node scripts/check-sdk-shared-sources.mjs in the parent repo';
 
+  for (final entry in {
+    'protectedBillingState': 'ProtectedBillingState.swift',
+    'verifiedBillingStoreContext': 'VerifiedBillingStoreContext.swift',
+  }.entries) {
+    test('${entry.value} matches the manifest', () {
+      expect(hash(swift(File('ios/Classes/${entry.value}').readAsStringSync())), manifest[entry.key], reason: hint);
+    });
+  }
+
   test('EngagementRenderer.java matches the manifest', () {
     final text = File(
       'android/src/main/java/com/apprefer/flutter/engagement/EngagementRenderer.java',
