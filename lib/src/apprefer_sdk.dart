@@ -1,3 +1,4 @@
+import 'services/identity_sync.dart';
 import 'dart:async';
 import 'services/event_queue.dart';
 export 'services/event_queue.dart' show AppReferEventResult;
@@ -134,6 +135,8 @@ class AppReferSDK with WidgetsBindingObserver {
   /// Attribution sends nothing, and Support sends no device id, until configure
   /// is called again.
   static Future<void> reset() async {
+    final identitySdk = _instance;
+    final identityIntent = ++_identityIntent;
     // Billing's user as of this call: a logIn/logOut while reset() runs wins.
     final billingIdentity = BillingStorage.identityChanges;
     _accountGeneration++;
@@ -148,7 +151,12 @@ class AppReferSDK with WidgetsBindingObserver {
       sdk._httpClient.cancel();
       sdk._conversion.cancel();
       await _ignoreStorage(sdk._events.clear);
-      await _ignoreStorage(() => _accountWrite(sdk._storage.clearUser));
+      if (identityIntent != _identityIntent) return;
+      await _ignoreStorage(
+        () => _accountWrite(() async {
+          if (identityIntent == _identityIntent) await sdk._storage.clearUser();
+        }),
+      );
     }
     if (sdk == null) {
       _eventQueue ??= EventQueue(
@@ -161,7 +169,8 @@ class AppReferSDK with WidgetsBindingObserver {
     await _ignoreStorage(() async {
       final prefs = await SharedPreferences.getInstance();
       await _accountWrite(() async {
-        await AppReferStorage.clearUserIn(prefs);
+        if (identityIntent == _identityIntent)
+          await AppReferStorage.clearUserIn(prefs);
       });
     });
     // Billing keeps serving its user until logIn/logOut: remember who that
@@ -172,9 +181,22 @@ class AppReferSDK with WidgetsBindingObserver {
         since: billingIdentity,
       );
     });
+    if (identityIntent != _identityIntent) return;
     await support.reset();
     // Lifecycle engagement: the account's queued messages stop, nothing waits to navigate.
     await _ignoreStorage(engagement.logout);
+    if (identitySdk?._config.synchronizeIdentity == true) {
+      await _ignoreStorage(
+        () async => IdentitySync.replace(
+          identitySdk!._identityClient,
+          await identitySdk._storage.getDeviceId(),
+          null,
+          {},
+          isCurrent: () => identityIntent == _identityIntent,
+          awaitDelivery: false,
+        ),
+      );
+    }
   }
 
   static Future<void> _ignoreStorage(Future<void> Function() action) async {
@@ -234,8 +256,12 @@ class AppReferSDK with WidgetsBindingObserver {
       a.userId == b.userId &&
       a.debug == b.debug &&
       a.logLevel == b.logLevel &&
-      a.automaticConversionValues == b.automaticConversionValues;
+      a.automaticConversionValues == b.automaticConversionValues &&
+      a.synchronizeIdentity == b.synchronizeIdentity;
   static Future<Attribution?> configure(AppReferConfig config) async {
+    final identityIntent = config.synchronizeIdentity
+        ? ++_identityIntent
+        : _identityIntent;
     // Lifecycle engagement started without its own key follows this one.
     unawaited(
       engagement.configurationChanged(config.apiKey).catchError((Object _) {}),
@@ -272,7 +298,15 @@ class AppReferSDK with WidgetsBindingObserver {
       _configuring = null;
       _needsCollectionConfigure = false;
     }
-    return _configureEnabled(config);
+    final attribution = await _configureEnabled(config, identityIntent);
+    if (config.synchronizeIdentity &&
+        _instance != null &&
+        _sameConfig(_instance!._config, config) &&
+        identityIntent == _identityIntent &&
+        !AppReferRegistry.stoppedByReset) {
+      await setIdentity(userId: config.userId);
+    }
+    return attribution;
   }
 
   /// Persistently pause attribution and analytics. Support and Billing stay available.
@@ -316,9 +350,15 @@ class AppReferSDK with WidgetsBindingObserver {
     await _ignoreStorage(engagement.collectionChanged);
   }
 
-  static Future<Attribution?> _configureEnabled(AppReferConfig config) {
+  static Future<Attribution?> _configureEnabled(
+    AppReferConfig config,
+    int identityIntent,
+  ) {
+    if (config.synchronizeIdentity && identityIntent != _identityIntent)
+      return Future.value(null);
     support.api.resumeRevocations();
-    if (_requestedConfig != null &&
+    if (!config.synchronizeIdentity &&
+        _requestedConfig != null &&
         _sameConfig(_requestedConfig!, config) &&
         _configuring != null)
       return _configuring!;
@@ -339,7 +379,7 @@ class AppReferSDK with WidgetsBindingObserver {
           .then((_) => _getCachedAttribution());
     }
     _requestedConfig = config;
-    final task = _configureNew(config);
+    final task = _configureNew(config, identityIntent);
     _configuring = task;
     unawaited(
       task.then<void>(
@@ -354,7 +394,10 @@ class AppReferSDK with WidgetsBindingObserver {
     return task;
   }
 
-  static Future<Attribution?> _configureNew(AppReferConfig config) async {
+  static Future<Attribution?> _configureNew(
+    AppReferConfig config,
+    int identityIntent,
+  ) async {
     final accountEpoch = _accountGeneration;
     final collectionEpoch = _collectionGeneration;
     _instance?._httpClient.cancel();
@@ -368,9 +411,13 @@ class AppReferSDK with WidgetsBindingObserver {
     );
     sdk._storage = AppReferStorage();
     await sdk._storage.init();
+    if (config.synchronizeIdentity && identityIntent != _identityIntent)
+      return null;
     if (collectionEpoch != _collectionGeneration || _collectionBlocked)
       return _getCachedAttribution();
-    if (accountEpoch != _accountGeneration) return null;
+    if (accountEpoch != _accountGeneration ||
+        (_requestedConfig != null && !_sameConfig(_requestedConfig!, config)))
+      return null;
     sdk._httpClient = AppReferHttpClient(
       baseUrl: AppReferConfig.trackingUrl,
       collectionAllowed: () =>
@@ -404,15 +451,25 @@ class AppReferSDK with WidgetsBindingObserver {
     sdk._installReferrer = AppReferInstallReferrer(logger: sdk._logger);
 
     if (_instance != null) WidgetsBinding.instance.removeObserver(_instance!);
+    if (_requestedConfig != null && !_sameConfig(_requestedConfig!, config))
+      return null;
+    if (config.synchronizeIdentity && identityIntent != _identityIntent)
+      return null;
     _instance = sdk;
     WidgetsBinding.instance.addObserver(sdk);
 
     sdk._logger.info('AppReferSDK initialized');
 
+    // Snapshot-enabled hosts provide authoritative restored auth, including null.
+    if (config.synchronizeIdentity && config.userId == null)
+      await _accountWrite(() async {
+        if (identityIntent == _identityIntent) await sdk._storage.clearUser();
+      });
     // Set user ID if provided at init time
     if (config.userId != null) {
       await _accountWrite(() async {
-        if (accountEpoch == _accountGeneration)
+        if (accountEpoch == _accountGeneration &&
+            (!config.synchronizeIdentity || identityIntent == _identityIntent))
           await sdk._storage.setUserId(config.userId!);
       });
     }
@@ -642,6 +699,7 @@ class AppReferSDK with WidgetsBindingObserver {
       return;
     }
     final epoch = sdk._generation;
+    final identityIntent = _identityIntent;
     if (!sdk._storage.isSdkEnabled() || AppReferRegistry.stoppedByReset) return;
 
     if (!TrackingConsent.allowed(await TrackingConsent.current())) return;
@@ -660,6 +718,21 @@ class AppReferSDK with WidgetsBindingObserver {
       hashedData['db'] = AppReferHashing.hashDateOfBirth(dateOfBirth);
     }
 
+    if (sdk._config.synchronizeIdentity) {
+      if (epoch != sdk._generation || identityIntent != _identityIntent) return;
+      final deviceId = await sdk._storage.getDeviceId();
+      final userId = sdk._storage.getUserId();
+      if (epoch != sdk._generation || identityIntent != _identityIntent) return;
+      await IdentitySync.replace(
+        sdk._identityClient,
+        deviceId,
+        userId,
+        hashedData,
+        isCurrent: () =>
+            epoch == sdk._generation && identityIntent == _identityIntent,
+      );
+      return;
+    }
     if (hashedData.isEmpty) return;
 
     final deviceId = await sdk._storage.getDeviceId();
@@ -676,7 +749,65 @@ class AppReferSDK with WidgetsBindingObserver {
 
   /// Set RevenueCat app_user_id so webhook events can be linked
   /// to this device's attribution.
+  static int _identityIntent = 0;
+  AppReferHttpClient get _identityClient => AppReferHttpClient(
+    baseUrl: AppReferConfig.trackingUrl,
+    fallbackUrl: AppReferConfig.fallbackUrl,
+    apiKey: _config.apiKey,
+    logger: _logger,
+  );
+
+  /// Replace account and matching fields atomically. Null is explicit signed-out state.
+  /// Call with the restored auth state on cold start; do not use an install id as an account.
+  static Future<void> setIdentity({
+    String? userId,
+    String? email,
+    String? phoneNumber,
+    String? firstName,
+    String? lastName,
+    String? dateOfBirth,
+  }) async {
+    final intent = ++_identityIntent;
+    final sdk = _instance;
+    if (sdk == null || !sdk._config.synchronizeIdentity)
+      throw StateError('Configure synchronizeIdentity before setIdentity');
+    final matching = <String, String>{};
+    if (TrackingConsent.allowed(await TrackingConsent.current()) &&
+        userId != null) {
+      if (email != null) matching['em'] = AppReferHashing.hashEmail(email);
+      if (phoneNumber != null)
+        matching['ph'] = AppReferHashing.hashPhone(phoneNumber);
+      if (firstName != null)
+        matching['fn'] = AppReferHashing.hashName(firstName);
+      if (lastName != null) matching['ln'] = AppReferHashing.hashName(lastName);
+      if (dateOfBirth != null)
+        matching['db'] = AppReferHashing.hashDateOfBirth(dateOfBirth);
+    }
+    if (intent != _identityIntent) return;
+    await _accountWrite(() async {
+      if (intent != _identityIntent) return;
+      if (userId == null) {
+        await sdk._storage.clearUser();
+      } else {
+        await sdk._storage.setUserId(userId);
+      }
+    });
+    final deviceId = await sdk._storage.getDeviceId();
+    if (intent != _identityIntent) return;
+    await IdentitySync.replace(
+      sdk._identityClient,
+      deviceId,
+      userId,
+      matching,
+      isCurrent: () => intent == _identityIntent,
+    );
+  }
+
   static Future<void> setUserId(String userId) async {
+    if (_instance?._config.synchronizeIdentity == true) {
+      await setIdentity(userId: userId);
+      return;
+    }
     final accountEpoch = _accountGeneration;
     final sdk = _instance;
     if (sdk == null) {
@@ -722,6 +853,10 @@ class AppReferSDK with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) support.api.resumeRevocations();
     if (state == AppLifecycleState.resumed) {
+      if (_config.synchronizeIdentity)
+        unawaited(
+          IdentitySync.retry(_identityClient).catchError((Object _) {}),
+        );
       unawaited(engagement.becameActive().catchError((Object _) {}));
       unawaited(_conversion.refresh());
       unawaited(_events.flush());

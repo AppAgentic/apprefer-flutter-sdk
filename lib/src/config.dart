@@ -16,12 +16,16 @@ class AppReferConfig {
   /// Independent of ATT; false disables initial registration, polling and updates.
   final bool automaticConversionValues;
 
+  /// Ordered first-party account snapshots; requires the identity snapshot backend.
+  final bool synchronizeIdentity;
+
   const AppReferConfig({
     required this.apiKey,
     this.userId,
     this.debug = false,
     this.logLevel = 1,
     this.automaticConversionValues = true,
+    this.synchronizeIdentity = false,
   });
 
   /// Primary tracking URL (low-latency edge).
