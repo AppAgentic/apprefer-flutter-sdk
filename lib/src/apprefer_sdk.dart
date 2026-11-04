@@ -194,8 +194,31 @@ class AppReferSDK with WidgetsBindingObserver {
     }
   }
 
-  /// Refresh iOS conversion values after purchases made outside AppRefer Billing.
-  /// A no-op on Android.
+  ConversionValue _createConversion(
+    AppReferConfig config,
+    int collectionEpoch,
+  ) => ConversionValue(
+    storage: _storage,
+    client: AppReferHttpClient(
+      baseUrl: 'https://apprefer.com',
+      collectionAllowed: () =>
+          config.automaticConversionValues &&
+          collectionEpoch == _collectionGeneration &&
+          !_collectionBlocked &&
+          !AppReferRegistry.stoppedByReset &&
+          _storage.isSdkEnabled(),
+      apiKey: config.apiKey,
+      logger: _logger,
+    ),
+    active: () =>
+        config.automaticConversionValues &&
+        collectionEpoch == _collectionGeneration &&
+        !_collectionBlocked &&
+        !AppReferRegistry.stoppedByReset,
+  );
+
+  /// Refresh aggregate iOS conversion values when AppRefer owns them.
+  /// No-op on Android or when automaticConversionValues is false.
   static Future<void> updateConversionValue() async {
     await _instance?._conversion.refresh(force: true);
   }
@@ -210,7 +233,8 @@ class AppReferSDK with WidgetsBindingObserver {
       a.apiKey == b.apiKey &&
       a.userId == b.userId &&
       a.debug == b.debug &&
-      a.logLevel == b.logLevel;
+      a.logLevel == b.logLevel &&
+      a.automaticConversionValues == b.automaticConversionValues;
   static Future<Attribution?> configure(AppReferConfig config) async {
     // Lifecycle engagement started without its own key follows this one.
     unawaited(
@@ -300,6 +324,9 @@ class AppReferSDK with WidgetsBindingObserver {
       return _configuring!;
     if (_instance != null && _sameConfig(_instance!._config, config)) {
       final sdk = _instance!;
+      if (sdk._conversion.isCancelled) {
+        sdk._conversion = sdk._createConversion(config, _collectionGeneration);
+      }
       // reset() cleared the stored user: store it again (under the account
       // epoch, and tell the server) so events and Support carry it.
       final userId = config.userId;
@@ -371,20 +398,7 @@ class AppReferSDK with WidgetsBindingObserver {
     }
     sdk._events = _eventQueue!;
     unawaited(sdk._events.flush());
-    sdk._conversion = ConversionValue(
-      storage: sdk._storage,
-      client: AppReferHttpClient(
-        baseUrl: 'https://apprefer.com',
-        collectionAllowed: () =>
-            collectionEpoch == _collectionGeneration &&
-            !_collectionBlocked &&
-            !AppReferRegistry.stoppedByReset &&
-            sdk._storage.isSdkEnabled(),
-        apiKey: config.apiKey,
-        logger: sdk._logger,
-      ),
-      active: () => !AppReferRegistry.stoppedByReset,
-    );
+    sdk._conversion = sdk._createConversion(config, collectionEpoch);
     sdk._deviceInfo = AppReferDeviceInfo(logger: sdk._logger);
     sdk._adServices = AppReferAdServices(logger: sdk._logger);
     sdk._installReferrer = AppReferInstallReferrer(logger: sdk._logger);

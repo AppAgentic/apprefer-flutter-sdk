@@ -11,11 +11,17 @@ class AppReferConfig {
   /// 0=none, 1=errors, 2=warnings, 3=verbose (default: 1)
   final int logLevel;
 
+  /// Whether AppRefer owns Apple's aggregate conversion-value updates.
+  /// Set false when another SDK (for example the host's ad SDK) owns the schema.
+  /// Independent of ATT; false disables initial registration, polling and updates.
+  final bool automaticConversionValues;
+
   const AppReferConfig({
     required this.apiKey,
     this.userId,
     this.debug = false,
     this.logLevel = 1,
+    this.automaticConversionValues = true,
   });
 
   /// Primary tracking URL (low-latency edge).

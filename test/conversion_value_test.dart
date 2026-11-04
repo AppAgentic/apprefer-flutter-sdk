@@ -181,6 +181,140 @@ void main() {
     expect(requests.length, 1);
   });
 
+  for (final consent in ['granted', 'denied', 'undetermined']) {
+    test('disabled config never registers or polls with $consent', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('apprefer_tracking_consent', consent);
+      var nativeUpdates = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('com.apprefer.sdk/adservices'),
+            (call) async {
+              if (call.method == 'updateConversionValue') nativeUpdates++;
+              return null;
+            },
+          );
+      await http.runWithClient(() async {
+        await AppReferSDK.configure(
+          const AppReferConfig(
+            apiKey: 'pk_test',
+            automaticConversionValues: false,
+          ),
+        );
+        await AppReferSDK.updateConversionValue();
+        TestWidgetsFlutterBinding.ensureInitialized()
+            .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }, () => client);
+      expect(
+        requests.where((r) => r.url.path.endsWith('conversion-value')),
+        isEmpty,
+      );
+      expect(nativeUpdates, 0);
+    });
+  }
+  test(
+    'inactive owner ignores in-flight completion and subsequent refresh',
+    () async {
+      var active = true;
+      final entered = Completer<void>();
+      final finish = Completer<http.Response>();
+      conversion = ConversionValue(
+        storage: storage,
+        client: AppReferHttpClient(
+          baseUrl: 'https://apprefer.com',
+          apiKey: 'pk_test',
+          logger: const AppReferLogger(),
+        ),
+        isIOS: () => true,
+        active: () => active,
+        update: (fine, coarse) async => updates.add((fine, coarse)),
+      );
+      final pending = http.runWithClient(
+        () => conversion.refresh(force: true),
+        () => MockClient((r) {
+          entered.complete();
+          return finish.future;
+        }),
+      );
+      await entered.future;
+      active = false;
+      finish.complete(http.Response('{"fine":63,"coarse":"high"}', 200));
+      await pending;
+      await conversion.refresh(force: true);
+      expect(updates, [(0, 'low')]);
+      conversion.cancel();
+    },
+  );
+
+  test(
+    'changing owner to false cancels old in-flight conversion response',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final entered = Completer<void>();
+      final finish = Completer<http.Response>();
+      final native = <int>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('com.apprefer.sdk/adservices'),
+            (call) async {
+              if (call.method == 'updateConversionValue')
+                native.add((call.arguments as Map)['fine'] as int);
+              return null;
+            },
+          );
+      var polls = 0;
+      final slow = MockClient((r) async {
+        if (r.url.path.endsWith('conversion-value')) {
+          polls++;
+          if (!entered.isCompleted) entered.complete();
+          return finish.future;
+        }
+        return http.Response('{}', 200);
+      });
+      await http.runWithClient(() async {
+        await AppReferSDK.configure(const AppReferConfig(apiKey: 'pk_test'));
+        await entered.future;
+        await AppReferSDK.configure(
+          const AppReferConfig(
+            apiKey: 'pk_test',
+            automaticConversionValues: false,
+          ),
+        );
+        finish.complete(http.Response('{"fine":63,"coarse":"high"}', 200));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        await AppReferSDK.updateConversionValue();
+        TestWidgetsFlutterBinding.ensureInitialized()
+            .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }, () => slow);
+      expect(polls, 1);
+      expect(native, [0]);
+    },
+  );
+
+  test(
+    'reset then same enabled configuration creates a fresh conversion owner',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      await http.runWithClient(() async {
+        await AppReferSDK.configure(const AppReferConfig(apiKey: 'pk_test'));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        await AppReferSDK.reset();
+        final before = requests
+            .where((r) => r.url.path.endsWith('conversion-value'))
+            .length;
+        await AppReferSDK.configure(const AppReferConfig(apiKey: 'pk_test'));
+        await AppReferSDK.updateConversionValue();
+        expect(
+          requests.where((r) => r.url.path.endsWith('conversion-value')).length,
+          greaterThan(before),
+        );
+      }, () => client);
+    },
+  );
+
   Future<void> configureSDK() async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
