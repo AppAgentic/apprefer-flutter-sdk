@@ -251,8 +251,51 @@ class AppReferSupport with WidgetsBindingObserver {
       _present(context, AppReferSupportView(conversationId: conversationId));
 
   /// Opens the help home with the message field pre-filled and focused.
-  Future<void> compose(String prefill, {BuildContext? context}) =>
-      _present(context, AppReferSupportView(composing: prefill));
+  /// [appContext] is your app's own data about what the customer is writing
+  /// about (e.g. `{'course_id': '8812', 'screen': 'map'}`). It is never shown
+  /// to the customer; it goes with the conversation they start here, for
+  /// your team and the AI assistant. Keys are `[a-z0-9_]`, up to 40
+  /// characters; at most 20 entries, values up to 500 characters.
+  Future<void> compose(
+    String prefill, {
+    BuildContext? context,
+    Map<String, String> appContext = const {},
+  }) => _present(
+    context,
+    AppReferSupportView(composing: prefill, composingContext: appContext),
+  );
+
+  /// Starts a new conversation with [text] straight away, without showing the
+  /// chat (e.g. your own "Report a problem" form), and returns its id. It
+  /// shows in the chat's history like any other, and replies notify as
+  /// usual. [appContext] is your app's hidden data, as in [compose] (sent as
+  /// `context.app`). Throws a
+  /// [SupportException] when [text] is empty, or when the message couldn't be
+  /// confirmed after two retries. Each call is one new conversation: its
+  /// retries reuse one message id, a second call starts another.
+  Future<String> send(
+    String text, {
+    String? subject,
+    Map<String, String> appContext = const {},
+  }) async {
+    if (text.trim().isEmpty) {
+      throw SupportException(400, 'Write a message before sending.');
+    }
+    Map<String, dynamic> metadata = const {};
+    try {
+      metadata = await _supportDeviceMetadata().timeout(
+        const Duration(seconds: 2),
+      );
+    } catch (_) {
+      // Device details are nice to have; never hold a message back for them.
+    }
+    return api.startConversation(
+      text,
+      subject: subject,
+      appContext: appContext,
+      metadata: metadata,
+    );
+  }
 
   /// Opens the help chat on one help article (e.g. from a "How does this
   /// work?" link). Back leads to the help home; "Message us" starts a
@@ -464,6 +507,21 @@ class AppReferSupportDestination {
   final String? value;
 }
 
+/// The device details sent with a new conversation (`context`).
+Future<Map<String, dynamic>> _supportDeviceMetadata([PackageInfo? info]) async {
+  final p = info ?? await PackageInfo.fromPlatform();
+  final d = await AppReferDeviceInfo(
+    logger: AppReferLogger(debug: false),
+  ).getDeviceInfo();
+  return {
+    'appVersion': p.version,
+    'device': d['model'] ?? 'unknown',
+    'os': '${Platform.isIOS ? 'iOS' : 'Android'} ${d['os_version'] ?? ''}',
+    'locale': PlatformDispatcher.instance.locale.toString(),
+    'platform': Platform.isIOS ? 'ios' : 'android',
+  };
+}
+
 /// Embeddable help chat: the home (with help articles), the help centre,
 /// articles and conversations.
 class AppReferSupportView extends StatefulWidget {
@@ -471,6 +529,7 @@ class AppReferSupportView extends StatefulWidget {
     super.key,
     this.conversationId,
     this.composing,
+    this.composingContext = const {},
     this.opening,
     this.api,
   });
@@ -481,14 +540,25 @@ class AppReferSupportView extends StatefulWidget {
 
   /// Opens the home with the message field pre-filled and focused.
   final String? composing;
+
+  /// The app's hidden data, sent with the first conversation started here
+  /// (`compose(appContext:)`). Never shown.
+  final Map<String, String> composingContext;
   final SupportAPI? api;
   @override
   State<AppReferSupportView> createState() => _SupportViewState();
 }
 
 class _Pending {
-  _Pending(this.text, this.images, this.conversation, {this.subject});
+  _Pending(
+    this.text,
+    this.images,
+    this.conversation, {
+    this.subject,
+    this.appContext = const {},
+  });
   final String clientMessageId = newSupportMessageId();
+  final Map<String, String> appContext;
   final String text;
   final String? conversation, subject;
   bool inFlight = false;
@@ -526,6 +596,9 @@ class _SupportViewState extends State<AppReferSupportView>
   String appName = 'App', sendError = '', loadError = '';
   MemoryImage? launcherImage;
   late final Future<void> metadataReady;
+
+  /// The app's hidden data for the next conversation started from the home.
+  Map<String, String> composeContext = const {};
   Map<String, dynamic> metadata = {
     'appVersion': 'unknown',
     'device': 'unknown',
@@ -620,6 +693,7 @@ class _SupportViewState extends State<AppReferSupportView>
     }
     _loadNotice();
     homeText.text = widget.composing ?? '';
+    composeContext = Map.of(widget.composingContext);
     homeText.addListener(_changed);
     threadText.addListener(_changed);
     helpSearchFocus.addListener(_changed);
@@ -661,6 +735,7 @@ class _SupportViewState extends State<AppReferSupportView>
       threadImages = [];
       pending.clear();
       homeText.clear();
+      composeContext = const {};
       threadText.clear();
       sending = false;
       loading = false;
@@ -692,20 +767,11 @@ class _SupportViewState extends State<AppReferSupportView>
   Future<void> _context() async {
     try {
       final p = await PackageInfo.fromPlatform();
-      final d = await AppReferDeviceInfo(
-        logger: AppReferLogger(debug: false),
-      ).getDeviceInfo();
+      final m = await _supportDeviceMetadata(p);
       if (mounted) {
         setState(() {
           appName = p.appName;
-          metadata = {
-            'appVersion': p.version,
-            'device': d['model'] ?? 'unknown',
-            'os':
-                '${Platform.isIOS ? 'iOS' : 'Android'} ${d['os_version'] ?? ''}',
-            'locale': PlatformDispatcher.instance.locale.toString(),
-            'platform': Platform.isIOS ? 'ios' : 'android',
-          };
+          metadata = m;
         });
       }
     } catch (_) {
@@ -1568,7 +1634,13 @@ class _SupportViewState extends State<AppReferSupportView>
             firstSend!.subject == subject &&
             _sameImages(firstSend!.images, homeImages)
         ? firstSend!
-        : _Pending(body, List.of(homeImages), null, subject: subject);
+        : _Pending(
+            body,
+            List.of(homeImages),
+            null,
+            subject: subject,
+            appContext: composeContext,
+          );
     firstSend = p;
     setState(() {
       sending = true;
@@ -1588,10 +1660,13 @@ class _SupportViewState extends State<AppReferSupportView>
         clientMessageId: p.clientMessageId,
         generation: epoch,
         subject: p.subject,
+        appContext: p.appContext,
       );
       if (!mounted) return;
       setState(() {
         firstSend = null;
+        // Only the first conversation started here carries the app's data.
+        composeContext = const {};
         if (homeText.text.trim() == p.text) homeText.clear();
         if (_sameImages(p.images, homeImages)) homeImages = [];
         if (topic?.title == p.subject) topic = null;

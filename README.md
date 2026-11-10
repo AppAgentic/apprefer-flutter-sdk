@@ -441,6 +441,8 @@ badges. Uses the SDK key and device/user IDs from `AppReferSDK.configure` / `set
 await AppReferSDK.support.open(context: context);
 // Opens the home with the message field pre-filled and focused:
 await AppReferSDK.support.compose('Problem with my subscription', context: context);
+// Or start a conversation from your own form, with hidden app data (0.14.0):
+final conversationId = await AppReferSDK.support.send('The map is wrong', appContext: {'course_id': '8812'});
 await AppReferSDK.support.identify(name: 'María', email: 'maria@example.com');
 final check = await AppReferSDK.support.verifyIdentity(tokenFromYourBackend); // 0.12.0: confirms the account (see "Verified identity" below)
 AppReferSDK.support.accentColor = Colors.deepPurple; // hero, bubbles, send button
@@ -481,6 +483,7 @@ await AppReferSDK.support.removePushToken(fcmToken);
 const AppReferSupportView();
 const AppReferSupportView(conversationId: 'conversation-id');
 const AppReferSupportView(composing: 'Report a problem');
+const AppReferSupportView(composing: 'Report a problem', composingContext: {'screen': 'map'}); // 0.14.0
 ```
 
 `topics` defaults to Billing & refunds, Restore purchase, Report a bug and Suggest
@@ -512,6 +515,47 @@ Push transport stays in the host app: forward APNs/FCM registration and notifica
 taps to these APIs. On Android registration creates `apprefer_support`; configure
 FCM to use that channel for support replies. iOS payloads use `apprefer: {type:
 support_reply, conversationId: ...}`; Android uses those fields directly in data.
+
+### Start a conversation from your own screen (0.14.0)
+
+`send` starts a new conversation straight away, without showing the chat, and returns its id.
+Use it for your own forms, such as a "Report a problem" sheet. `appContext` is your app's own data
+about what the customer is writing about. The customer never sees it; your team, the AI assistant
+and team tools do (it is sent as `context.app` and stored on the conversation only).
+
+```dart
+Future<void> reportMapIssue(String whatsWrong) async {
+  try {
+    await AppReferSDK.support.send(
+      whatsWrong,
+      subject: 'Map issue',
+      appContext: {'course_id': course.id, 'hole': '7', 'source': 'map_sheet'},
+    );
+    showThanks(); // your own "Thanks, we're on it" screen
+  } on SupportException {
+    showRetry(); // not confirmed; another send() call starts a new conversation
+  }
+}
+
+// Or let the customer write in the chat, with the same hidden data:
+await AppReferSDK.support.compose(
+  'The green on hole 7 is in the wrong place',
+  context: context,
+  appContext: {'course_id': course.id, 'hole': '7'},
+);
+```
+
+- `send` throws a `SupportException` when the text is empty. Network errors, 408, 429 and 5xx
+  are retried twice (after about 0.5 s and 1.5 s) with the same message id, so a retry after a
+  lost answer returns the conversation already stored, then the error is thrown.
+- The conversation shows in the chat's history like any other; unread counts and reply
+  notifications work as usual.
+- `compose(appContext:)` sends the data only with the first conversation the customer starts from
+  that screen. `compose` without it behaves as before.
+- Keys are lowercase letters, digits and `_`, up to 40 characters; values are strings up to 500
+  characters. The SDK sorts the keys, drops other keys and empty values, and keeps the first 20.
+- Both parameters are named `appContext` because `compose` and `open` already take a Flutter
+  `context` (a `BuildContext`).
 
 ### Verified identity (0.12.0)
 

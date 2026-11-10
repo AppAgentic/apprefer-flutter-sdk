@@ -1,3 +1,10 @@
+## 0.14.0 (candidate, not published)
+
+- Support: `send(text, {subject, appContext})` starts a new conversation without showing the chat (for your own "Report a problem" form) and returns its id. It uses the same session, profile, reset and 401 handling as the chat's composer; one client message id per call, network errors, 408, 429 and 5xx retried twice with that id (about 0.5 s and 1.5 s), then thrown. Empty text throws a `SupportException`.
+- Support: `compose(prefill, {context, appContext})` and `AppReferSupportView(composingContext:)` carry hidden app data that is sent only with the first conversation started from that screen (and its retries), never shown. Without it the composer is unchanged.
+- The app data goes on the wire as `context.app`, cleaned like the server: keys `[a-z0-9_]{1,40}` sorted, control characters as spaces, values trimmed and cut to 500 characters, empty values dropped, at most 20 kept, left out when nothing remains. The parameter is `appContext` (not `context`) because `compose` and `open` already take a `BuildContext` named `context`.
+- Version 0.14.0 (pubspec, `appReferVersion`, iOS podspec). Dart only: no native bridge change.
+
 ## 0.13.3 (candidate, not published)
 
 - Isolate customer snapshots, caches and offline grants by production or sandbox. Public Billing configuration accepts an explicit environment, including sandbox with a live SDK key; test keys cannot select production.

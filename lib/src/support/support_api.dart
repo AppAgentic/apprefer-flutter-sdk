@@ -18,6 +18,30 @@ String newSupportMessageId() => List.generate(
 
 const supportChannel = MethodChannel('com.apprefer.sdk/support');
 
+/// Limits for the app's hidden conversation data (`context.app`), as the server applies them.
+const supportAppContextMaxKeys = 20;
+const supportAppContextMaxValue = 500;
+final _appContextKey = RegExp(r'^[a-z0-9_]{1,40}$');
+final _controlCharacters = RegExp(r'[\u0000-\u001f\u007f]');
+
+/// Cleans the app's hidden data the way the server does: keys sorted, only
+/// `[a-z0-9_]{1,40}`, control characters as spaces, values trimmed and cut
+/// to 500 characters, empty values dropped, at most 20 entries kept.
+Map<String, String> supportCleanAppContext(Map<String, String> raw) {
+  final out = <String, String>{};
+  final keys = raw.keys.toList()..sort();
+  for (final key in keys) {
+    if (out.length >= supportAppContextMaxKeys) break;
+    if (!_appContextKey.hasMatch(key)) continue;
+    var value = raw[key]!.replaceAll(_controlCharacters, ' ').trim();
+    if (value.length > supportAppContextMaxValue) {
+      value = value.substring(0, supportAppContextMaxValue).trim();
+    }
+    if (value.isNotEmpty) out[key] = value;
+  }
+  return out;
+}
+
 /// What kind of failure, so the chat can explain it in the customer's
 /// language ([SupportException.message] stays English, for logs).
 enum SupportErrorReason { server, locked, upload, unavailable, reset }
@@ -1073,6 +1097,8 @@ class SupportAPI {
     }
   }
 
+  /// Starts a conversation. [appContext] is the app's hidden data, sent
+  /// cleaned as `context.app` (left out when nothing remains).
   Future<Map<String, dynamic>> start(
     String text,
     List<String> ids,
@@ -1080,13 +1106,103 @@ class SupportAPI {
     required String clientMessageId,
     String? subject,
     int? generation,
-  }) => call('POST', '/conversations', {
-    'text': text,
-    if (subject != null && subject.isNotEmpty) 'subject': subject,
-    if (ids.isNotEmpty) 'attachmentIds': ids,
-    'context': context,
-    'clientMessageId': clientMessageId,
-  }, generation);
+    Map<String, String> appContext = const {},
+  }) {
+    final app = supportCleanAppContext(appContext);
+    return call('POST', '/conversations', {
+      'text': text,
+      if (subject != null && subject.isNotEmpty) 'subject': subject,
+      if (ids.isNotEmpty) 'attachmentIds': ids,
+      'context': {...context, if (app.isNotEmpty) 'app': app},
+      'clientMessageId': clientMessageId,
+    }, generation);
+  }
+
+  /// Waits between `startConversation` attempts after a network or server
+  /// failure (tests shorten it).
+  @visibleForTesting
+  List<Duration> sendRetryDelays = const [
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 1500),
+  ];
+
+  /// Starts a new conversation without the chat UI (`support.send`) and
+  /// returns its id. One clientMessageId for every attempt: network errors,
+  /// 408, 429 and 5xx are retried twice, then thrown, and the server answers
+  /// a repeat with the conversation it already stored.
+  Future<String> startConversation(
+    String text, {
+    String? subject,
+    Map<String, String> appContext = const {},
+    Map<String, dynamic> metadata = const {},
+  }) async {
+    final body = text.trim();
+    if (body.isEmpty) {
+      throw SupportException(400, 'Write a message before sending.');
+    }
+    final topic = subject?.trim();
+    final epoch = _generation;
+    final clientMessageId = newSupportMessageId();
+    for (var attempt = 0; ; attempt++) {
+      try {
+        final result = await start(
+          body,
+          const [],
+          metadata,
+          clientMessageId: clientMessageId,
+          subject: topic,
+          generation: epoch,
+          appContext: appContext,
+        );
+        final conversation = result['conversation'];
+        final id = conversation is Map ? conversation['id'] : null;
+        if (id is! String || id.isEmpty) {
+          throw SupportException(0, 'Invalid support conversation');
+        }
+        return id;
+      } on SupportException catch (e) {
+        if (epoch != _generation) rethrow;
+        final transient =
+            e.status == 0 ||
+            e.status == 408 ||
+            e.status == 429 ||
+            e.status >= 500;
+        if (!transient ||
+            e.reason == SupportErrorReason.reset ||
+            attempt >= sendRetryDelays.length)
+          rethrow;
+      } on Exception catch (e) {
+        if (epoch != _generation) {
+          throw SupportException(
+            0,
+            'Support reset',
+            reason: SupportErrorReason.reset,
+          );
+        }
+        final network =
+            e is http.ClientException ||
+            e is TimeoutException ||
+            e is SocketException;
+        if (!network) rethrow;
+        if (attempt >= sendRetryDelays.length) {
+          throw SupportException(
+            0,
+            'Network error: $e',
+            reason: SupportErrorReason.unavailable,
+          );
+        }
+      }
+      await Future<void>.delayed(sendRetryDelays[attempt]);
+      if (epoch != _generation) {
+        throw SupportException(
+          0,
+          'Support reset',
+          reason: SupportErrorReason.reset,
+        );
+      }
+    }
+  }
+
   Future<Map<String, dynamic>> send(
     String id,
     String text,
