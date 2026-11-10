@@ -545,7 +545,7 @@ await AppReferSDK.support.compose(
 );
 ```
 
-- `send` throws a `SupportException` when the text is empty. Network errors, 408, 429 and 5xx
+- `send` throws a `SupportException` when the text is empty. Network errors, timeouts, 408, 429 and 5xx
   are retried twice (after about 0.5 s and 1.5 s) with the same message id, so a retry after a
   lost answer returns the conversation already stored, then the error is thrown.
 - The conversation shows in the chat's history like any other; unread counts and reply

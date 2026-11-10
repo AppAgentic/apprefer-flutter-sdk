@@ -1127,33 +1127,50 @@ class SupportAPI {
   ];
 
   /// Starts a new conversation without the chat UI (`support.send`) and
-  /// returns its id. One clientMessageId for every attempt: network errors,
-  /// 408, 429 and 5xx are retried twice, then thrown, and the server answers
-  /// a repeat with the conversation it already stored.
+  /// returns its id. The account generation is taken before anything is
+  /// awaited, so a reset or account switch while device details load or a
+  /// retry waits ends it with the reset error, never a post on the next
+  /// account's session. One clientMessageId for every attempt: transport
+  /// failures, 408, 429 and 5xx are retried twice, then thrown, and the
+  /// server answers a repeat with the conversation it already stored.
   Future<String> startConversation(
     String text, {
     String? subject,
     Map<String, String> appContext = const {},
-    Map<String, dynamic> metadata = const {},
+    Future<Map<String, dynamic>> Function()? metadata,
+    Duration metadataTimeout = const Duration(seconds: 2),
   }) async {
+    final epoch = _generation;
     final body = text.trim();
     if (body.isEmpty) {
       throw SupportException(400, 'Write a message before sending.');
     }
     final topic = subject?.trim();
-    final epoch = _generation;
+    final app = Map<String, String>.of(appContext);
     final clientMessageId = newSupportMessageId();
+    SupportException resetError() =>
+        SupportException(0, 'Support reset', reason: SupportErrorReason.reset);
+    var details = const <String, dynamic>{};
+    if (metadata != null) {
+      try {
+        details = await metadata().timeout(metadataTimeout);
+      } catch (_) {
+        // Device details are nice to have; never hold a message back for them.
+      }
+    }
+    if (epoch != _generation) throw resetError();
     for (var attempt = 0; ; attempt++) {
       try {
         final result = await start(
           body,
           const [],
-          metadata,
+          details,
           clientMessageId: clientMessageId,
           subject: topic,
           generation: epoch,
-          appContext: appContext,
+          appContext: app,
         );
+        if (epoch != _generation) throw resetError();
         final conversation = result['conversation'];
         final id = conversation is Map ? conversation['id'] : null;
         if (id is! String || id.isEmpty) {
@@ -1161,24 +1178,13 @@ class SupportAPI {
         }
         return id;
       } on SupportException catch (e) {
-        if (epoch != _generation) rethrow;
-        final transient =
-            e.status == 0 ||
-            e.status == 408 ||
-            e.status == 429 ||
-            e.status >= 500;
-        if (!transient ||
-            e.reason == SupportErrorReason.reset ||
-            attempt >= sendRetryDelays.length)
-          rethrow;
+        if (epoch != _generation) throw resetError();
+        // Only HTTP answers that may succeed later; never a locked store,
+        // a missing key or a malformed response.
+        final transient = e.status == 408 || e.status == 429 || e.status >= 500;
+        if (!transient || attempt >= sendRetryDelays.length) rethrow;
       } on Exception catch (e) {
-        if (epoch != _generation) {
-          throw SupportException(
-            0,
-            'Support reset',
-            reason: SupportErrorReason.reset,
-          );
-        }
+        if (epoch != _generation) throw resetError();
         final network =
             e is http.ClientException ||
             e is TimeoutException ||
@@ -1193,13 +1199,7 @@ class SupportAPI {
         }
       }
       await Future<void>.delayed(sendRetryDelays[attempt]);
-      if (epoch != _generation) {
-        throw SupportException(
-          0,
-          'Support reset',
-          reason: SupportErrorReason.reset,
-        );
-      }
+      if (epoch != _generation) throw resetError();
     }
   }
 

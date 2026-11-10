@@ -277,25 +277,14 @@ class AppReferSupport with WidgetsBindingObserver {
     String text, {
     String? subject,
     Map<String, String> appContext = const {},
-  }) async {
-    if (text.trim().isEmpty) {
-      throw SupportException(400, 'Write a message before sending.');
-    }
-    Map<String, dynamic> metadata = const {};
-    try {
-      metadata = await _supportDeviceMetadata().timeout(
-        const Duration(seconds: 2),
+  }) =>
+      // No await before this call: it takes the account generation first.
+      api.startConversation(
+        text,
+        subject: subject,
+        appContext: appContext,
+        metadata: _supportDeviceMetadata,
       );
-    } catch (_) {
-      // Device details are nice to have; never hold a message back for them.
-    }
-    return api.startConversation(
-      text,
-      subject: subject,
-      appContext: appContext,
-      metadata: metadata,
-    );
-  }
 
   /// Opens the help chat on one help article (e.g. from a "How does this
   /// work?" link). Back leads to the help home; "Message us" starts a

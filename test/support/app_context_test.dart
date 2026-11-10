@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:apprefer/apprefer.dart';
 import 'package:apprefer/src/support/support_api.dart';
@@ -60,7 +61,10 @@ void main() {
 
   group('startConversation (support.send)', () {
     late List<http.Request> posts;
-    SupportAPI make(Future<http.Response> Function(http.Request) handler) =>
+    SupportAPI make(
+      Future<http.Response> Function(http.Request) handler, {
+      Future<bool> Function()? identityCleared,
+    }) =>
         SupportAPI(
             client: MockClient((r) async {
               if (r.url.path == '/api/support/v1/session') {
@@ -74,7 +78,7 @@ void main() {
             write: (_, __) async {},
             keys: () async => [],
             profile: () async => {},
-            identityCleared: () async => false,
+            identityCleared: identityCleared ?? () async => false,
           )
           ..sendRetryDelays = const [
             Duration(milliseconds: 1),
@@ -96,7 +100,7 @@ void main() {
         '  The green is in the wrong place  ',
         subject: 'Map issue',
         appContext: {'course_id': '8812', 'club': '7i', 'Bad': 'dropped'},
-        metadata: {'platform': 'ios', 'appVersion': '3.0'},
+        metadata: () async => {'platform': 'ios', 'appVersion': '3.0'},
       );
       expect(id, 'cv_1');
       final post = posts.single;
@@ -194,6 +198,96 @@ void main() {
         throwsA(isA<SupportException>()),
       );
       expect(posts, isEmpty);
+    });
+
+    test('a reset while device details load: nothing is posted', () async {
+      final details = Completer<Map<String, dynamic>>();
+      final api = make((_) async => created());
+      final future = api.startConversation(
+        'account A only',
+        appContext: {'course_id': 'a'},
+        metadata: () => details.future,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await api.reset();
+      details.complete({'platform': 'ios'});
+      await expectLater(
+        future,
+        throwsA(
+          isA<SupportException>().having(
+            (e) => e.reason,
+            'reason',
+            SupportErrorReason.reset,
+          ),
+        ),
+      );
+      expect(posts, isEmpty);
+    });
+
+    test('slow device details never hold the message back', () async {
+      final api = make((_) async => created());
+      final id = await api.startConversation(
+        'hi',
+        metadata: () => Completer<Map<String, dynamic>>().future,
+        metadataTimeout: const Duration(milliseconds: 10),
+      );
+      expect(id, 'cv_1');
+      expect(jsonDecode(posts.single.body)['context'], isEmpty);
+    });
+
+    test('a locked store is not retried', () async {
+      var checks = 0;
+      final api = make(
+        (_) async => created(),
+        identityCleared: () async {
+          checks++;
+          throw SupportException(
+            0,
+            'Support storage is unavailable; try again.',
+            reason: SupportErrorReason.locked,
+          );
+        },
+      );
+      await expectLater(
+        api.startConversation('hi'),
+        throwsA(
+          isA<SupportException>().having(
+            (e) => e.reason,
+            'reason',
+            SupportErrorReason.locked,
+          ),
+        ),
+      );
+      expect(checks, 1);
+      expect(posts, isEmpty);
+    });
+
+    test('a malformed 2xx answer is not retried', () async {
+      final api = make((_) async => http.Response('{"oops":true}', 201));
+      await expectLater(
+        api.startConversation('hi'),
+        throwsA(isA<SupportException>().having((e) => e.status, 'status', 0)),
+      );
+      expect(posts.length, 1);
+      posts.clear();
+      final garbled = make((_) async => http.Response('not json', 200));
+      await expectLater(
+        garbled.startConversation('hi'),
+        throwsA(isA<SupportException>()),
+      );
+      expect(posts.length, 1);
+    });
+
+    test('a 408 and a 429 are retried', () async {
+      var calls = 0;
+      final api = make((_) async {
+        calls++;
+        if (calls == 1) return http.Response('{"error":"slow"}', 408);
+        if (calls == 2) return http.Response('{"error":"busy"}', 429);
+        return created();
+      });
+      expect(await api.startConversation('hi'), 'cv_1');
+      expect(posts.length, 3);
     });
 
     test('a reset during the retry wait stops it', () async {
