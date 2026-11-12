@@ -8,6 +8,7 @@ Pod::Spec.new do |s|
   s.author           = { 'AppRefer' => 'dev@apprefer.com' }
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*'
+  s.resource_bundles = { 'apprefer_privacy' => ['Resources/PrivacyInfo.xcprivacy'] }
   s.dependency 'Flutter'
   s.platform         = :ios, '15.0'
   s.swift_version    = '5.0'

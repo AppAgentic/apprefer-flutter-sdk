@@ -15,12 +15,15 @@ class ConversionValue {
 
   /// False after reset() until configure runs again.
   final bool Function() active;
-  bool get _allowed => storage.isSdkEnabled() && active();
+  bool _cancelled = false;
+  bool get isCancelled => _cancelled;
+  bool get _allowed => !_cancelled && storage.isSdkEnabled() && active();
   bool _inFlight = false;
   bool _rerunForced = false;
   bool _recheckScheduled = false;
   Timer? _recheckTimer;
   void cancel() {
+    _cancelled = true;
     client.cancel();
     _recheckTimer?.cancel();
     _recheckScheduled = false;
